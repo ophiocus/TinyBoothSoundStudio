@@ -1,0 +1,45 @@
+[package]
+name = "tinybooth-sound-studio"
+version = "0.1.0"
+edition = "2021"
+authors = ["ophiocus <csantanad@gmail.com>"]
+description = "Channel recorder, visualizer, and TinyBooth project exporter"
+license = "MIT"
+
+[dependencies]
+# GUI
+eframe = { version = "0.28", default-features = false, features = ["default_fonts", "glow", "persistence"] }
+egui = "0.28"
+
+# Config / IO / errors
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dirs = "5"
+rfd = "0.14"
+anyhow = "1"
+parking_lot = "0.12"
+chrono = { version = "0.4", features = ["serde"] }
+
+# Self-update
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+
+# Audio
+cpal = "0.15"
+hound = "3.5"
+rustfft = "6.2"
+biquad = "0.5"
+
+[build-dependencies]
+winres = "0.1"
+
+[package.metadata.wix]
+upgrade-guid = "48D329DD-B504-46C4-B23E-D3FDD71F4ABE"
+path-guid    = "E5C50DF6-615E-4200-85BF-46AA131EF965"
+license      = false
+eula         = false
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true

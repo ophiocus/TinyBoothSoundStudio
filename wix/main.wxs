@@ -1,0 +1,132 @@
+<?xml version='1.0' encoding='windows-1252'?>
+
+<?if $(sys.BUILDARCH) = x64 or $(sys.BUILDARCH) = arm64 ?>
+    <?define PlatformProgramFilesFolder = "ProgramFiles64Folder" ?>
+<?else ?>
+    <?define PlatformProgramFilesFolder = "ProgramFilesFolder" ?>
+<?endif ?>
+
+<Wix xmlns='http://schemas.microsoft.com/wix/2006/wi'>
+
+    <!--
+      Tokens rewritten by scripts/new_app.ps1:
+        TinyBooth Sound Studio       : display name (e.g. "My App")
+        tinyboothsoundstudio       : lowercase folder name (e.g. "myapp")
+        tinybooth-sound-studio        : executable name without .exe (matches Cargo `[[bin]]`)
+        ophiocus
+        Channel recorder, visualizer, and TinyBooth project exporter
+        https://github.com/ophiocus/TinyBoothSoundStudio
+        48D329DD-B504-46C4-B23E-D3FDD71F4ABE   : fresh UUID per app
+        E5C50DF6-615E-4200-85BF-46AA131EF965
+        374063C9-D0B6-4E16-A3EB-BA80A6D47E8B
+    -->
+    <Product
+        Id='*'
+        Name='TinyBooth Sound Studio'
+        UpgradeCode='48D329DD-B504-46C4-B23E-D3FDD71F4ABE'
+        Manufacturer='ophiocus'
+        Language='1033'
+        Codepage='1252'
+        Version='$(var.Version)'>
+
+        <Package Id='*'
+            Keywords='Installer'
+            Description='Channel recorder, visualizer, and TinyBooth project exporter'
+            Manufacturer='ophiocus'
+            InstallerVersion='450'
+            Languages='1033'
+            Compressed='yes'
+            InstallScope='perMachine'
+            SummaryCodepage='1252'
+            />
+
+        <MajorUpgrade
+            Schedule='afterInstallInitialize'
+            AllowSameVersionUpgrades='yes'
+            DowngradeErrorMessage='A newer version of [ProductName] is already installed. Setup will now exit.'/>
+
+        <Media Id='1' Cabinet='media1.cab' EmbedCab='yes' DiskPrompt='CD-ROM #1'/>
+        <Property Id='DiskPrompt' Value='tinyboothsoundstudio Installation'/>
+
+        <Directory Id='TARGETDIR' Name='SourceDir'>
+            <Directory Id='$(var.PlatformProgramFilesFolder)' Name='PFiles'>
+                <Directory Id='APPLICATIONFOLDER' Name='tinyboothsoundstudio'>
+
+                    <Directory Id='Bin' Name='bin'>
+                        <Component Id='Path' Guid='E5C50DF6-615E-4200-85BF-46AA131EF965' KeyPath='yes'>
+                            <Environment
+                                Id='PATH'
+                                Name='PATH'
+                                Value='[Bin]'
+                                Permanent='no'
+                                Part='last'
+                                Action='set'
+                                System='yes'/>
+                        </Component>
+                        <Component Id='binary0' Guid='*'>
+                            <File
+                                Id='exe0'
+                                Name='tinybooth-sound-studio.exe'
+                                DiskId='1'
+                                Source='$(var.CargoTargetBinDir)\tinybooth-sound-studio.exe'
+                                KeyPath='yes'/>
+                        </Component>
+                    </Directory>
+
+                    <Component Id='DesktopShortcut' Guid='374063C9-D0B6-4E16-A3EB-BA80A6D47E8B'>
+                        <Shortcut Id='DesktopShortcut'
+                            Name='TinyBooth Sound Studio'
+                            Description='Channel recorder, visualizer, and TinyBooth project exporter'
+                            Directory='DesktopFolder'
+                            Target='[Bin]tinybooth-sound-studio.exe'
+                            WorkingDirectory='Bin'
+                            Icon='ProductICO' />
+                        <RegistryValue Root='HKCU'
+                            Key='Software\ophiocus\TinyBooth Sound Studio'
+                            Name='DesktopShortcut'
+                            Type='integer'
+                            Value='1'
+                            KeyPath='yes' />
+                    </Component>
+                </Directory>
+            </Directory>
+            <Directory Id='DesktopFolder' Name='Desktop' />
+        </Directory>
+
+        <Feature
+            Id='Binaries'
+            Title='Application'
+            Description='Installs the application binary.'
+            Level='1'
+            ConfigurableDirectory='APPLICATIONFOLDER'
+            AllowAdvertise='no'
+            Display='expand'
+            Absent='disallow'>
+            <ComponentRef Id='binary0'/>
+            <ComponentRef Id='DesktopShortcut'/>
+
+            <Feature
+                Id='Environment'
+                Title='PATH Environment Variable'
+                Description='Add the install location to the PATH system environment variable.'
+                Level='1'
+                Absent='allow'>
+                <ComponentRef Id='Path'/>
+            </Feature>
+        </Feature>
+
+        <SetProperty Id='ARPINSTALLLOCATION' Value='[APPLICATIONFOLDER]' After='CostFinalize'/>
+
+        <Icon Id='ProductICO' SourceFile='assets\icon.ico'/>
+        <Property Id='ARPPRODUCTICON' Value='ProductICO' />
+        <Property Id='ARPHELPLINK' Value='https://github.com/ophiocus/TinyBoothSoundStudio'/>
+
+        <UI>
+            <UIRef Id='WixUI_FeatureTree'/>
+            <Publish Dialog='WelcomeDlg' Control='Next' Event='NewDialog' Value='CustomizeDlg' Order='99'>1</Publish>
+            <Publish Dialog='CustomizeDlg' Control='Back' Event='NewDialog' Value='WelcomeDlg' Order='99'>1</Publish>
+        </UI>
+
+    </Product>
+
+</Wix>
