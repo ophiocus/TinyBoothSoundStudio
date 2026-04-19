@@ -1,0 +1,77 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release
+        run: cargo build --release
+
+      - name: Install cargo-wix
+        run: cargo install cargo-wix
+
+      - name: Download WiX 3.11 portable binaries
+        shell: pwsh
+        run: |
+          $url  = 'https://github.com/wixtoolset/wix3/releases/download/wix3112rtm/wix311-binaries.zip'
+          $zip  = "$env:TEMP\wix311.zip"
+          $dest = "$env:TEMP\wix311"
+          Invoke-WebRequest $url -OutFile $zip
+          Expand-Archive $zip -DestinationPath $dest
+          echo "$dest" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Extract version from tag
+        id: version
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}" -replace '^v',''
+          # Pad to 4 segments for MSI (major.minor.patch.sub)
+          $parts = $tag -split '\.'
+          while ($parts.Count -lt 4) { $parts += '0' }
+          $msi = ($parts[0..3]) -join '.'
+          echo "msi=$msi" >> $env:GITHUB_OUTPUT
+          echo "MSI version: $msi"
+
+      - name: Build MSI installer
+        run: cargo wix --nocapture -i "${{ steps.version.outputs.msi }}" -C "-dVersion=${{ steps.version.outputs.msi }}"
+
+      - name: Upload MSI
+        uses: actions/upload-artifact@v5
+        with:
+          name: tinybooth-sound-studio-windows-msi
+          path: target/wix/*.msi
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: tinybooth-sound-studio-windows
+          path: target/release/tinybooth-sound-studio.exe
+
+  release:
+    needs: [build-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          path: artifacts
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/tinybooth-sound-studio-windows/tinybooth-sound-studio.exe
+            artifacts/tinybooth-sound-studio-windows-msi/*.msi
+          generate_release_notes: true
