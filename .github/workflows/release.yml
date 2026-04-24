@@ -47,7 +47,10 @@ jobs:
           echo "MSI version: $msi"
 
       - name: Build MSI installer
-        run: cargo wix --nocapture -i "${{ steps.version.outputs.msi }}" -C "-dVersion=${{ steps.version.outputs.msi }}"
+        # cargo-wix's -i parses as 3-part semver and rejects our 4-part
+        # MSI version. Rely on Cargo.toml for the Add/Remove Programs
+        # display version; pass the 4-part version only to WiX via -dVersion.
+        run: cargo wix --nocapture -C "-dVersion=${{ steps.version.outputs.msi }}"
 
       - name: Upload MSI
         uses: actions/upload-artifact@v5
