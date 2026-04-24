@@ -18,6 +18,17 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Verify tag matches Cargo.toml version
+        shell: pwsh
+        run: |
+          $tag   = "${{ github.ref_name }}" -replace '^v',''
+          $cargo = (Select-String -Path Cargo.toml -Pattern '^version = "(.*)"').Matches.Groups[1].Value
+          if ($tag -ne $cargo) {
+            Write-Error "tag '$tag' does not match Cargo.toml version '$cargo' — bump Cargo.toml before tagging"
+            exit 1
+          }
+          echo "Release version: $tag"
+
       - name: Build release
         run: cargo build --release
 
@@ -34,23 +45,10 @@ jobs:
           Expand-Archive $zip -DestinationPath $dest
           echo "$dest" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
-      - name: Extract version from tag
-        id: version
-        shell: pwsh
-        run: |
-          $tag = "${{ github.ref_name }}" -replace '^v',''
-          # Pad to 4 segments for MSI (major.minor.patch.sub)
-          $parts = $tag -split '\.'
-          while ($parts.Count -lt 4) { $parts += '0' }
-          $msi = ($parts[0..3]) -join '.'
-          echo "msi=$msi" >> $env:GITHUB_OUTPUT
-          echo "MSI version: $msi"
-
       - name: Build MSI installer
-        # cargo-wix's -i parses as 3-part semver and rejects our 4-part
-        # MSI version. Rely on Cargo.toml for the Add/Remove Programs
-        # display version; pass the 4-part version only to WiX via -dVersion.
-        run: cargo wix --nocapture -C "-dVersion=${{ steps.version.outputs.msi }}"
+        # cargo-wix auto-defines -dVersion from Cargo.toml's version; we no
+        # longer pass our own, which collided with candle.exe (CNDL0288).
+        run: cargo wix --nocapture
 
       - name: Upload MSI
         uses: actions/upload-artifact@v5

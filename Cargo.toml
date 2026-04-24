@@ -1,6 +1,6 @@
 [package]
 name = "tinybooth-sound-studio"
-version = "0.1.0"
+version = "0.1.2"
 edition = "2021"
 authors = ["ophiocus <csantanad@gmail.com>"]
 description = "Channel recorder, visualizer, and TinyBooth project exporter"
@@ -28,6 +28,9 @@ cpal = "0.15"
 hound = "3.5"
 rustfft = "6.2"
 biquad = "0.5"
+
+# PNG decoding for the egui viewport icon (window top-left corner).
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 [build-dependencies]
 winres = "0.1"

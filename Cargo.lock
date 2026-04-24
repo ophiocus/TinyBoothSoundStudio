@@ -3302,7 +3302,7 @@ dependencies = [
 
 [[package]]
 name = "tinybooth-sound-studio"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "biquad",
@@ -3312,6 +3312,7 @@ dependencies = [
  "eframe",
  "egui",
  "hound",
+ "image",
  "parking_lot",
  "reqwest",
  "rfd",
