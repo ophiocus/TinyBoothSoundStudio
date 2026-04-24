@@ -1,4 +1,4 @@
-use crate::audio::{self, DeviceInfo, RecordingSession, VizState};
+use crate::audio::{self, DeviceInfo, RecordingSession, SourceMode, VizState};
 use crate::config::Config;
 use crate::dsp::{self, Profile};
 use crate::export::{self, ExportFormat};
@@ -23,7 +23,7 @@ pub struct TinyBoothApp {
     // Recording state (Record tab).
     pub devices: Vec<DeviceInfo>,
     pub selected_device: Option<String>,
-    pub selected_channel: Option<u16>, // None = mix down to mono
+    pub selected_mode: SourceMode,
     pub viz: Arc<VizState>,
     pub session: Option<RecordingSession>,
     pub pending_track_name: String,
@@ -92,7 +92,7 @@ impl TinyBoothApp {
             project_dirty: false,
             devices,
             selected_device,
-            selected_channel: None,
+            selected_mode: SourceMode::Mixdown,
             viz: VizState::new(),
             session: None,
             pending_track_name: String::new(),
@@ -155,9 +155,10 @@ impl TinyBoothApp {
         };
         std::fs::create_dir_all(&self.project.root)?;
         let profile = self.active_profile().clone();
+        let mode = self.selected_mode;
         let session = audio::start_recording(
             &dev,
-            self.selected_channel,
+            mode,
             &abs,
             self.viz.clone(),
             profile.clone(),
@@ -168,6 +169,10 @@ impl TinyBoothApp {
             .strip_prefix(&self.project.root)
             .map(|p| p.to_string_lossy().replace('\\', "/"))
             .unwrap_or_else(|_| format!("tracks/{id}.wav"));
+        let channel_source = match mode {
+            SourceMode::Channel(c) => Some(c),
+            _ => None,
+        };
         self.project.tracks.push(Track {
             id: id.clone(),
             name,
@@ -175,9 +180,10 @@ impl TinyBoothApp {
             mute: false,
             gain_db: 0.0,
             sample_rate,
-            channel_source: self.selected_channel,
+            channel_source,
             duration_secs: 0.0,
             profile: Some(profile),
+            stereo: mode.is_stereo(),
         });
         self.project_dirty = true;
         self.pending_track_name.clear();

@@ -62,11 +62,15 @@ pub fn show(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
                         .clicked()
                     {
                         app.selected_device = Some(dev.name.clone());
-                        // Reset channel selection if the new device has fewer channels.
-                        if let Some(sel) = app.selected_channel {
-                            if sel >= dev.channels {
-                                app.selected_channel = None;
+                        // Reset source mode if it's no longer valid for the new device.
+                        match app.selected_mode {
+                            crate::audio::SourceMode::Channel(sel) if sel >= dev.channels => {
+                                app.selected_mode = crate::audio::SourceMode::Mixdown;
                             }
+                            crate::audio::SourceMode::Stereo if dev.channels < 2 => {
+                                app.selected_mode = crate::audio::SourceMode::Mixdown;
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -76,18 +80,32 @@ pub fn show(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
         }
     });
 
-    // ── Channel picker ──────────────────────────────────────────────
+    // ── Source mode ─────────────────────────────────────────────────
+    // Mixdown and Ch 1 are always offered. Ch 2+ appear for multi-ch devices.
+    // Stereo is offered when the device has at least 2 input channels.
     let channel_count = app
         .selected_device
         .as_ref()
         .and_then(|n| app.devices.iter().find(|d| &d.name == n))
         .map(|d| d.channels)
         .unwrap_or(0);
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
+        use crate::audio::SourceMode;
         ui.label("Source:");
-        ui.radio_value(&mut app.selected_channel, None, "All (mixdown)");
+        ui.radio_value(&mut app.selected_mode, SourceMode::Mixdown, "All (mixdown → mono)");
         for c in 0..channel_count {
-            ui.radio_value(&mut app.selected_channel, Some(c), format!("Ch {}", c + 1));
+            ui.radio_value(
+                &mut app.selected_mode,
+                SourceMode::Channel(c),
+                format!("Ch {} → mono", c + 1),
+            );
+        }
+        if channel_count >= 2 {
+            ui.radio_value(
+                &mut app.selected_mode,
+                SourceMode::Stereo,
+                "Stereo (Ch 1 + Ch 2 → L/R)",
+            );
         }
     });
 

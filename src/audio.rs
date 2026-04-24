@@ -125,12 +125,30 @@ impl Drop for RecordingSession {
     }
 }
 
-/// Start recording from the named input device. Channel selection is a
-/// 0-based index, or `None` to mixdown all channels to mono. The `profile`
-/// is frozen into a realtime filter chain that runs on the audio thread.
+/// How the cpal interleaved input buffer should be collapsed into the
+/// track(s) we actually write to disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceMode {
+    /// Sum all hardware channels to a single mono track.
+    Mixdown,
+    /// Pick one hardware channel (0-based) as a mono track.
+    Channel(u16),
+    /// Capture channels 0 and 1 as an L/R stereo track. Requires a device
+    /// with at least 2 channels.
+    Stereo,
+}
+
+impl SourceMode {
+    pub fn is_stereo(self) -> bool { matches!(self, Self::Stereo) }
+}
+
+/// Start recording from the named input device with the chosen `SourceMode`.
+/// The `profile` is frozen into a realtime filter chain that runs on the
+/// audio thread — `FilterChain` for mono modes, `FilterChainStereo` for
+/// stereo (with envelope-linked gate and compressor).
 pub fn start_recording(
     device_name: &str,
-    channel: Option<u16>,
+    mode: SourceMode,
     wav_path: &Path,
     viz: Arc<VizState>,
     profile: crate::dsp::Profile,
@@ -149,19 +167,26 @@ pub fn start_recording(
     let channels_in = config.channels;
     let sample_rate = config.sample_rate.0;
 
-    if let Some(c) = channel {
-        if c >= channels_in {
+    match mode {
+        SourceMode::Channel(c) if c >= channels_in => {
             return Err(anyhow!(
                 "device only has {channels_in} channel(s); index {c} out of range"
             ));
         }
+        SourceMode::Stereo if channels_in < 2 => {
+            return Err(anyhow!(
+                "stereo mode needs at least 2 input channels; this device reports {channels_in}"
+            ));
+        }
+        _ => {}
     }
 
     if let Some(parent) = wav_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
+    let wav_channels: u16 = if mode.is_stereo() { 2 } else { 1 };
     let spec = WavSpec {
-        channels: 1, // always write mono — selected channel or downmix
+        channels: wav_channels,
         sample_rate,
         bits_per_sample: 16,
         sample_format: WavSf::Int,
@@ -175,14 +200,28 @@ pub fn start_recording(
     viz.mono.lock().clear();
 
     let err_fn = |e| eprintln!("cpal stream error: {e}");
-    let chain = crate::dsp::FilterChain::new(profile, sample_rate);
 
-    // Build the right input callback for the hardware's sample format.
-    let stream = match sample_format {
-        SampleFormat::F32 => build_stream::<f32>(&dev, &config, channels_in, channel, writer.clone(), frames.clone(), viz.clone(), chain, err_fn)?,
-        SampleFormat::I16 => build_stream::<i16>(&dev, &config, channels_in, channel, writer.clone(), frames.clone(), viz.clone(), chain, err_fn)?,
-        SampleFormat::U16 => build_stream::<u16>(&dev, &config, channels_in, channel, writer.clone(), frames.clone(), viz.clone(), chain, err_fn)?,
-        other => return Err(anyhow!("unsupported sample format {other:?}")),
+    let stream = if mode.is_stereo() {
+        let chain = crate::dsp::FilterChainStereo::new(profile, sample_rate);
+        match sample_format {
+            SampleFormat::F32 => build_stream_stereo::<f32>(&dev, &config, channels_in, writer.clone(), frames.clone(), viz.clone(), chain, err_fn)?,
+            SampleFormat::I16 => build_stream_stereo::<i16>(&dev, &config, channels_in, writer.clone(), frames.clone(), viz.clone(), chain, err_fn)?,
+            SampleFormat::U16 => build_stream_stereo::<u16>(&dev, &config, channels_in, writer.clone(), frames.clone(), viz.clone(), chain, err_fn)?,
+            other => return Err(anyhow!("unsupported sample format {other:?}")),
+        }
+    } else {
+        let channel = match mode {
+            SourceMode::Channel(c) => Some(c),
+            SourceMode::Mixdown => None,
+            SourceMode::Stereo => unreachable!(),
+        };
+        let chain = crate::dsp::FilterChain::new(profile, sample_rate);
+        match sample_format {
+            SampleFormat::F32 => build_stream_mono::<f32>(&dev, &config, channels_in, channel, writer.clone(), frames.clone(), viz.clone(), chain, err_fn)?,
+            SampleFormat::I16 => build_stream_mono::<i16>(&dev, &config, channels_in, channel, writer.clone(), frames.clone(), viz.clone(), chain, err_fn)?,
+            SampleFormat::U16 => build_stream_mono::<u16>(&dev, &config, channels_in, channel, writer.clone(), frames.clone(), viz.clone(), chain, err_fn)?,
+            other => return Err(anyhow!("unsupported sample format {other:?}")),
+        }
     };
     stream.play()?;
 
@@ -195,7 +234,8 @@ pub fn start_recording(
     })
 }
 
-fn build_stream<T>(
+/// Mono hot path — unchanged from the pre-stereo implementation.
+fn build_stream_mono<T>(
     dev: &cpal::Device,
     config: &StreamConfig,
     channels_in: u16,
@@ -235,6 +275,48 @@ where
                 let sample_i16 = (clamped * i16::MAX as f32) as i16;
                 let _ = w.write_sample(sample_i16);
                 viz.push_and_peak(clamped);
+            }
+            frames.fetch_add(frame_count as u64, Ordering::Relaxed);
+        },
+        err_fn,
+        None,
+    )?;
+    Ok(stream)
+}
+
+/// Stereo hot path. Reads channels 0 and 1 from the interleaved buffer,
+/// runs the stereo filter chain, writes interleaved L R L R to the WAV,
+/// and feeds the visualiser a mono (L+R)/2 mix.
+fn build_stream_stereo<T>(
+    dev: &cpal::Device,
+    config: &StreamConfig,
+    channels_in: u16,
+    writer: Arc<Mutex<Option<WavWriter<BufWriter<File>>>>>,
+    frames: Arc<std::sync::atomic::AtomicU64>,
+    viz: Arc<VizState>,
+    mut chain: crate::dsp::FilterChainStereo,
+    err_fn: impl FnMut(cpal::StreamError) + Send + 'static,
+) -> Result<Stream>
+where
+    T: cpal::Sample + cpal::SizedSample + ToF32 + Send + 'static,
+{
+    let ch = channels_in as usize;
+    let stream = dev.build_input_stream(
+        config,
+        move |data: &[T], _| {
+            let frame_count = data.len() / ch.max(1);
+            let mut writer_lock = writer.lock();
+            let Some(w) = writer_lock.as_mut() else { return };
+            for i in 0..frame_count {
+                let frame_start = i * ch;
+                let l_in = data[frame_start].to_f32();
+                let r_in = data[frame_start + 1].to_f32();
+                let (l, r) = chain.process(l_in, r_in);
+                let l_c = l.clamp(-1.0, 1.0);
+                let r_c = r.clamp(-1.0, 1.0);
+                let _ = w.write_sample((l_c * i16::MAX as f32) as i16);
+                let _ = w.write_sample((r_c * i16::MAX as f32) as i16);
+                viz.push_and_peak((l_c + r_c) * 0.5);
             }
             frames.fetch_add(frame_count as u64, Ordering::Relaxed);
         },

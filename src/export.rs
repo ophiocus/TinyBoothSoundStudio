@@ -65,28 +65,34 @@ pub struct ExportOptions {
     pub out_path: PathBuf,
 }
 
-/// Mix unmuted tracks to mono f32 at the project's sample rate and write
-/// `options.out_path` in the requested format.
+/// Mix unmuted tracks at the project's sample rate and write `options.out_path`
+/// in the requested format. The output is stereo iff any unmuted source track
+/// is stereo; otherwise mono. Mono inputs in a stereo mix are centre-panned,
+/// stereo inputs in a mono mix are averaged to (L+R)/2.
 pub fn export(project: &Project, options: &ExportOptions) -> Result<()> {
     let active: Vec<&Track> = project.tracks.iter().filter(|t| !t.mute).collect();
     if active.is_empty() {
         return Err(anyhow!("nothing to export — no unmuted tracks"));
     }
 
-    // Decide the mix sample rate: use the first track's rate as the reference.
-    let (mix, sample_rate) = mixdown(project, &active)?;
+    let (mix, sample_rate, channels) = mixdown(project, &active)?;
     match options.format {
-        ExportFormat::Wav => write_wav_16(&options.out_path, &mix, sample_rate)?,
-        _ => encode_via_ffmpeg(&mix, sample_rate, options)?,
+        ExportFormat::Wav => write_wav_16(&options.out_path, &mix, sample_rate, channels)?,
+        _ => encode_via_ffmpeg(&mix, sample_rate, channels, options)?,
     }
     Ok(())
 }
 
-/// Sum all non-muted tracks into a single mono f32 buffer, applying per-track
-/// linear gain. All tracks must share a sample rate (first track wins; any
-/// track with a differing rate yields an error — keep the tool honest).
-fn mixdown(project: &Project, tracks: &[&Track]) -> Result<(Vec<f32>, u32)> {
+/// Sum all non-muted tracks into an interleaved f32 buffer (mono or stereo),
+/// applying per-track linear gain. All tracks must share a sample rate
+/// (first track wins; differing rates error out — resampling not supported).
+///
+/// Returns `(interleaved_samples, sample_rate, out_channels)` where
+/// `out_channels` is `2` if any input track was stereo, else `1`.
+fn mixdown(project: &Project, tracks: &[&Track]) -> Result<(Vec<f32>, u32, u16)> {
     let mut sample_rate = 0u32;
+    let is_stereo_mix = tracks.iter().any(|t| t.stereo);
+    let out_channels: u16 = if is_stereo_mix { 2 } else { 1 };
     let mut per_track: Vec<Vec<f32>> = Vec::with_capacity(tracks.len());
 
     for t in tracks {
@@ -103,7 +109,7 @@ fn mixdown(project: &Project, tracks: &[&Track]) -> Result<(Vec<f32>, u32)> {
             ));
         }
         let gain = db_to_lin(t.gain_db);
-        let samples: Vec<f32> = match spec.sample_format {
+        let raw: Vec<f32> = match spec.sample_format {
             SampleFormat::Int => reader
                 .into_samples::<i32>()
                 .filter_map(|r| r.ok())
@@ -115,7 +121,25 @@ fn mixdown(project: &Project, tracks: &[&Track]) -> Result<(Vec<f32>, u32)> {
                 .map(|s| s * gain)
                 .collect(),
         };
-        per_track.push(samples);
+
+        let in_channels = spec.channels.max(1) as usize;
+        let frame_count = raw.len() / in_channels;
+        let mut buf = Vec::with_capacity(frame_count * out_channels as usize);
+        for f in 0..frame_count {
+            let base = f * in_channels;
+            let (l, r) = if in_channels >= 2 {
+                (raw[base], raw[base + 1])
+            } else {
+                (raw[base], raw[base])
+            };
+            if is_stereo_mix {
+                buf.push(l);
+                buf.push(r);
+            } else {
+                buf.push(0.5 * (l + r));
+            }
+        }
+        per_track.push(buf);
     }
 
     let longest = per_track.iter().map(|v| v.len()).max().unwrap_or(0);
@@ -125,21 +149,21 @@ fn mixdown(project: &Project, tracks: &[&Track]) -> Result<(Vec<f32>, u32)> {
             mix[i] += *s;
         }
     }
-    // Soft limit at [-1.0, 1.0] — tracks can sum above unity.
+    // Soft-limit to [-1, 1].
     let peak = mix.iter().copied().fold(0.0f32, |a, b| a.max(b.abs()));
     if peak > 1.0 {
         let k = 1.0 / peak;
         for s in &mut mix { *s *= k; }
     }
-    Ok((mix, sample_rate))
+    Ok((mix, sample_rate, out_channels))
 }
 
 fn db_to_lin(db: f32) -> f32 { 10f32.powf(db / 20.0) }
 
-fn write_wav_16(path: &Path, samples: &[f32], sample_rate: u32) -> Result<()> {
+fn write_wav_16(path: &Path, samples: &[f32], sample_rate: u32, channels: u16) -> Result<()> {
     if let Some(p) = path.parent() { std::fs::create_dir_all(p)?; }
     let spec = WavSpec {
-        channels: 1,
+        channels,
         sample_rate,
         bits_per_sample: 16,
         sample_format: SampleFormat::Int,
@@ -154,19 +178,24 @@ fn write_wav_16(path: &Path, samples: &[f32], sample_rate: u32) -> Result<()> {
 }
 
 /// Pipe a temporary WAV through ffmpeg. Returns a friendly error if ffmpeg
-/// isn't findable.
-fn encode_via_ffmpeg(samples: &[f32], sample_rate: u32, opt: &ExportOptions) -> Result<()> {
+/// isn't findable. The temp file preserves the mix channel count so the
+/// encoder sees mono or stereo as appropriate.
+fn encode_via_ffmpeg(
+    samples: &[f32],
+    sample_rate: u32,
+    channels: u16,
+    opt: &ExportOptions,
+) -> Result<()> {
     let ffmpeg = find_ffmpeg().ok_or_else(|| anyhow!(
         "ffmpeg not found. Drop ffmpeg.exe next to the app (or into ./ffmpeg/bin/), \
          or install it on your PATH, then try again."
     ))?;
 
-    // Write the mixdown to a temp WAV first, then have ffmpeg read that file.
     let tmp = std::env::temp_dir().join(format!(
         "tinybooth-export-{}.wav",
         std::process::id()
     ));
-    write_wav_16(&tmp, samples, sample_rate)?;
+    write_wav_16(&tmp, samples, sample_rate, channels)?;
 
     if let Some(p) = opt.out_path.parent() { std::fs::create_dir_all(p)?; }
 

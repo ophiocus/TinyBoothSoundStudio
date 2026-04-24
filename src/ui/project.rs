@@ -63,9 +63,13 @@ pub fn show(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
                 {
                     app.project_dirty = true;
                 }
-                let src = match t.channel_source {
-                    Some(c) => format!("Ch {}", c + 1),
-                    None => "mix".to_string(),
+                let src = if t.stereo {
+                    "stereo".to_string()
+                } else {
+                    match t.channel_source {
+                        Some(c) => format!("Ch {}", c + 1),
+                        None => "mix".to_string(),
+                    }
                 };
                 ui.label(src);
                 ui.label(format!("{} Hz", t.sample_rate));

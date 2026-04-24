@@ -26,6 +26,8 @@ pub struct Track {
     pub mute: bool,
     pub gain_db: f32,
     pub sample_rate: u32,
+    /// For mono takes: which hardware channel (or `None` for mixdown).
+    /// For stereo takes: `None` (captures channels 0 and 1 as L/R).
     pub channel_source: Option<u16>,
     #[serde(default)]
     pub duration_secs: f32,
@@ -34,6 +36,10 @@ pub struct Track {
     /// presets file later changes.
     #[serde(default)]
     pub profile: Option<crate::dsp::Profile>,
+    /// True when the underlying WAV has 2 channels (L/R).
+    /// Added in v0.2; older manifests default to false (mono).
+    #[serde(default)]
+    pub stereo: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

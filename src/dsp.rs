@@ -288,3 +288,123 @@ fn time_coef(ms: f32, sample_rate: f32) -> f32 {
 
 fn db_to_lin(db: f32) -> f32 { 10f32.powf(db / 20.0) }
 fn lin_to_db(lin: f32) -> f32 { 20.0 * lin.max(1e-9).log10() }
+
+// ───────────────────── stereo chain ─────────────────────
+
+/// Stereo sibling of `FilterChain`.
+///
+/// Design choices:
+///   - HPF runs independently per channel (no cross-channel state).
+///   - Gate and compressor run envelope detection on `max(|L|, |R|)`
+///     and apply the same gain to both channels. This preserves stereo
+///     image — a gate duck or compressor squish never ducks one side
+///     while leaving the other open.
+///   - Mono `FilterChain` is left untouched; recording into a mono WAV
+///     still uses the mono hot path.
+pub struct FilterChainStereo {
+    sample_rate: f32,
+    profile: Profile,
+
+    hpf_l: Option<DirectForm2Transposed<f32>>,
+    hpf_r: Option<DirectForm2Transposed<f32>>,
+
+    gate_env: f32,
+    gate_gain: f32,
+
+    comp_env: f32,
+    comp_gain: f32,
+}
+
+impl FilterChainStereo {
+    pub fn new(profile: Profile, sample_rate: u32) -> Self {
+        let sr = sample_rate as f32;
+        let build_hpf = || {
+            Coefficients::<f32>::from_params(
+                Type::HighPass,
+                sr.hz(),
+                profile.hpf_hz.max(10.0).hz(),
+                Q_BUTTERWORTH_F32,
+            )
+            .ok()
+            .map(DirectForm2Transposed::<f32>::new)
+        };
+        let (hpf_l, hpf_r) = if profile.hpf_enabled {
+            (build_hpf(), build_hpf())
+        } else {
+            (None, None)
+        };
+        Self {
+            sample_rate: sr,
+            profile,
+            hpf_l,
+            hpf_r,
+            gate_env: 0.0,
+            gate_gain: 1.0,
+            comp_env: 0.0,
+            comp_gain: 1.0,
+        }
+    }
+
+    pub fn process(&mut self, l: f32, r: f32) -> (f32, f32) {
+        let ig = db_to_lin(self.profile.input_gain_db);
+        let mut l = l * ig;
+        let mut r = r * ig;
+
+        if let Some(h) = self.hpf_l.as_mut() { l = h.run(l); }
+        if let Some(h) = self.hpf_r.as_mut() { r = h.run(r); }
+
+        if self.profile.gate_enabled {
+            let g = self.gate_gain_update(l, r);
+            l *= g;
+            r *= g;
+        }
+
+        if self.profile.compressor_enabled {
+            let g = self.comp_gain_update(l, r);
+            let makeup = db_to_lin(self.profile.compressor_makeup_db);
+            l *= g * makeup;
+            r *= g * makeup;
+        }
+
+        (l, r)
+    }
+
+    fn gate_gain_update(&mut self, l: f32, r: f32) -> f32 {
+        let p = &self.profile;
+        let attack = time_coef(p.gate_attack_ms, self.sample_rate);
+        let release = time_coef(p.gate_release_ms, self.sample_rate);
+        let det = l.abs().max(r.abs());
+        self.gate_env = if det > self.gate_env {
+            attack * self.gate_env + (1.0 - attack) * det
+        } else {
+            release * self.gate_env + (1.0 - release) * det
+        };
+        let target = if lin_to_db(self.gate_env.max(1e-9)) < p.gate_threshold_db {
+            0.0
+        } else {
+            1.0
+        };
+        let smooth = if target > self.gate_gain { attack } else { release };
+        self.gate_gain = smooth * self.gate_gain + (1.0 - smooth) * target;
+        self.gate_gain
+    }
+
+    fn comp_gain_update(&mut self, l: f32, r: f32) -> f32 {
+        let p = &self.profile;
+        let attack = time_coef(p.compressor_attack_ms, self.sample_rate);
+        let release = time_coef(p.compressor_release_ms, self.sample_rate);
+        let det = l.abs().max(r.abs());
+        self.comp_env = if det > self.comp_env {
+            attack * self.comp_env + (1.0 - attack) * det
+        } else {
+            release * self.comp_env + (1.0 - release) * det
+        };
+        let env_db = lin_to_db(self.comp_env.max(1e-9));
+        let excess = (env_db - p.compressor_threshold_db).max(0.0);
+        let reduction_db = excess * (1.0 - 1.0 / p.compressor_ratio.max(1.0));
+        let target = db_to_lin(-reduction_db);
+        let smooth = if target < self.comp_gain { attack } else { release };
+        self.comp_gain = smooth * self.comp_gain + (1.0 - smooth) * target;
+        self.comp_gain
+    }
+}
