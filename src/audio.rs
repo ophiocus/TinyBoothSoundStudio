@@ -17,7 +17,7 @@ use std::collections::VecDeque;
 use std::fs::File;
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 
 /// Keep ~4 s of mono audio for the live visualizer at 48 kHz.
@@ -55,47 +55,95 @@ pub fn list_input_devices() -> Vec<DeviceInfo> {
     out
 }
 
-/// Shared live-audio state: a mono ring buffer for the visualizer, plus
-/// peak-level atomics. Updated by the audio thread, read by the UI thread.
+/// Shared live-audio state for the visualiser.
+///
+/// Carries two ring buffers (`left` always populated; `right` only in stereo
+/// mode) plus per-side peak atomics and a `stereo` flag the UI reads to pick
+/// its layout. Updated on the audio thread, read on the UI thread.
 pub struct VizState {
-    pub mono: Mutex<VecDeque<f32>>,
+    pub left: Mutex<VecDeque<f32>>,
+    pub right: Mutex<VecDeque<f32>>,
     pub sample_rate: AtomicU32,
-    peak_times_1000: AtomicU32, // 0..=1000, scaled absolute peak
+    pub stereo: AtomicBool,
+    peak_l_x1000: AtomicU32,
+    peak_r_x1000: AtomicU32,
 }
 
 impl VizState {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
-            mono: Mutex::new(VecDeque::with_capacity(VIZ_BUFFER_CAP)),
+            left: Mutex::new(VecDeque::with_capacity(VIZ_BUFFER_CAP)),
+            right: Mutex::new(VecDeque::with_capacity(VIZ_BUFFER_CAP)),
             sample_rate: AtomicU32::new(48_000),
-            peak_times_1000: AtomicU32::new(0),
+            stereo: AtomicBool::new(false),
+            peak_l_x1000: AtomicU32::new(0),
+            peak_r_x1000: AtomicU32::new(0),
         })
     }
 
-    pub fn peak(&self) -> f32 {
-        self.peak_times_1000.load(Ordering::Relaxed) as f32 / 1000.0
+    pub fn is_stereo(&self) -> bool { self.stereo.load(Ordering::Relaxed) }
+
+    pub fn peak_left(&self) -> f32 {
+        self.peak_l_x1000.load(Ordering::Relaxed) as f32 / 1000.0
+    }
+    pub fn peak_right(&self) -> f32 {
+        self.peak_r_x1000.load(Ordering::Relaxed) as f32 / 1000.0
     }
 
-    fn push_and_peak(&self, frame: f32) {
-        let mut q = self.mono.lock();
-        if q.len() == VIZ_BUFFER_CAP {
-            q.pop_front();
-        }
-        q.push_back(frame);
-        let absf = frame.abs().min(1.0);
-        let curr = self.peak_times_1000.load(Ordering::Relaxed);
-        let new = (absf * 1000.0) as u32;
-        // Fast attack, slow release.
-        let next = if new > curr { new } else { curr.saturating_sub(4) };
-        self.peak_times_1000.store(next, Ordering::Relaxed);
+    /// Reset state for a new recording session.
+    pub fn reset(&self, stereo: bool, sample_rate: u32) {
+        self.stereo.store(stereo, Ordering::Relaxed);
+        self.sample_rate.store(sample_rate, Ordering::Relaxed);
+        self.left.lock().clear();
+        self.right.lock().clear();
+        self.peak_l_x1000.store(0, Ordering::Relaxed);
+        self.peak_r_x1000.store(0, Ordering::Relaxed);
     }
 
-    pub fn snapshot(&self, n: usize) -> Vec<f32> {
-        let q = self.mono.lock();
-        let len = q.len();
-        let start = len.saturating_sub(n);
-        q.iter().skip(start).copied().collect()
+    /// Push a mono frame — only the left buffer + left peak update.
+    fn push_mono(&self, s: f32) {
+        push_into(&self.left, s);
+        update_peak(&self.peak_l_x1000, s);
     }
+
+    /// Push a stereo frame — both buffers + both peaks update independently.
+    fn push_stereo(&self, l: f32, r: f32) {
+        push_into(&self.left, l);
+        push_into(&self.right, r);
+        update_peak(&self.peak_l_x1000, l);
+        update_peak(&self.peak_r_x1000, r);
+    }
+
+    /// Snapshot the last `n` samples of the left (or only) channel.
+    pub fn snapshot_left(&self, n: usize) -> Vec<f32> {
+        snapshot_q(&self.left, n)
+    }
+    /// Snapshot the last `n` samples of the right channel (empty if mono).
+    pub fn snapshot_right(&self, n: usize) -> Vec<f32> {
+        snapshot_q(&self.right, n)
+    }
+}
+
+fn push_into(q: &Mutex<VecDeque<f32>>, s: f32) {
+    let mut q = q.lock();
+    if q.len() == VIZ_BUFFER_CAP { q.pop_front(); }
+    q.push_back(s);
+}
+
+fn snapshot_q(q: &Mutex<VecDeque<f32>>, n: usize) -> Vec<f32> {
+    let q = q.lock();
+    let len = q.len();
+    let start = len.saturating_sub(n);
+    q.iter().skip(start).copied().collect()
+}
+
+fn update_peak(atomic: &AtomicU32, frame: f32) {
+    let absf = frame.abs().min(1.0);
+    let curr = atomic.load(Ordering::Relaxed);
+    let new = (absf * 1000.0) as u32;
+    // Fast attack, slow release.
+    let next = if new > curr { new } else { curr.saturating_sub(4) };
+    atomic.store(next, Ordering::Relaxed);
 }
 
 /// Active recording — writes WAV on the audio thread, drops to stop.
@@ -196,8 +244,7 @@ pub fn start_recording(
     )));
     let frames = Arc::new(std::sync::atomic::AtomicU64::new(0));
 
-    viz.sample_rate.store(sample_rate, Ordering::Relaxed);
-    viz.mono.lock().clear();
+    viz.reset(mode.is_stereo(), sample_rate);
 
     let err_fn = |e| eprintln!("cpal stream error: {e}");
 
@@ -274,7 +321,7 @@ where
                 let clamped = processed.clamp(-1.0, 1.0);
                 let sample_i16 = (clamped * i16::MAX as f32) as i16;
                 let _ = w.write_sample(sample_i16);
-                viz.push_and_peak(clamped);
+                viz.push_mono(clamped);
             }
             frames.fetch_add(frame_count as u64, Ordering::Relaxed);
         },
@@ -316,7 +363,7 @@ where
                 let r_c = r.clamp(-1.0, 1.0);
                 let _ = w.write_sample((l_c * i16::MAX as f32) as i16);
                 let _ = w.write_sample((r_c * i16::MAX as f32) as i16);
-                viz.push_and_peak((l_c + r_c) * 0.5);
+                viz.push_stereo(l_c, r_c);
             }
             frames.fetch_add(frame_count as u64, Ordering::Relaxed);
         },

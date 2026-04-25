@@ -149,15 +149,41 @@ pub fn show(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
     ui.add_space(8.0);
 
     // ── Visualisation ───────────────────────────────────────────────
-    let samples = app.viz.snapshot(app.viz.sample_rate.load(std::sync::atomic::Ordering::Relaxed) as usize * 2);
-    ui.label("Waveform (last 2 seconds)");
-    viz::draw_waveform(ui, &samples, 140.0);
-    ui.add_space(6.0);
-    ui.label("Spectrum");
-    viz::draw_spectrum(ui, &samples, 140.0);
-    ui.add_space(6.0);
-    ui.label(format!("Input level — peak {:.2}", app.viz.peak()));
-    viz::draw_meter(ui, app.viz.peak());
+    let sample_rate = app.viz.sample_rate.load(std::sync::atomic::Ordering::Relaxed) as usize;
+    let window = sample_rate * 2; // 2 seconds
+    let left = app.viz.snapshot_left(window);
+    let stereo = app.viz.is_stereo();
+
+    if stereo {
+        let right = app.viz.snapshot_right(window);
+        ui.label("Waveform — L (last 2 seconds)");
+        viz::draw_waveform(ui, &left, 80.0);
+        ui.add_space(2.0);
+        ui.label("Waveform — R");
+        viz::draw_waveform(ui, &right, 80.0);
+        ui.add_space(6.0);
+        ui.label("Spectrum (L+R sum)");
+        // Sum L+R for the spectrum — overlapping stereo spectra are visually noisy.
+        let sum: Vec<f32> = left.iter().zip(right.iter()).map(|(l, r)| 0.5 * (l + r)).collect();
+        viz::draw_spectrum(ui, &sum, 140.0);
+        ui.add_space(6.0);
+        let pl = app.viz.peak_left();
+        let pr = app.viz.peak_right();
+        ui.label(format!("Input level — L {:.2}   R {:.2}", pl, pr));
+        viz::draw_meter(ui, pl);
+        ui.add_space(2.0);
+        viz::draw_meter(ui, pr);
+    } else {
+        ui.label("Waveform (last 2 seconds)");
+        viz::draw_waveform(ui, &left, 140.0);
+        ui.add_space(6.0);
+        ui.label("Spectrum");
+        viz::draw_spectrum(ui, &left, 140.0);
+        ui.add_space(6.0);
+        let p = app.viz.peak_left();
+        ui.label(format!("Input level — peak {:.2}", p));
+        viz::draw_meter(ui, p);
+    }
 
     ui.add_space(8.0);
     ui.horizontal_wrapped(|ui| {
