@@ -27,6 +27,21 @@ Opinionated presets for shoestring-budget capture. Guitar is the default — the
 
 Every parameter is editable under **Admin → Recording-tone profiles…** and persists to `%APPDATA%\TinyBooth Sound Studio\profiles.json`.
 
+## Documentation
+
+The full manual lives at [`docs/manual/`](docs/manual/) — twelve chapters covering every shipped feature, with appendices on troubleshooting and file formats. The same Markdown files are embedded into the binary at compile time, so the in-app **Help → Manual…** window (or **F1** anywhere) shows byte-identical content. Edit a chapter and it updates both surfaces on the next build.
+
+| Welcome | Reference | Appendix |
+|---|---|---|
+| [Welcome](docs/manual/00-index.md) | [Recording](docs/manual/02-recording.md) | [Troubleshooting](docs/manual/appendix-a-troubleshooting.md) |
+| [Getting started](docs/manual/01-getting-started.md) | [Recording tones](docs/manual/03-recording-tones.md) | [File formats](docs/manual/appendix-b-file-formats.md) |
+| | [Editing profiles (Admin)](docs/manual/04-admin.md) | |
+| | [Projects](docs/manual/05-projects.md) | |
+| | [Export](docs/manual/06-export.md) | |
+| | [Importing Suno stems](docs/manual/07-suno-import.md) | |
+| | [Self-update](docs/manual/08-self-update.md) | |
+| | [Using this manual](docs/manual/09-using-this-manual.md) | |
+
 ## Install
 
 Grab the latest `.msi` from [Releases](https://github.com/ophiocus/TinyBoothSoundStudio/releases) and run it. The installer places the app in Program Files with a Desktop shortcut; the built-in updater surfaces new releases on each launch.
@@ -59,7 +74,14 @@ cargo wix
 │   ├── project.rs            # .tinybooth JSON manifest
 │   ├── export.rs             # WAV native + ffmpeg subprocess
 │   ├── git_update.rs         # GitHub releases self-updater
-│   └── ui/                   # record, project, export, admin, viz
+│   ├── manual.rs             # in-app manual: include_str! of docs/manual/
+│   ├── suno_import.rs        # Suno stem-bundle ingester
+│   └── ui/                   # record, project, export, admin, manual, viz
+├── docs/
+│   ├── manual/               # ← single source of truth, browsable on GitHub,
+│   │                         #   embedded into the exe at build time
+│   ├── feature-requests/
+│   └── research/
 ├── wix/main.wxs              # MSI installer
 ├── assets/                   # icon, banner, source PNGs
 └── .github/workflows/        # tag-push → MSI → GitHub Release
