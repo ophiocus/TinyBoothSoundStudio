@@ -17,6 +17,75 @@ use std::path::{Path, PathBuf};
 pub const MANIFEST_NAME: &str = "project.tinybooth";
 pub const TRACKS_DIR: &str = "tracks";
 
+/// What kind of source a track came from. Drives downstream UX (e.g. the
+/// Clean tab can dispatch role-aware processing on Suno stems while
+/// leaving Recorded takes alone).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind")]
+pub enum TrackSource {
+    /// Default — captured by TinyBooth's own Record tab.
+    Recorded,
+    /// Imported from a Suno stem bundle.
+    SunoStem {
+        role: StemRole,
+        original_filename: String,
+    },
+}
+
+impl Default for TrackSource {
+    fn default() -> Self { Self::Recorded }
+}
+
+/// Stem identity inferred from a Suno bundle's filenames. Covers the
+/// documented 12-stem set plus the legacy 2-stem export and a Master/
+/// Unknown catch-all. Filename → `StemRole` matching is deliberately
+/// loose (case-insensitive substring) — Suno's schema is not officially
+/// published.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum StemRole {
+    Vocals,
+    BackingVocals,
+    Drums,
+    Bass,
+    ElectricGuitar,
+    AcousticGuitar,
+    Keys,
+    Synth,
+    Pads,
+    Strings,
+    Brass,
+    Percussion,
+    FxOther,
+    /// Legacy 2-stem export's non-vocal track.
+    Instrumental,
+    /// Some bundles include the rendered master alongside the stems.
+    Master,
+    Unknown,
+}
+
+impl StemRole {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Vocals => "Vocals",
+            Self::BackingVocals => "Backing Vocals",
+            Self::Drums => "Drums",
+            Self::Bass => "Bass",
+            Self::ElectricGuitar => "Electric Guitar",
+            Self::AcousticGuitar => "Acoustic Guitar",
+            Self::Keys => "Keys",
+            Self::Synth => "Synth / Lead",
+            Self::Pads => "Pads / Chords",
+            Self::Strings => "Strings",
+            Self::Brass => "Brass / Wind",
+            Self::Percussion => "Percussion",
+            Self::FxOther => "FX / Other",
+            Self::Instrumental => "Instrumental",
+            Self::Master => "Master",
+            Self::Unknown => "Unknown",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Track {
     pub id: String,
@@ -40,6 +109,10 @@ pub struct Track {
     /// Added in v0.2; older manifests default to false (mono).
     #[serde(default)]
     pub stereo: bool,
+    /// Where this track originated (recorded vs. imported Suno stem).
+    /// Older manifests default to `Recorded`.
+    #[serde(default)]
+    pub source: TrackSource,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

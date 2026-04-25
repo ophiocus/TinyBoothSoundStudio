@@ -4,7 +4,7 @@
 |---|---|
 | **Request ID** | TBSS-FR-0001 |
 | **Title** | Suno cleanup mode |
-| **Status** | Proposed |
+| **Status** | Proposed (revised 2026-04-24, this session) |
 | **Date filed** | 2026-04-24 |
 | **Author** | Claude (authoring assistant) on behalf of project owner |
 | **Session serial** | `CLAUDE-2026-04-24-SUNO-CLEAN-RFC-0001` |
@@ -110,6 +110,8 @@ These values are consensus-derived from six public guides (see `I:/Suno_promptin
 
 ## 7. Phased lift plan — advanced restoration
 
+**Revised 2026-04-24 (this session):** original Phase D proposed local stem separation via Demucs/ONNX. That has been replaced — Suno separates stems server-side and exports them directly. Local separation would re-do work the user already paid for, at meaningful licensing and download-UX cost. The new D ingests Suno's bundle.
+
 Ordered cheapest-first. Each phase is independently shippable after MVP.
 
 | Phase | Feature | Lift | Crates / infra |
@@ -117,13 +119,92 @@ Ordered cheapest-first. Each phase is independently shippable after MVP.
 | A | LUFS metering + target normalization | ≈1 day, ~150 LOC | `ebur128` (MIT) |
 | B | Match-EQ to user-supplied reference | 3–5 days, ~300 LOC | `rustfft` (in tree) |
 | C | Pure-DSP de-reverb | ~1 week, ~400 LOC | `rustfft` |
-| D | Stem separation | 2–3 weeks, ~800 LOC | `ort` (ONNX Runtime, Apache-2.0) + Demucs htdemucs_ft ONNX export, ~80 MB model, first-run download to `%APPDATA%\TinyBooth Sound Studio\models\` |
-| E | High-frequency regeneration | 3–4 weeks | Same ONNX infra as D, second model; license pick between NVSR (MIT) / BigVGAN+ (MIT+) — AudioSR excluded due to non-commercial S-Lab license |
+| **D** | **Suno stem bundle ingestion** (replaces local separation) | **~3 days, ~400 LOC** | `zip` (single new dep) |
+| E | High-frequency regeneration | 3–4 weeks | `ort` (ONNX), NVSR or BigVGAN+ (license pick) |
 | F | Pure-DSP de-chirp / transient smoothing | 1–2 weeks + tuning, ~500 LOC | `rustfft` |
 
 **Recommended sequencing:** MVP → A → B → C → D → E → F.
 
-Rationale: A–C give visible user wins without architectural change. D introduces ONNX runtime once, then E borrows it cheaply. F is last because it's the hardest to tune without over-dulling transients.
+Rationale: A–C give visible user wins without architectural change. D used to introduce the ONNX runtime; with the ingestion redesign, D ships in days with no ML and no model downloads. E now bears the ONNX integration cost on its own (it's the only remaining ML feature); whether E ships at all becomes a separate decision based on whether HF regen on a Suno master is worth the lift. F unchanged.
+
+### 7.D Suno stem bundle ingestion (revised)
+
+**Problem:** Suno's web UI lets Pro/Premier users export per-track stems as a zip archive ("Download All") or per-stem WAV/MP3 files. Today TinyBooth has no path to consume these — users would have to manually create a project, drop each WAV in, name the tracks, and tag the roles by hand.
+
+**Proposal:** add a `File → Import Suno stems…` action with two entry points (folder, zip). Detected stems become `Track` rows in a fresh `.tinybooth` project, each with a `TrackSource::SunoStem { role, original_filename }` so downstream tooling (the cleanup chain in MVP, future per-stem profile selection, etc.) can dispatch on stem identity rather than guessing from filename at every read.
+
+**File-format expectations** — sourced from the project's research doc (`I:/TinyBoothSoundStudio/docs/research/suno-stems.md`, separately filed) and surfaced here as constraints:
+
+- Filenames are **advisory**, lowercase, simple labels (`vocals.wav`, `drums.wav`, `bass.wav`, …). Schema not officially published. **Match by case-insensitive substring**, never exact equality. Handle numeric suffixes (`drums_1.wav`, `drums_2.wav`).
+- Format may be WAV or MP3. **Read WAV headers for sample rate, bit depth, channel count** — don't trust filename or assume 44.1 kHz / 16-bit. (Subset shipped: WAV only for v1; MP3 deferred.)
+- Tempo-Locked WAV variants exist and are time-stretched. They will NOT sum to the rendered master and **must be skipped** by the ingester — detect by filename hint (`tempo*locked` substring) and exclude.
+- Stems are nominally time-aligned, but **community reports occasional few-sample offsets**. The ingester does not attempt to correct these; user can nudge per-track gain/offset in the existing Project tab.
+- Stems do NOT sum bit-exactly to the master (mastering chain runs on the rendered master only). Don't surface "null-test" as a quality gate; it is a "did Suno's separator misbehave on this track" diagnostic at most.
+
+**Stem-role enum (`StemRole`)** — covers the documented 12-stem set plus the legacy 2-stem mode:
+
+```
+Vocals, BackingVocals, Drums, Bass, ElectricGuitar, AcousticGuitar,
+Keys, Synth, Pads, Strings, Brass, Percussion, FxOther,
+Instrumental,  // for the legacy 2-stem export
+Master,        // when the bundle includes the rendered master
+Unknown        // catch-all for anything the matcher can't classify
+```
+
+**Filename → role mapping** (initial, conservative):
+
+| Substring (case-insensitive) | StemRole |
+|---|---|
+| `vocal` AND `back` | BackingVocals |
+| `vocal` (else) | Vocals |
+| `drum` | Drums |
+| `bass` | Bass |
+| `electric` AND `guitar` | ElectricGuitar |
+| `acoustic` AND `guitar` | AcousticGuitar |
+| `key` or `piano` | Keys |
+| `synth` or `lead` | Synth |
+| `pad` or `chord` | Pads |
+| `string` | Strings |
+| `brass` or `wood` | Brass |
+| `perc` | Percussion |
+| `fx` or `other` | FxOther |
+| `instrumental` | Instrumental |
+| `master` or `mix` | Master |
+| (anything else) | Unknown |
+
+**Project-format extension:**
+
+```rust
+#[serde(tag = "kind")]
+pub enum TrackSource {
+    Recorded,                                                    // default
+    SunoStem { role: StemRole, original_filename: String },
+}
+
+// Track gains:
+#[serde(default)]
+pub source: TrackSource,
+```
+
+`#[serde(default)]` on the new field keeps every existing `.tinybooth` manifest deserialising cleanly.
+
+**Ingestion flow:**
+
+1. User picks a folder OR a zip via File menu.
+2. Ingester walks the source: zips are streamed via the `zip` crate; for each entry that ends in `.wav` and isn't a Tempo-Locked variant, the file is extracted into `<project>/tracks/`.
+3. Each retained file is hound-opened to read sample rate / bit depth / channel count / duration.
+4. Filename → `StemRole` matcher tags the file.
+5. A new `Project` is created with one `Track` per detected stem; the project root is a sibling of the source (or, for zips, named after the zip). Manifest written to disk.
+6. App opens the new project; user is now in the Project tab with everything ready.
+
+**Out of scope for v1:**
+
+- MP3 ingestion (defer until users ask — Suno's WAV path is the recommended one for any quality-sensitive workflow).
+- Null-test against an included master (a debugging convenience, not core).
+- Per-stem profile auto-assignment (lives in the Clean tab work; this PR just lands the data + import).
+- Online stem fetch via unofficial APIs (research notes that those break whenever Suno rotates auth; not worth the maintenance).
+
+**Lift recap:** ~3 days, ~400 LOC, one new crate (`zip`). All other Phase D scope (ONNX runtime, model downloads, license audit) is gone.
 
 ## 8. Risks & mitigations
 

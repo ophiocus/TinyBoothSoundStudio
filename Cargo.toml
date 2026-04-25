@@ -1,6 +1,6 @@
 [package]
 name = "tinybooth-sound-studio"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 authors = ["ophiocus <csantanad@gmail.com>"]
 description = "Channel recorder, visualizer, and TinyBooth project exporter"
@@ -31,6 +31,9 @@ biquad = "0.5"
 
 # PNG decoding for the egui viewport icon (window top-left corner).
 image = { version = "0.25", default-features = false, features = ["png"] }
+
+# Zip archive reading for Suno stem-bundle import ("Download All" zips).
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [build-dependencies]
 winres = "0.1"

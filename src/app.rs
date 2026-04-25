@@ -6,7 +6,7 @@ use crate::git_update::{UpdateAvailable, UpdateState};
 use crate::project::{Project, Track};
 use crate::ui;
 use eframe::egui;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::sync::Arc;
 
@@ -184,6 +184,7 @@ impl TinyBoothApp {
             duration_secs: 0.0,
             profile: Some(profile),
             stereo: mode.is_stereo(),
+            source: crate::project::TrackSource::Recorded,
         });
         self.project_dirty = true;
         self.pending_track_name.clear();
@@ -219,6 +220,63 @@ impl TinyBoothApp {
                 self.project_dirty = false;
             }
             Err(e) => self.status = Some(format!("save error: {e}")),
+        }
+    }
+
+    /// Open a folder of Suno stems and turn it into a fresh `.tinybooth`
+    /// project. The new project is saved as a sibling of the source folder
+    /// and immediately becomes the active project.
+    pub fn import_suno_folder(&mut self) {
+        let Some(src) = rfd::FileDialog::new()
+            .set_title("Pick a folder of Suno stems")
+            .pick_folder()
+        else {
+            return;
+        };
+        let name = src.file_name().map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "Suno session".into());
+        let parent = src.parent().unwrap_or_else(|| Path::new("."));
+        let project_root = parent.join(format!("{name} (TinyBooth)"));
+        match crate::suno_import::import_folder(&src, &project_root, &name) {
+            Ok(proj) => {
+                let n_tracks = proj.tracks.len();
+                self.status = Some(format!(
+                    "Imported {n_tracks} stem(s) from {} → {}",
+                    src.display(), proj.manifest_path().display()
+                ));
+                self.project = proj;
+                self.project_dirty = false;
+                self.tab = Tab::Project;
+            }
+            Err(e) => self.status = Some(format!("Suno import failed: {e}")),
+        }
+    }
+
+    /// Same as [`import_suno_folder`] but for a "Download All" zip archive.
+    pub fn import_suno_zip(&mut self) {
+        let Some(src) = rfd::FileDialog::new()
+            .set_title("Pick a Suno stems zip archive")
+            .add_filter("Zip archive", &["zip"])
+            .pick_file()
+        else {
+            return;
+        };
+        let name = src.file_stem().map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "Suno session".into());
+        let parent = src.parent().unwrap_or_else(|| Path::new("."));
+        let project_root = parent.join(format!("{name} (TinyBooth)"));
+        match crate::suno_import::import_zip(&src, &project_root, &name) {
+            Ok(proj) => {
+                let n_tracks = proj.tracks.len();
+                self.status = Some(format!(
+                    "Imported {n_tracks} stem(s) from {} → {}",
+                    src.display(), proj.manifest_path().display()
+                ));
+                self.project = proj;
+                self.project_dirty = false;
+                self.tab = Tab::Project;
+            }
+            Err(e) => self.status = Some(format!("Suno import failed: {e}")),
         }
     }
 
@@ -264,6 +322,16 @@ impl eframe::App for TinyBoothApp {
                     }
                     if ui.button("Save").clicked() {
                         self.save_project();
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    ui.label(egui::RichText::new("Import Suno stems").weak());
+                    if ui.button("…from folder").clicked() {
+                        self.import_suno_folder();
+                        ui.close_menu();
+                    }
+                    if ui.button("…from zip").clicked() {
+                        self.import_suno_zip();
                         ui.close_menu();
                     }
                     ui.separator();

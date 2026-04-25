@@ -63,12 +63,19 @@ pub fn show(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
                 {
                     app.project_dirty = true;
                 }
-                let src = if t.stereo {
-                    "stereo".to_string()
-                } else {
-                    match t.channel_source {
-                        Some(c) => format!("Ch {}", c + 1),
-                        None => "mix".to_string(),
+                let src = match &t.source {
+                    crate::project::TrackSource::SunoStem { role, .. } => {
+                        format!("Suno · {}", role.label())
+                    }
+                    crate::project::TrackSource::Recorded => {
+                        if t.stereo {
+                            "stereo".to_string()
+                        } else {
+                            match t.channel_source {
+                                Some(c) => format!("Ch {}", c + 1),
+                                None => "mix".to_string(),
+                            }
+                        }
                     }
                 };
                 ui.label(src);
