@@ -7,6 +7,7 @@ mod config;
 mod dsp;
 mod export;
 mod git_update;
+mod manual;
 mod project;
 mod suno_import;
 mod ui;

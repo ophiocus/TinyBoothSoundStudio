@@ -45,6 +45,9 @@ pub struct TinyBoothApp {
     // UI.
     pub tab: Tab,
     pub status: Option<String>,
+    pub show_manual: bool,
+    pub manual_slug: String,
+    pub md_cache: egui_commonmark::CommonMarkCache,
 
     // Self-update plumbing.
     pub update_state: UpdateState,
@@ -108,6 +111,9 @@ impl TinyBoothApp {
             ffmpeg_available: export::ffmpeg_available(),
             tab: Tab::Record,
             status: None,
+            show_manual: false,
+            manual_slug: crate::manual::DEFAULT_SLUG.to_string(),
+            md_cache: egui_commonmark::CommonMarkCache::default(),
             update_state: UpdateState::Checking,
             update_error: None,
             update_rx: Some(rx),
@@ -304,6 +310,12 @@ impl eframe::App for TinyBoothApp {
             ctx.request_repaint_after(std::time::Duration::from_millis(16));
         }
 
+        // F1 toggles the manual. Skipped when a text field has focus so it
+        // doesn't fight typing in the Admin window or track-name input.
+        if !ctx.wants_keyboard_input() && ctx.input(|i| i.key_pressed(egui::Key::F1)) {
+            self.show_manual = !self.show_manual;
+        }
+
         egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
                 ui.menu_button("File", |ui| {
@@ -358,6 +370,12 @@ impl eframe::App for TinyBoothApp {
                         ui.close_menu();
                     }
                 });
+                ui.menu_button("Help", |ui| {
+                    if ui.button("Manual…  (F1)").clicked() {
+                        self.show_manual = true;
+                        ui.close_menu();
+                    }
+                });
 
                 ui.separator();
                 ui.selectable_value(&mut self.tab, Tab::Record, "Record");
@@ -399,6 +417,11 @@ impl eframe::App for TinyBoothApp {
         // Admin window for editing recording-tone profiles.
         if self.show_admin {
             ui::admin::show(self, ctx);
+        }
+
+        // Floating manual window — non-modal, doesn't block anything else.
+        if self.show_manual {
+            ui::manual::show(self, ctx);
         }
     }
 
