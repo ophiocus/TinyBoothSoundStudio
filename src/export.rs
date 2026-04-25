@@ -18,6 +18,7 @@ use hound::{SampleFormat, WavReader, WavSpec, WavWriter};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+use crate::dsp::FilterChainStereo;
 use crate::project::{Project, Track};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -125,13 +126,27 @@ fn mixdown(project: &Project, tracks: &[&Track]) -> Result<(Vec<f32>, u32, u16)>
         let in_channels = spec.channels.max(1) as usize;
         let frame_count = raw.len() / in_channels;
         let mut buf = Vec::with_capacity(frame_count * out_channels as usize);
+
+        // Per-track correction: applies in stereo, even on mono inputs
+        // (the input is centre-panned to L=R first, processed, then
+        // either kept stereo or summed back to mono per the mix layout).
+        let mut chain: Option<FilterChainStereo> = t
+            .correction
+            .as_ref()
+            .map(|p| FilterChainStereo::new(p.clone(), spec.sample_rate));
+
         for f in 0..frame_count {
             let base = f * in_channels;
-            let (l, r) = if in_channels >= 2 {
+            let (mut l, mut r) = if in_channels >= 2 {
                 (raw[base], raw[base + 1])
             } else {
                 (raw[base], raw[base])
             };
+            if let Some(c) = chain.as_mut() {
+                let (ll, rr) = c.process(l, r);
+                l = ll;
+                r = rr;
+            }
             if is_stereo_mix {
                 buf.push(l);
                 buf.push(r);

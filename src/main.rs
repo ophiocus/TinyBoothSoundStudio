@@ -8,6 +8,7 @@ mod dsp;
 mod export;
 mod git_update;
 mod manual;
+mod player;
 mod project;
 mod suno_import;
 mod ui;

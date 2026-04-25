@@ -11,7 +11,7 @@ use std::sync::mpsc;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Tab { Record, Project, Export }
+pub enum Tab { Record, Project, Mix, Export }
 
 pub struct TinyBoothApp {
     pub config: Config,
@@ -48,6 +48,13 @@ pub struct TinyBoothApp {
     pub show_manual: bool,
     pub manual_slug: String,
     pub md_cache: egui_commonmark::CommonMarkCache,
+
+    // Multitrack player (None until the first time the Mix tab is opened
+    // for a project, or when tracks change shape and we need to rebuild).
+    pub player: Option<crate::player::Player>,
+    pub player_error: Option<String>,
+    /// Index of the track whose Correction editor is open, if any.
+    pub editing_correction_for: Option<usize>,
 
     // Self-update plumbing.
     pub update_state: UpdateState,
@@ -114,6 +121,9 @@ impl TinyBoothApp {
             show_manual: false,
             manual_slug: crate::manual::DEFAULT_SLUG.to_string(),
             md_cache: egui_commonmark::CommonMarkCache::default(),
+            player: None,
+            player_error: None,
+            editing_correction_for: None,
             update_state: UpdateState::Checking,
             update_error: None,
             update_rx: Some(rx),
@@ -191,6 +201,7 @@ impl TinyBoothApp {
             profile: Some(profile),
             stereo: mode.is_stereo(),
             source: crate::project::TrackSource::Recorded,
+            correction: None,
         });
         self.project_dirty = true;
         self.pending_track_name.clear();
@@ -380,6 +391,7 @@ impl eframe::App for TinyBoothApp {
                 ui.separator();
                 ui.selectable_value(&mut self.tab, Tab::Record, "Record");
                 ui.selectable_value(&mut self.tab, Tab::Project, "Project");
+                ui.selectable_value(&mut self.tab, Tab::Mix, "Mix");
                 ui.selectable_value(&mut self.tab, Tab::Export, "Export");
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -411,8 +423,17 @@ impl eframe::App for TinyBoothApp {
         egui::CentralPanel::default().show(ctx, |ui| match self.tab {
             Tab::Record => ui::record::show(self, ui),
             Tab::Project => ui::project::show(self, ui),
+            Tab::Mix => ui::mix::show(self, ui),
             Tab::Export => ui::export::show(self, ui),
         });
+
+        // Mix-tab transport runs continuously while playing — repaint so
+        // the playhead animates.
+        if let Some(p) = self.player.as_ref() {
+            if p.state.play_state() == crate::player::PlayState::Playing {
+                ctx.request_repaint_after(std::time::Duration::from_millis(33));
+            }
+        }
 
         // Admin window for editing recording-tone profiles.
         if self.show_admin {
@@ -422,6 +443,11 @@ impl eframe::App for TinyBoothApp {
         // Floating manual window — non-modal, doesn't block anything else.
         if self.show_manual {
             ui::manual::show(self, ctx);
+        }
+
+        // Per-track Correction editor — also a floating window.
+        if self.editing_correction_for.is_some() {
+            ui::correction::show(self, ctx);
         }
     }
 

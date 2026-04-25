@@ -113,6 +113,11 @@ pub struct Track {
     /// Older manifests default to `Recorded`.
     #[serde(default)]
     pub source: TrackSource,
+    /// Optional post-processing chain applied at Mix-tab playback and at
+    /// export mixdown. `None` = pass-through (track is mixed unprocessed).
+    /// Added in v0.2; older manifests default to `None`.
+    #[serde(default)]
+    pub correction: Option<crate::dsp::Profile>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -40,6 +40,7 @@ The full manual lives at [`docs/manual/`](docs/manual/) — twelve chapters cove
 | | [Export](docs/manual/06-export.md) | |
 | | [Importing Suno stems](docs/manual/07-suno-import.md) | |
 | | [Self-update](docs/manual/08-self-update.md) | |
+| | [Mix tab — remastering](docs/manual/10-mix.md) | |
 | | [Using this manual](docs/manual/09-using-this-manual.md) | |
 
 ## Install

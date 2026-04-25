@@ -18,6 +18,7 @@ The files in this folder are the **single source of truth**: they render here on
 - [Export](06-export.md) — formats, mixdown, ffmpeg discovery.
 - [Importing Suno stems](07-suno-import.md) — folder + zip ingestion, role tagging.
 - [Self-update](08-self-update.md) — the in-app updater wired to GitHub Releases.
+- [Mix tab — remastering](10-mix.md) — multitrack playback, per-track correction, A/B bypass.
 - [Using this manual](09-using-this-manual.md) — how the Help window itself works.
 
 ## Appendix

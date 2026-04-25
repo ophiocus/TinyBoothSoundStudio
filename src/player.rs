@@ -1,0 +1,370 @@
+//! Multitrack playback player.
+//!
+//! Owns a single cpal output stream that mixes every project track live
+//! through their per-track correction chain (when set and not bypassed).
+//! Tracks are pre-loaded into memory at `Player::new` time as `Vec<i16>`
+//! and converted to f32 per-sample inside the audio callback — modest
+//! memory footprint, zero disk I/O on the hot path.
+//!
+//! Threading model:
+//!   * UI thread mutates per-track state (gain, mute, A/B bypass, current
+//!     correction profile) via the atomic / Mutex helpers on `TrackPlay`.
+//!   * Audio thread polls `correction_generation` per callback; when it
+//!     changes for a track, the audio thread takes a brief lock, clones
+//!     the new profile, and rebuilds its locally-owned `FilterChainStereo`.
+//!     The chain itself never crosses thread boundaries.
+//!
+//! The Mix tab reads `position_frames` once per UI frame to draw the
+//! synchronized playhead. Position is sample-accurate.
+
+use anyhow::{anyhow, Context, Result};
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::{Stream, StreamConfig};
+use parking_lot::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
+use std::sync::Arc;
+
+use crate::dsp::{FilterChainStereo, Profile};
+use crate::project::{Project, Track};
+
+/// Number of samples summed into one waveform-display peak bin.
+/// ~5.3 ms at 48 kHz — plenty for the on-screen waveform without
+/// blowing memory on a 5-minute track.
+const PEAKS_BIN_SIZE: usize = 256;
+
+/// Top-level transport state. UI sets, audio thread reads.
+#[repr(u8)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum PlayState {
+    Stopped = 0,
+    Playing = 1,
+    Paused = 2,
+}
+
+impl PlayState {
+    fn from_u8(v: u8) -> Self {
+        match v {
+            1 => Self::Playing,
+            2 => Self::Paused,
+            _ => Self::Stopped,
+        }
+    }
+}
+
+/// Per-track playback state. Atomics + Mutex are arranged so the audio
+/// thread does (cheap) atomic loads on every callback and only takes the
+/// `correction_profile` lock when the generation counter increments.
+pub struct TrackPlay {
+    pub name: String,
+    /// Interleaved samples — length = frame_count for mono, 2×frame_count for stereo.
+    samples: Vec<i16>,
+    pub channels: u16,
+    pub sample_rate: u32,
+    pub frame_count: u64,
+
+    /// Pre-computed peak table — abs-max per `peaks_bin_size` samples.
+    pub peaks: Vec<f32>,
+    #[allow(dead_code)] // Used by future click-to-seek logic in Phase 3.
+    pub peaks_bin_size: usize,
+
+    gain_db_bits: AtomicU32, // f32 bits
+    pub mute: AtomicBool,
+    /// When true, the correction chain is skipped during playback (A/B).
+    pub bypass_correction: AtomicBool,
+
+    /// Current correction profile. UI mutates and bumps the generation.
+    correction_profile: Mutex<Option<Profile>>,
+    pub correction_generation: AtomicU64,
+}
+
+impl TrackPlay {
+    pub fn gain_db(&self) -> f32 {
+        f32::from_bits(self.gain_db_bits.load(Ordering::Relaxed))
+    }
+    pub fn set_gain_db(&self, db: f32) {
+        self.gain_db_bits.store(db.to_bits(), Ordering::Relaxed);
+    }
+
+    pub fn correction(&self) -> Option<Profile> {
+        self.correction_profile.lock().clone()
+    }
+    /// Replace the correction chain. Pass `None` to disable correction
+    /// for this track. Bumps the generation counter so the audio thread
+    /// rebuilds its local `FilterChainStereo` on its next callback.
+    pub fn set_correction(&self, profile: Option<Profile>) {
+        *self.correction_profile.lock() = profile;
+        self.correction_generation.fetch_add(1, Ordering::Release);
+    }
+}
+
+/// Shared state behind the player. UI and audio thread both hold an `Arc`.
+pub struct PlayerState {
+    pub play_state: AtomicU8,
+    pub position_frames: AtomicU64,
+    pub sample_rate: u32,
+    pub longest_frames: u64,
+    pub tracks: Vec<Arc<TrackPlay>>,
+}
+
+impl PlayerState {
+    pub fn play_state(&self) -> PlayState {
+        PlayState::from_u8(self.play_state.load(Ordering::Acquire))
+    }
+    pub fn set_play_state(&self, s: PlayState) {
+        self.play_state.store(s as u8, Ordering::Release);
+    }
+    pub fn position_secs(&self) -> f32 {
+        self.position_frames.load(Ordering::Relaxed) as f32 / self.sample_rate.max(1) as f32
+    }
+    pub fn duration_secs(&self) -> f32 {
+        self.longest_frames as f32 / self.sample_rate.max(1) as f32
+    }
+    #[allow(dead_code)] // Used by Phase-3 click-to-seek on the Mix tab.
+    pub fn seek_frames(&self, frames: u64) {
+        self.position_frames.store(frames.min(self.longest_frames), Ordering::Release);
+    }
+}
+
+/// The owning handle. Drop = stream stop + cleanup.
+pub struct Player {
+    pub state: Arc<PlayerState>,
+    _stream: Stream,
+}
+
+impl Player {
+    /// Build a player for the given project. Pre-loads every track's WAV
+    /// into memory (i16). Validates that all tracks share a sample rate
+    /// — mismatched rates error out (resampling is not yet supported).
+    pub fn new(project: &Project) -> Result<Self> {
+        if project.tracks.is_empty() {
+            return Err(anyhow!("project has no tracks"));
+        }
+
+        // Load tracks + check sample-rate consistency.
+        let mut tracks = Vec::with_capacity(project.tracks.len());
+        let mut sample_rate = 0u32;
+        let mut longest_frames = 0u64;
+        for t in &project.tracks {
+            let tp = load_track(project, t)?;
+            if sample_rate == 0 {
+                sample_rate = tp.sample_rate;
+            } else if tp.sample_rate != sample_rate {
+                return Err(anyhow!(
+                    "track '{}' has {} Hz but project plays at {} Hz — \
+                     resampling is not yet supported (Phase 3)",
+                    t.name, tp.sample_rate, sample_rate
+                ));
+            }
+            longest_frames = longest_frames.max(tp.frame_count);
+            tracks.push(Arc::new(tp));
+        }
+
+        let state = Arc::new(PlayerState {
+            play_state: AtomicU8::new(PlayState::Stopped as u8),
+            position_frames: AtomicU64::new(0),
+            sample_rate,
+            longest_frames,
+            tracks,
+        });
+
+        let stream = build_output_stream(state.clone())?;
+        stream.play().context("starting cpal output stream")?;
+
+        Ok(Self { state, _stream: stream })
+    }
+
+    pub fn play(&self) {
+        if self.state.play_state() == PlayState::Stopped {
+            self.state.position_frames.store(0, Ordering::Release);
+        }
+        self.state.set_play_state(PlayState::Playing);
+    }
+    pub fn pause(&self) { self.state.set_play_state(PlayState::Paused); }
+    pub fn stop(&self) {
+        self.state.set_play_state(PlayState::Stopped);
+        self.state.position_frames.store(0, Ordering::Release);
+    }
+}
+
+// ───────────────────── helpers ─────────────────────
+
+fn load_track(project: &Project, t: &Track) -> Result<TrackPlay> {
+    let path = project.track_abs_path(t);
+    let mut reader = hound::WavReader::open(&path)
+        .with_context(|| format!("reading track {}", path.display()))?;
+    let spec = reader.spec();
+    let channels = spec.channels.max(1);
+    let frame_count = (reader.duration() as u64).max(1);
+
+    // Read everything as i16. hound's into_samples::<i16>() works for
+    // 16-bit Int files; Suno occasionally exports 24-bit which we
+    // currently downsize via i32::clamp(i16). This is fine for playback.
+    let samples: Vec<i16> = match spec.sample_format {
+        hound::SampleFormat::Int => {
+            if spec.bits_per_sample == 16 {
+                reader.samples::<i16>().filter_map(|r| r.ok()).collect()
+            } else {
+                reader.samples::<i32>()
+                    .filter_map(|r| r.ok())
+                    .map(|s| s.clamp(i16::MIN as i32, i16::MAX as i32) as i16)
+                    .collect()
+            }
+        }
+        hound::SampleFormat::Float => {
+            reader.samples::<f32>()
+                .filter_map(|r| r.ok())
+                .map(|s| (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16)
+                .collect()
+        }
+    };
+
+    let peaks = compute_peaks(&samples, channels as usize, PEAKS_BIN_SIZE);
+
+    Ok(TrackPlay {
+        name: t.name.clone(),
+        samples,
+        channels,
+        sample_rate: spec.sample_rate,
+        frame_count,
+        peaks,
+        peaks_bin_size: PEAKS_BIN_SIZE,
+        gain_db_bits: AtomicU32::new(t.gain_db.to_bits()),
+        mute: AtomicBool::new(t.mute),
+        bypass_correction: AtomicBool::new(false),
+        correction_profile: Mutex::new(t.correction.clone()),
+        correction_generation: AtomicU64::new(1), // ≠0 forces audio thread to build chain on first callback
+    })
+}
+
+/// Abs-max per bin across however many channels the file has.
+/// One value per bin — the visualiser doesn't render L/R lanes
+/// separately, just the envelope.
+fn compute_peaks(samples: &[i16], channels: usize, bin: usize) -> Vec<f32> {
+    if samples.is_empty() || bin == 0 { return Vec::new(); }
+    let frames = samples.len() / channels.max(1);
+    let bins = (frames + bin - 1) / bin;
+    let mut out = Vec::with_capacity(bins);
+    let denom = i16::MAX as f32;
+    for b in 0..bins {
+        let f0 = b * bin;
+        let f1 = ((b + 1) * bin).min(frames);
+        let mut peak = 0.0f32;
+        for f in f0..f1 {
+            for c in 0..channels {
+                let s = samples[f * channels + c] as f32 / denom;
+                let a = s.abs();
+                if a > peak { peak = a; }
+            }
+        }
+        out.push(peak);
+    }
+    out
+}
+
+fn build_output_stream(state: Arc<PlayerState>) -> Result<Stream> {
+    let host = cpal::default_host();
+    let dev = host
+        .default_output_device()
+        .ok_or_else(|| anyhow!("no default output device"))?;
+
+    // Try to match the project's sample rate exactly. Fall back to the
+    // device's default config if unsupported (Phase 2 doesn't resample —
+    // documented in TBSS-FR-0002 §6).
+    let supported = dev
+        .supported_output_configs()
+        .context("listing output configs")?
+        .filter(|c| c.channels() >= 2)
+        .find_map(|c| {
+            if c.min_sample_rate().0 <= state.sample_rate
+                && c.max_sample_rate().0 >= state.sample_rate
+            {
+                Some(c.with_sample_rate(cpal::SampleRate(state.sample_rate)))
+            } else {
+                None
+            }
+        });
+    let config: StreamConfig = match supported {
+        Some(s) => s.into(),
+        None => dev.default_output_config().context("default output config")?.into(),
+    };
+
+    let err_fn = |e| eprintln!("cpal output stream error: {e}");
+
+    // Per-track local audio-thread state, owned by the closure.
+    let n = state.tracks.len();
+    let mut chains: Vec<Option<FilterChainStereo>> = (0..n).map(|_| None).collect();
+    let mut seen_gen: Vec<u64> = vec![0; n];
+
+    let stream = dev.build_output_stream(
+        &config,
+        move |out: &mut [f32], _| {
+            let frames = out.len() / 2;
+
+            // Rebuild any correction chain whose generation changed.
+            for (i, t) in state.tracks.iter().enumerate() {
+                let g = t.correction_generation.load(Ordering::Acquire);
+                if seen_gen[i] != g {
+                    let p = t.correction_profile.lock().clone();
+                    chains[i] = p.map(|p| FilterChainStereo::new(p, state.sample_rate));
+                    seen_gen[i] = g;
+                }
+            }
+
+            let play_state = state.play_state();
+            let mut pos = state.position_frames.load(Ordering::Acquire);
+
+            for f in 0..frames {
+                let mut l_sum = 0.0f32;
+                let mut r_sum = 0.0f32;
+
+                if play_state == PlayState::Playing && pos < state.longest_frames {
+                    for (i, t) in state.tracks.iter().enumerate() {
+                        if t.mute.load(Ordering::Relaxed) { continue; }
+                        if pos >= t.frame_count { continue; }
+                        let (l_raw, r_raw) = read_frame(t, pos);
+                        let (l, r) = if !t.bypass_correction.load(Ordering::Relaxed) {
+                            if let Some(c) = chains[i].as_mut() {
+                                c.process(l_raw, r_raw)
+                            } else { (l_raw, r_raw) }
+                        } else { (l_raw, r_raw) };
+                        let g = db_to_lin(t.gain_db());
+                        l_sum += l * g;
+                        r_sum += r * g;
+                    }
+                    pos += 1;
+                }
+
+                out[f * 2]     = l_sum.clamp(-1.0, 1.0);
+                out[f * 2 + 1] = r_sum.clamp(-1.0, 1.0);
+            }
+
+            // End-of-track: stop and reset.
+            if play_state == PlayState::Playing && pos >= state.longest_frames {
+                state.set_play_state(PlayState::Stopped);
+                pos = 0;
+            }
+            state.position_frames.store(pos, Ordering::Release);
+        },
+        err_fn,
+        None,
+    )?;
+    Ok(stream)
+}
+
+/// Read one frame at the given position. Mono tracks pan to centre
+/// (same sample to both channels). Stereo tracks return interleaved L,R.
+fn read_frame(t: &TrackPlay, pos: u64) -> (f32, f32) {
+    let denom = i16::MAX as f32;
+    if t.channels >= 2 {
+        let i = (pos as usize) * 2;
+        if i + 1 >= t.samples.len() { return (0.0, 0.0); }
+        (t.samples[i] as f32 / denom, t.samples[i + 1] as f32 / denom)
+    } else {
+        let i = pos as usize;
+        if i >= t.samples.len() { return (0.0, 0.0); }
+        let s = t.samples[i] as f32 / denom;
+        (s, s)
+    }
+}
+
+fn db_to_lin(db: f32) -> f32 { 10f32.powf(db / 20.0) }

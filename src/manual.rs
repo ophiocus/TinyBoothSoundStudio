@@ -93,6 +93,12 @@ pub const PAGES: &[ManualPage] = &[
         markdown: include_str!("../docs/manual/08-self-update.md"),
     },
     ManualPage {
+        slug: "mix",
+        title: "Mix tab — remastering",
+        category: Category::Reference,
+        markdown: include_str!("../docs/manual/10-mix.md"),
+    },
+    ManualPage {
         slug: "using-this-manual",
         title: "Using this manual",
         category: Category::Reference,

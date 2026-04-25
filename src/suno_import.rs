@@ -242,6 +242,7 @@ fn finish_project(project_root: &Path, name: &str, detected: Vec<Detected>) -> R
                 role: d.role,
                 original_filename: d.original_filename,
             },
+            correction: None,
         });
     }
     project.save()?;
