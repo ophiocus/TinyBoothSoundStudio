@@ -59,6 +59,14 @@ pub struct TinyBoothApp {
     /// Modal dialog shown after every import attempt — success or fail.
     pub import_dialog: Option<crate::suno_import::ImportOutcome>,
 
+    /// Mixer/automation recorder. Captures fader gestures while a strip's
+    /// arm toggle is on and the player is in Playing state. Flushed into
+    /// the project on Stop / disarm.
+    pub recorder: crate::automation::Recorder,
+    /// Resizable split — what fraction of the Mix tab's height is the
+    /// console deck (vs. the multitrack lane area).
+    pub mix_console_fraction: f32,
+
     // Self-update plumbing.
     pub update_state: UpdateState,
     pub update_error: Option<String>,
@@ -155,6 +163,8 @@ impl TinyBoothApp {
             player_error: None,
             editing_correction_for: None,
             import_dialog: None,
+            recorder: crate::automation::Recorder::default(),
+            mix_console_fraction: 0.42,
             update_state: UpdateState::Checking,
             update_error: None,
             update_rx: Some(rx),
@@ -233,6 +243,7 @@ impl TinyBoothApp {
             stereo: mode.is_stereo(),
             source: crate::project::TrackSource::Recorded,
             correction: None,
+            gain_automation: None,
         });
         self.project_dirty = true;
         self.pending_track_name.clear();

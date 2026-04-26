@@ -24,6 +24,7 @@ use parking_lot::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 
+use crate::automation::{AutomationLane, SplineSampler};
 use crate::dsp::{FilterChainStereo, Profile};
 use crate::project::{Project, Track};
 
@@ -69,12 +70,28 @@ pub struct TrackPlay {
 
     gain_db_bits: AtomicU32, // f32 bits
     pub mute: AtomicBool,
-    /// When true, the correction chain is skipped during playback (A/B).
+    /// When set on any track, every non-solo track is silenced.
+    pub solo: AtomicBool,
+    /// When true, the correction chain AND automation are skipped
+    /// during playback (raw source for A/B comparison).
     pub bypass_correction: AtomicBool,
+    /// When true, the audio thread skips the spline lookup even if a
+    /// lane exists — used during re-record so the user's hand is
+    /// authoritative.
+    pub recording_armed: AtomicBool,
+
+    /// Post-correction post-fader peak in [0, 1000] (×1000 fixed-point).
+    /// Driven by the audio thread, read by the console-strip meter.
+    pub peak_x1000: AtomicU32,
 
     /// Current correction profile. UI mutates and bumps the generation.
     correction_profile: Mutex<Option<Profile>>,
     pub correction_generation: AtomicU64,
+
+    /// Latest automation lane. Audio thread polls a generation counter
+    /// to rebuild its `SplineSampler`. None / empty lane = no automation.
+    automation_lane: Mutex<Option<AutomationLane>>,
+    pub automation_generation: AtomicU64,
 }
 
 impl TrackPlay {
@@ -95,6 +112,18 @@ impl TrackPlay {
         *self.correction_profile.lock() = profile;
         self.correction_generation.fetch_add(1, Ordering::Release);
     }
+
+    pub fn automation(&self) -> Option<AutomationLane> {
+        self.automation_lane.lock().clone()
+    }
+    pub fn set_automation(&self, lane: Option<AutomationLane>) {
+        *self.automation_lane.lock() = lane;
+        self.automation_generation.fetch_add(1, Ordering::Release);
+    }
+
+    pub fn peak(&self) -> f32 {
+        self.peak_x1000.load(Ordering::Relaxed) as f32 / 1000.0
+    }
 }
 
 /// Shared state behind the player. UI and audio thread both hold an `Arc`.
@@ -104,6 +133,21 @@ pub struct PlayerState {
     pub sample_rate: u32,
     pub longest_frames: u64,
     pub tracks: Vec<Arc<TrackPlay>>,
+
+    // ── Master bus state ──
+    /// Master fader gain in dB (UI ↔ audio).
+    master_gain_db_bits: AtomicU32,
+    /// True while any track is in re-record mode (suppresses some
+    /// automation reads to keep the UX honest).
+    pub master_recording_armed: AtomicBool,
+    /// Master automation lane (Catmull-Rom). Same generation pattern as
+    /// per-track automation.
+    master_automation_lane: Mutex<Option<AutomationLane>>,
+    pub master_automation_generation: AtomicU64,
+    /// Post-master-fader peak L / R (×1000 fixed-point) for the master
+    /// strip's stereo level meter.
+    pub master_peak_l_x1000: AtomicU32,
+    pub master_peak_r_x1000: AtomicU32,
 }
 
 impl PlayerState {
@@ -119,6 +163,32 @@ impl PlayerState {
     pub fn duration_secs(&self) -> f32 {
         self.longest_frames as f32 / self.sample_rate.max(1) as f32
     }
+
+    pub fn master_gain_db(&self) -> f32 {
+        f32::from_bits(self.master_gain_db_bits.load(Ordering::Relaxed))
+    }
+    pub fn set_master_gain_db(&self, db: f32) {
+        self.master_gain_db_bits.store(db.to_bits(), Ordering::Relaxed);
+    }
+    #[allow(dead_code)] // symmetric with set_master_automation, kept for the Phase-3 lane editor
+    pub fn master_automation(&self) -> Option<AutomationLane> {
+        self.master_automation_lane.lock().clone()
+    }
+    pub fn set_master_automation(&self, lane: Option<AutomationLane>) {
+        *self.master_automation_lane.lock() = lane;
+        self.master_automation_generation.fetch_add(1, Ordering::Release);
+    }
+    pub fn master_peak_left(&self) -> f32 {
+        self.master_peak_l_x1000.load(Ordering::Relaxed) as f32 / 1000.0
+    }
+    pub fn master_peak_right(&self) -> f32 {
+        self.master_peak_r_x1000.load(Ordering::Relaxed) as f32 / 1000.0
+    }
+    /// Whether any track is currently soloed.
+    pub fn any_solo(&self) -> bool {
+        self.tracks.iter().any(|t| t.solo.load(Ordering::Relaxed))
+    }
+
     #[allow(dead_code)] // Used by Phase-3 click-to-seek on the Mix tab.
     pub fn seek_frames(&self, frames: u64) {
         self.position_frames.store(frames.min(self.longest_frames), Ordering::Release);
@@ -165,6 +235,12 @@ impl Player {
             sample_rate,
             longest_frames,
             tracks,
+            master_gain_db_bits: AtomicU32::new(project.master_gain_db.to_bits()),
+            master_recording_armed: AtomicBool::new(false),
+            master_automation_lane: Mutex::new(project.master_gain_automation.clone()),
+            master_automation_generation: AtomicU64::new(1),
+            master_peak_l_x1000: AtomicU32::new(0),
+            master_peak_r_x1000: AtomicU32::new(0),
         });
 
         let stream = build_output_stream(state.clone())?;
@@ -222,6 +298,11 @@ fn load_track(project: &Project, t: &Track) -> Result<TrackPlay> {
 
     Ok(TrackPlay {
         name: t.name.clone(),
+        solo: AtomicBool::new(false),
+        recording_armed: AtomicBool::new(false),
+        peak_x1000: AtomicU32::new(0),
+        automation_lane: Mutex::new(t.gain_automation.clone()),
+        automation_generation: AtomicU64::new(1),
         samples,
         channels,
         sample_rate: spec.sample_rate,
@@ -293,49 +374,135 @@ fn build_output_stream(state: Arc<PlayerState>) -> Result<Stream> {
     // Per-track local audio-thread state, owned by the closure.
     let n = state.tracks.len();
     let mut chains: Vec<Option<FilterChainStereo>> = (0..n).map(|_| None).collect();
-    let mut seen_gen: Vec<u64> = vec![0; n];
+    let mut seen_corr_gen: Vec<u64> = vec![0; n];
+    let mut samplers: Vec<SplineSampler> = (0..n).map(|_| SplineSampler::default()).collect();
+    let mut seen_auto_gen: Vec<u64> = vec![0; n];
+    let mut master_sampler = SplineSampler::default();
+    let mut seen_master_auto_gen: u64 = 0;
+    // Per-track and per-master peak running maxes — published every
+    // callback. Fast-attack / slow-release smoothing happens on the UI
+    // side when reading.
+    let sample_rate_f = state.sample_rate as f32;
 
     let stream = dev.build_output_stream(
         &config,
         move |out: &mut [f32], _| {
             let frames = out.len() / 2;
 
-            // Rebuild any correction chain whose generation changed.
+            // Rebuild correction chain / spline samplers whose generation changed.
             for (i, t) in state.tracks.iter().enumerate() {
-                let g = t.correction_generation.load(Ordering::Acquire);
-                if seen_gen[i] != g {
+                let cg = t.correction_generation.load(Ordering::Acquire);
+                if seen_corr_gen[i] != cg {
                     let p = t.correction_profile.lock().clone();
                     chains[i] = p.map(|p| FilterChainStereo::new(p, state.sample_rate));
-                    seen_gen[i] = g;
+                    seen_corr_gen[i] = cg;
                 }
+                let ag = t.automation_generation.load(Ordering::Acquire);
+                if seen_auto_gen[i] != ag {
+                    let lane = t.automation_lane.lock().clone();
+                    samplers[i] = match lane {
+                        Some(l) => SplineSampler::build(&l),
+                        None => SplineSampler::default(),
+                    };
+                    seen_auto_gen[i] = ag;
+                }
+            }
+            let mg = state.master_automation_generation.load(Ordering::Acquire);
+            if seen_master_auto_gen != mg {
+                let lane = state.master_automation_lane.lock().clone();
+                master_sampler = match lane {
+                    Some(l) => SplineSampler::build(&l),
+                    None => SplineSampler::default(),
+                };
+                seen_master_auto_gen = mg;
             }
 
             let play_state = state.play_state();
             let mut pos = state.position_frames.load(Ordering::Acquire);
+            let any_solo = state.any_solo();
+            let master_armed = state.master_recording_armed.load(Ordering::Relaxed);
+
+            // Per-callback peak running maxes.
+            let mut peak_l = 0.0f32;
+            let mut peak_r = 0.0f32;
+            let mut track_peaks = vec![0.0f32; n];
 
             for f in 0..frames {
                 let mut l_sum = 0.0f32;
                 let mut r_sum = 0.0f32;
 
                 if play_state == PlayState::Playing && pos < state.longest_frames {
+                    let t_secs = pos as f32 / sample_rate_f;
                     for (i, t) in state.tracks.iter().enumerate() {
                         if t.mute.load(Ordering::Relaxed) { continue; }
+                        if any_solo && !t.solo.load(Ordering::Relaxed) { continue; }
                         if pos >= t.frame_count { continue; }
+                        let bypass = t.bypass_correction.load(Ordering::Relaxed);
+                        let armed = t.recording_armed.load(Ordering::Relaxed);
                         let (l_raw, r_raw) = read_frame(t, pos);
-                        let (l, r) = if !t.bypass_correction.load(Ordering::Relaxed) {
+                        let (l, r) = if !bypass {
                             if let Some(c) = chains[i].as_mut() {
                                 c.process(l_raw, r_raw)
                             } else { (l_raw, r_raw) }
                         } else { (l_raw, r_raw) };
-                        let g = db_to_lin(t.gain_db());
-                        l_sum += l * g;
-                        r_sum += r * g;
+                        // Effective gain: spline sample if available and not
+                        // armed (and not bypassed); else the static fader value.
+                        let effective_gain_db = if !bypass && !armed {
+                            samplers[i].sample(t_secs).unwrap_or_else(|| t.gain_db())
+                        } else {
+                            t.gain_db()
+                        };
+                        let g = db_to_lin(effective_gain_db);
+                        let post_l = l * g;
+                        let post_r = r * g;
+                        l_sum += post_l;
+                        r_sum += post_r;
+                        // Per-track peak (post-fader, post-correction).
+                        let peak = post_l.abs().max(post_r.abs());
+                        if peak > track_peaks[i] { track_peaks[i] = peak; }
                     }
                     pos += 1;
                 }
 
-                out[f * 2]     = l_sum.clamp(-1.0, 1.0);
-                out[f * 2 + 1] = r_sum.clamp(-1.0, 1.0);
+                // Master fader + automation.
+                let master_db = if !master_armed {
+                    master_sampler.sample(pos as f32 / sample_rate_f)
+                        .unwrap_or_else(|| state.master_gain_db())
+                } else {
+                    state.master_gain_db()
+                };
+                let master_g = db_to_lin(master_db);
+                let out_l = (l_sum * master_g).clamp(-1.0, 1.0);
+                let out_r = (r_sum * master_g).clamp(-1.0, 1.0);
+
+                if out_l.abs() > peak_l { peak_l = out_l.abs(); }
+                if out_r.abs() > peak_r { peak_r = out_r.abs(); }
+
+                out[f * 2]     = out_l;
+                out[f * 2 + 1] = out_r;
+            }
+
+            // Publish peaks (fast attack — overwrite max; slow release
+            // happens by UI sampling rate driving toward 0).
+            for (i, p) in track_peaks.iter().enumerate() {
+                let new = (p.min(1.0) * 1000.0) as u32;
+                let cur = state.tracks[i].peak_x1000.load(Ordering::Relaxed);
+                let next = if new > cur { new } else { cur.saturating_sub(8) };
+                state.tracks[i].peak_x1000.store(next, Ordering::Relaxed);
+            }
+            {
+                let new_l = (peak_l.min(1.0) * 1000.0) as u32;
+                let cur_l = state.master_peak_l_x1000.load(Ordering::Relaxed);
+                state.master_peak_l_x1000.store(
+                    if new_l > cur_l { new_l } else { cur_l.saturating_sub(8) },
+                    Ordering::Relaxed,
+                );
+                let new_r = (peak_r.min(1.0) * 1000.0) as u32;
+                let cur_r = state.master_peak_r_x1000.load(Ordering::Relaxed);
+                state.master_peak_r_x1000.store(
+                    if new_r > cur_r { new_r } else { cur_r.saturating_sub(8) },
+                    Ordering::Relaxed,
+                );
             }
 
             // End-of-track: stop and reset.

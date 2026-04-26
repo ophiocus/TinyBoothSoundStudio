@@ -384,6 +384,8 @@ fn build_project(project_root: &Path, name: &str, detected: Vec<Detected>) -> an
         name: name.to_string(),
         created: Utc::now(),
         tracks: Vec::with_capacity(detected.len()),
+        master_gain_db: 0.0,
+        master_gain_automation: None,
         root: project_root.to_path_buf(),
     };
     for (i, d) in detected.into_iter().enumerate() {
@@ -405,6 +407,7 @@ fn build_project(project_root: &Path, name: &str, detected: Vec<Detected>) -> an
                 original_filename: d.original_filename,
             },
             correction: None,
+            gain_automation: None,
         });
     }
     project.save()?;

@@ -18,6 +18,7 @@ use hound::{SampleFormat, WavReader, WavSpec, WavWriter};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+use crate::automation::SplineSampler;
 use crate::dsp::FilterChainStereo;
 use crate::project::{Project, Track};
 
@@ -134,6 +135,10 @@ fn mixdown(project: &Project, tracks: &[&Track]) -> Result<(Vec<f32>, u32, u16)>
             .correction
             .as_ref()
             .map(|p| FilterChainStereo::new(p.clone(), spec.sample_rate));
+        let auto_sampler: Option<SplineSampler> = t.gain_automation.as_ref()
+            .map(|l| SplineSampler::build(l));
+        let static_gain_db = t.gain_db; // pre-applied here, but automation can override per-frame
+        let sr_f = spec.sample_rate as f32;
 
         for f in 0..frame_count {
             let base = f * in_channels;
@@ -147,11 +152,23 @@ fn mixdown(project: &Project, tracks: &[&Track]) -> Result<(Vec<f32>, u32, u16)>
                 l = ll;
                 r = rr;
             }
+            // Per-frame gain: automation overrides the static value when
+            // present and yields a sample for this position; else fall
+            // back. (Note: t.gain_db was already pre-applied via the
+            // raw-collection step above using `gain` — we need to undo
+            // that here so the final value comes from automation. To
+            // keep the loop simple we instead apply gain here per frame.)
+            let gain_db = auto_sampler.as_ref()
+                .and_then(|s| s.sample(f as f32 / sr_f))
+                .unwrap_or(static_gain_db);
+            let g = db_to_lin(gain_db) / db_to_lin(static_gain_db); // raw was scaled by static gain
+            let l_g = l * g;
+            let r_g = r * g;
             if is_stereo_mix {
-                buf.push(l);
-                buf.push(r);
+                buf.push(l_g);
+                buf.push(r_g);
             } else {
-                buf.push(0.5 * (l + r));
+                buf.push(0.5 * (l_g + r_g));
             }
         }
         per_track.push(buf);
@@ -164,6 +181,27 @@ fn mixdown(project: &Project, tracks: &[&Track]) -> Result<(Vec<f32>, u32, u16)>
             mix[i] += *s;
         }
     }
+
+    // Master fader + automation. Per-frame gain so the rendered file
+    // matches what the Mix-tab playback produces.
+    let master_static = project.master_gain_db;
+    let master_auto = project.master_gain_automation.as_ref().map(|l| SplineSampler::build(l));
+    if master_static != 0.0 || master_auto.is_some() {
+        let stride = out_channels as usize;
+        let frames = mix.len() / stride.max(1);
+        let sr_f = sample_rate as f32;
+        for f in 0..frames {
+            let t_secs = f as f32 / sr_f;
+            let gain_db = master_auto.as_ref()
+                .and_then(|s| s.sample(t_secs))
+                .unwrap_or(master_static);
+            let g = db_to_lin(gain_db);
+            for c in 0..stride {
+                mix[f * stride + c] *= g;
+            }
+        }
+    }
+
     // Soft-limit to [-1, 1].
     let peak = mix.iter().copied().fold(0.0f32, |a, b| a.max(b.abs()));
     if peak > 1.0 {

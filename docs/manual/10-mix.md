@@ -68,11 +68,51 @@ This is the same pipeline that's audible during Mix-tab playback, so the rendere
 - The audio callback runs at ~256-frame buffers (typically). Each callback locks no more than once per track and only when its correction profile generation has changed since the last build.
 - Repaint runs at ~30 fps while playing so the playhead animates smoothly. When stopped or paused, the UI rests.
 
+## Console deck
+
+Below the multitrack lanes, a hardware-style console occupies the lower portion of the Mix tab. Each track gets a vertical fader strip; the master strip sits on the far right. Drag the horizontal divider between lanes and console to resize.
+
+**Per-strip controls (top to bottom):**
+
+- **Track name** — truncated to fit. Hover for the full name.
+- **`M` (Mute)** — same flag as the lane-header mute. Excludes the track from the mix.
+- **`S` (Solo)** — when any strip's `S` is on, every non-soloed track is silenced. Solo is transient — not persisted across project reloads.
+- **`R` (Arm automation)** — when on and playback is running, the strip's fader gestures are recorded as a timestamped automation lane.
+- **Fader** — vertical slider, range −60 dB to +6 dB. Drag freely; scroll for fine control.
+- **Peak meter** — green / yellow / red bar adjacent to the fader. Driven by the audio thread post-correction-post-fader.
+- **dB readout** — current fader value as text.
+
+**Master strip:**
+
+Same shape as a track strip. Mute / Solo on the master are no-ops (nothing to mute against; nothing to solo). The fader applies to the post-bus-sum signal before the soft-limit. Stereo meter shows L and R independently.
+
+## Volume automation
+
+The Mix tab can record fader gestures during playback and replay them on the next play, the way a studio console with motorised faders does it. Replay uses Catmull-Rom interpolation between captured points (via the [`splines`](https://crates.io/crates/splines) crate) so the motion is smooth — no audible kinks at point boundaries.
+
+**Recording:**
+
+1. Click the `R` button on the strip you want to automate. The strip turns red-tinted.
+2. Press ▶ Play.
+3. Drag the fader as you ride the section — the recorder samples the fader at ~30 Hz, decimates by ≥0.05 dB delta, and stamps each kept point with the current playback time.
+4. Press ⏹ Stop, OR click `R` again to disarm without stopping. Either commits the captured lane to the project's manifest (`Track.gain_automation` for tracks; `Project.master_gain_automation` for the master).
+
+**Playback:**
+
+When a strip has automation and `R` is **off**, playback walks the lane, interpolates between points, and drives the fader on its own. Grab the fader during armed-OFF playback to override momentarily — the automation resumes when you let go (a "ride and release" pattern). The recorded curve is also drawn faintly under the waveform on the lane up top for visual reference.
+
+**Re-recording overwrites** the existing lane. Punch-in / partial overwrite is a Phase-3 polish item.
+
+**A/B bypass and automation:** the per-track `A/B` toggle on the lane header bypasses both the correction chain *and* automation when on (so A/B always means "raw source as Suno gave it"). This is the cleanest comparison pair.
+
+**Export:** the rendered file applies every track's correction + per-frame automation gain + master automation, in the same order as Mix-tab playback. What you heard is what you ship.
+
 ## Limits (for now)
 
 - No click-to-seek on the waveform lanes (Phase 3).
 - No loop region.
-- No solo button (mute everyone else manually).
 - No master limiter on the bus output beyond the soft-limit.
 - No resampling — every track must match the project sample rate.
 - No per-stem correction-preset library (save/load a chain by name) — Phase 3.
+- Automation is volume-only; per-EQ-band / per-correction-parameter automation is not yet supported.
+- Re-recording an existing lane overwrites the whole lane — no punch-in.

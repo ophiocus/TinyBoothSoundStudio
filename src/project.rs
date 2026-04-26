@@ -14,8 +14,12 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+use crate::automation::AutomationLane;
+
 pub const MANIFEST_NAME: &str = "project.tinybooth";
 pub const TRACKS_DIR: &str = "tracks";
+
+fn default_master_gain_db() -> f32 { 0.0 }
 
 /// What kind of source a track came from. Drives downstream UX (e.g. the
 /// Clean tab can dispatch role-aware processing on Suno stems while
@@ -118,6 +122,11 @@ pub struct Track {
     /// Added in v0.2; older manifests default to `None`.
     #[serde(default)]
     pub correction: Option<crate::dsp::Profile>,
+    /// Recorded fader-gesture automation. Replayed on the audio thread
+    /// via Catmull-Rom interpolation when present and not currently
+    /// being re-recorded. Added in v0.3; older manifests default to None.
+    #[serde(default)]
+    pub gain_automation: Option<AutomationLane>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -126,6 +135,16 @@ pub struct Project {
     pub name: String,
     pub created: DateTime<Utc>,
     pub tracks: Vec<Track>,
+
+    /// Master bus gain in dB, applied after the bus sum and before the
+    /// soft-limit at both playback and export. Added v0.3; older
+    /// manifests default to 0 dB.
+    #[serde(default = "default_master_gain_db")]
+    pub master_gain_db: f32,
+    /// Master fader automation. Catmull-Rom replayed on the audio
+    /// thread when present and not actively being re-recorded.
+    #[serde(default)]
+    pub master_gain_automation: Option<AutomationLane>,
 
     /// Filled in at load time; not serialised.
     #[serde(skip)]
@@ -139,6 +158,8 @@ impl Project {
             name: name.into(),
             created: Utc::now(),
             tracks: Vec::new(),
+            master_gain_db: 0.0,
+            master_gain_automation: None,
             root,
         }
     }
