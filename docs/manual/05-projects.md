@@ -48,6 +48,18 @@ The header shows the project name (editable), the folder path, and the creation 
 
 **File → Open project…** picks a `.tinybooth` file. The manifest is parsed; track entries are validated against the WAV files on disk; missing files show an error in the status bar but the project still loads.
 
+### Auto-restore on startup
+
+TinyBooth remembers the last project you were working on and re-opens it on the next launch. The path lives at `config.last_project_path` in `config.json`; it's updated every time you save, open, or import. If the file's been moved or deleted, TinyBooth falls back to a fresh scratch session and quietly clears the stale path — no error popup, just a status-bar note.
+
+If you want to start with a blank slate without losing the breadcrumb, **File → New project…** picks a fresh folder and replaces the active project; it'll be the new "last" the next time you launch.
+
+### File → Open Recent
+
+The eight most recently-opened projects appear under **File → Open Recent**, most recent first. Each entry shows the parent folder's name (typically the project name) with the full path on hover. Click to load. **Clear list** wipes the history without touching the projects themselves.
+
+A project that fails to load when picked from the recent list is automatically dropped from it — over time the menu prunes itself of dead entries.
+
 ## Manifest schema versioning
 
 The current schema is `version: 1`. New fields added since v0.1 — `stereo`, `profile`, `source` — are all marked `#[serde(default)]`, so older manifests load cleanly with sensible defaults.

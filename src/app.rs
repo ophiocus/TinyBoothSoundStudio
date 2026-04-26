@@ -88,6 +88,33 @@ impl TinyBoothApp {
             .join("sessions")
             .join(format!("session-{}", chrono::Utc::now().format("%Y%m%d-%H%M%S")));
 
+        // Try to auto-restore the last project. Fall back to a fresh
+        // scratch session if the path is missing, the file's gone, or
+        // the manifest fails to parse — and clear the stale breadcrumb.
+        let mut config = config; // shadow to allow mut for recovery
+        let mut startup_status: Option<String> = None;
+        let project = match config.last_project_path.clone() {
+            Some(p) if p.is_file() => match Project::load(&p) {
+                Ok(proj) => {
+                    startup_status = Some(format!("Restored: {}", proj.name));
+                    proj
+                }
+                Err(e) => {
+                    config.last_project_path = None;
+                    config.save();
+                    startup_status = Some(format!("Could not restore last project: {e}"));
+                    Project::new("Untitled session", default_root.clone())
+                }
+            },
+            Some(_) => {
+                // Path was recorded but file's gone — clear it.
+                config.last_project_path = None;
+                config.save();
+                Project::new("Untitled session", default_root.clone())
+            }
+            None => Project::new("Untitled session", default_root.clone()),
+        };
+
         // Load recording-tone profiles, seed defaults on first run, and
         // pick the last-used one (Guitar if nothing is saved).
         let profiles = dsp::load_or_seed();
@@ -98,7 +125,7 @@ impl TinyBoothApp {
 
         Self {
             config,
-            project: Project::new("Untitled session", default_root),
+            project,
             project_dirty: false,
             devices,
             selected_device,
@@ -117,7 +144,7 @@ impl TinyBoothApp {
             export_msg: None,
             ffmpeg_available: export::ffmpeg_available(),
             tab: Tab::Record,
-            status: None,
+            status: startup_status,
             show_manual: false,
             manual_slug: crate::manual::DEFAULT_SLUG.to_string(),
             md_cache: egui_commonmark::CommonMarkCache::default(),
@@ -219,7 +246,9 @@ impl TinyBoothApp {
             if let Err(e) = self.project.save() {
                 self.status = Some(format!("save error: {e}"));
             } else {
-                self.status = Some(format!("saved {}", self.project.manifest_path().display()));
+                let manifest = self.project.manifest_path();
+                self.config.record_project(&manifest);
+                self.status = Some(format!("saved {}", manifest.display()));
                 self.project_dirty = false;
             }
         }
@@ -233,7 +262,9 @@ impl TinyBoothApp {
     pub fn save_project(&mut self) {
         match self.project.save() {
             Ok(()) => {
-                self.status = Some(format!("saved {}", self.project.manifest_path().display()));
+                let manifest = self.project.manifest_path();
+                self.config.record_project(&manifest);
+                self.status = Some(format!("saved {}", manifest.display()));
                 self.project_dirty = false;
             }
             Err(e) => self.status = Some(format!("save error: {e}")),
@@ -256,13 +287,16 @@ impl TinyBoothApp {
         let project_root = parent.join(format!("{name} (TinyBooth)"));
         match crate::suno_import::import_folder(&src, &project_root, &name) {
             Ok(proj) => {
+                let manifest = proj.manifest_path();
+                self.config.record_project(&manifest);
                 let n_tracks = proj.tracks.len();
                 self.status = Some(format!(
                     "Imported {n_tracks} stem(s) from {} → {}",
-                    src.display(), proj.manifest_path().display()
+                    src.display(), manifest.display()
                 ));
                 self.project = proj;
                 self.project_dirty = false;
+                self.player = None; // force player rebuild for new project
                 self.tab = Tab::Project;
             }
             Err(e) => self.status = Some(format!("Suno import failed: {e}")),
@@ -284,13 +318,16 @@ impl TinyBoothApp {
         let project_root = parent.join(format!("{name} (TinyBooth)"));
         match crate::suno_import::import_zip(&src, &project_root, &name) {
             Ok(proj) => {
+                let manifest = proj.manifest_path();
+                self.config.record_project(&manifest);
                 let n_tracks = proj.tracks.len();
                 self.status = Some(format!(
                     "Imported {n_tracks} stem(s) from {} → {}",
-                    src.display(), proj.manifest_path().display()
+                    src.display(), manifest.display()
                 ));
                 self.project = proj;
                 self.project_dirty = false;
+                self.player = None; // force player rebuild for new project
                 self.tab = Tab::Project;
             }
             Err(e) => self.status = Some(format!("Suno import failed: {e}")),
@@ -302,13 +339,26 @@ impl TinyBoothApp {
             .add_filter("TinyBooth project", &["tinybooth"])
             .pick_file()
         {
-            match Project::load(&p) {
-                Ok(proj) => {
-                    self.project = proj;
-                    self.project_dirty = false;
-                    self.status = Some(format!("opened {}", p.display()));
-                }
-                Err(e) => self.status = Some(format!("open error: {e}")),
+            self.open_project_path(&p);
+        }
+    }
+
+    /// Load a project manifest from a known path. Used by the Open
+    /// dialog and by the File → Open Recent submenu.
+    pub fn open_project_path(&mut self, path: &Path) {
+        match Project::load(path) {
+            Ok(proj) => {
+                self.config.record_project(path);
+                self.project = proj;
+                self.project_dirty = false;
+                self.player = None; // force player rebuild for new project
+                self.status = Some(format!("opened {}", path.display()));
+            }
+            Err(e) => {
+                // Stale recent — drop it so the menu cleans up over time.
+                self.config.recent_projects.retain(|p| p != path);
+                self.config.save();
+                self.status = Some(format!("open error: {e}"));
             }
         }
     }
@@ -342,6 +392,40 @@ impl eframe::App for TinyBoothApp {
                     if ui.button("Open project…").clicked() {
                         self.open_project_dialog();
                         ui.close_menu();
+                    }
+                    let mut recent_clicked: Option<PathBuf> = None;
+                    let mut clear_recent = false;
+                    ui.menu_button("Open Recent", |ui| {
+                        if self.config.recent_projects.is_empty() {
+                            ui.label(egui::RichText::new("(none yet)").weak());
+                        } else {
+                            for path in &self.config.recent_projects {
+                                let label = path
+                                    .parent()
+                                    .and_then(|p| p.file_name())
+                                    .map(|n| n.to_string_lossy().to_string())
+                                    .unwrap_or_else(|| path.display().to_string());
+                                if ui
+                                    .button(label)
+                                    .on_hover_text(path.display().to_string())
+                                    .clicked()
+                                {
+                                    recent_clicked = Some(path.clone());
+                                    ui.close_menu();
+                                }
+                            }
+                            ui.separator();
+                            if ui.button("Clear list").clicked() {
+                                clear_recent = true;
+                                ui.close_menu();
+                            }
+                        }
+                    });
+                    if let Some(p) = recent_clicked {
+                        self.open_project_path(&p);
+                    }
+                    if clear_recent {
+                        self.config.clear_recent();
                     }
                     if ui.button("Save").clicked() {
                         self.save_project();

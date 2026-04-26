@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+const RECENT_CAP: usize = 8;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -8,6 +10,16 @@ pub struct Config {
     /// Name of the recording-tone profile active at startup.
     #[serde(default = "default_profile_name")]
     pub active_profile: String,
+    /// Manifest path of the project the user was working on at quit time.
+    /// Auto-restored on next launch when still present.
+    /// Added in v0.2.1; older configs default to None.
+    #[serde(default)]
+    pub last_project_path: Option<PathBuf>,
+    /// Up to `RECENT_CAP` recently-opened project manifests, most recent
+    /// first. Surfaced under File → Open Recent.
+    /// Added in v0.2.1.
+    #[serde(default)]
+    pub recent_projects: Vec<PathBuf>,
 }
 
 fn default_profile_name() -> String { "Guitar".into() }
@@ -18,6 +30,8 @@ impl Default for Config {
             dark_mode: true,
             zoom: 1.0,
             active_profile: default_profile_name(),
+            last_project_path: None,
+            recent_projects: Vec::new(),
         }
     }
 }
@@ -47,5 +61,26 @@ impl Config {
                 let _ = std::fs::write(p, s);
             }
         }
+    }
+
+    /// Mark this project as the active one — sets `last_project_path` and
+    /// prepends to `recent_projects` (deduping, capped to `RECENT_CAP`).
+    /// Persists immediately so a crash mid-session doesn't lose the
+    /// breadcrumb. Pass the absolute path to the `.tinybooth` manifest.
+    pub fn record_project(&mut self, manifest_path: &Path) {
+        let p = manifest_path.to_path_buf();
+        self.last_project_path = Some(p.clone());
+        self.recent_projects.retain(|x| x != &p);
+        self.recent_projects.insert(0, p);
+        if self.recent_projects.len() > RECENT_CAP {
+            self.recent_projects.truncate(RECENT_CAP);
+        }
+        self.save();
+    }
+
+    /// Clear the recent-projects list.
+    pub fn clear_recent(&mut self) {
+        self.recent_projects.clear();
+        self.save();
     }
 }

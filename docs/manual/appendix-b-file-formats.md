@@ -83,9 +83,16 @@ App-wide configuration. Located at `%APPDATA%\TinyBooth Sound Studio\config.json
 {
   "dark_mode": true,
   "zoom": 1.0,
-  "active_profile": "Guitar"
+  "active_profile": "Guitar",
+  "last_project_path": "C:\\path\\to\\project.tinybooth",
+  "recent_projects": [
+    "C:\\path\\to\\project.tinybooth",
+    "C:\\other\\session\\project.tinybooth"
+  ]
 }
 ```
+
+`last_project_path` and `recent_projects` were added in v0.2.1 — older configs default to `null` and `[]` respectively.
 
 ## Track WAV files
 
