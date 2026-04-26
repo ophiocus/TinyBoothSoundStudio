@@ -1,6 +1,6 @@
 [package]
 name = "tinybooth-sound-studio"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 authors = ["ophiocus <csantanad@gmail.com>"]
 description = "Channel recorder, visualizer, and TinyBooth project exporter"
@@ -35,6 +35,10 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 
 # Zip archive reading for Suno stem-bundle import ("Download All" zips).
 zip = { version = "2", default-features = false, features = ["deflate"] }
+
+# Open files / folders in the OS default handler (used by the import-
+# result modal's "Open log folder" button, etc.).
+open = "5"
 
 [build-dependencies]
 winres = "0.1"

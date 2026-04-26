@@ -56,6 +56,9 @@ pub struct TinyBoothApp {
     /// Index of the track whose Correction editor is open, if any.
     pub editing_correction_for: Option<usize>,
 
+    /// Modal dialog shown after every import attempt — success or fail.
+    pub import_dialog: Option<crate::suno_import::ImportOutcome>,
+
     // Self-update plumbing.
     pub update_state: UpdateState,
     pub update_error: Option<String>,
@@ -151,6 +154,7 @@ impl TinyBoothApp {
             player: None,
             player_error: None,
             editing_correction_for: None,
+            import_dialog: None,
             update_state: UpdateState::Checking,
             update_error: None,
             update_rx: Some(rx),
@@ -285,22 +289,8 @@ impl TinyBoothApp {
             .unwrap_or_else(|| "Suno session".into());
         let parent = src.parent().unwrap_or_else(|| Path::new("."));
         let project_root = parent.join(format!("{name} (TinyBooth)"));
-        match crate::suno_import::import_folder(&src, &project_root, &name) {
-            Ok(proj) => {
-                let manifest = proj.manifest_path();
-                self.config.record_project(&manifest);
-                let n_tracks = proj.tracks.len();
-                self.status = Some(format!(
-                    "Imported {n_tracks} stem(s) from {} → {}",
-                    src.display(), manifest.display()
-                ));
-                self.project = proj;
-                self.project_dirty = false;
-                self.player = None; // force player rebuild for new project
-                self.tab = Tab::Project;
-            }
-            Err(e) => self.status = Some(format!("Suno import failed: {e}")),
-        }
+        let outcome = crate::suno_import::import_folder(&src, &project_root, &name);
+        self.apply_import_outcome(outcome);
     }
 
     /// Same as [`import_suno_folder`] but for a "Download All" zip archive.
@@ -316,22 +306,32 @@ impl TinyBoothApp {
             .unwrap_or_else(|| "Suno session".into());
         let parent = src.parent().unwrap_or_else(|| Path::new("."));
         let project_root = parent.join(format!("{name} (TinyBooth)"));
-        match crate::suno_import::import_zip(&src, &project_root, &name) {
-            Ok(proj) => {
-                let manifest = proj.manifest_path();
-                self.config.record_project(&manifest);
-                let n_tracks = proj.tracks.len();
-                self.status = Some(format!(
-                    "Imported {n_tracks} stem(s) from {} → {}",
-                    src.display(), manifest.display()
-                ));
+        let outcome = crate::suno_import::import_zip(&src, &project_root, &name);
+        self.apply_import_outcome(outcome);
+    }
+
+    /// Common post-import handling. Updates state on success and always
+    /// pops the modal regardless of outcome — silence-on-failure is what
+    /// made this whole flow feel broken.
+    fn apply_import_outcome(&mut self, outcome: crate::suno_import::ImportOutcome) {
+        if let Some(proj) = outcome.project.as_ref() {
+            let manifest = proj.manifest_path();
+            self.config.record_project(&manifest);
+        }
+        if outcome.success {
+            if let Some(proj) = outcome.project.clone() {
                 self.project = proj;
                 self.project_dirty = false;
-                self.player = None; // force player rebuild for new project
+                self.player = None;
                 self.tab = Tab::Project;
             }
-            Err(e) => self.status = Some(format!("Suno import failed: {e}")),
         }
+        self.status = Some(if outcome.success {
+            format!("Imported into {}", self.project.manifest_path().display())
+        } else {
+            "Suno import did not produce any tracks — see dialog".into()
+        });
+        self.import_dialog = Some(outcome);
     }
 
     pub fn open_project_dialog(&mut self) {
@@ -532,6 +532,12 @@ impl eframe::App for TinyBoothApp {
         // Per-track Correction editor — also a floating window.
         if self.editing_correction_for.is_some() {
             ui::correction::show(self, ctx);
+        }
+
+        // Import-result modal — always shown after an import completes,
+        // success or fail. Can't be missed.
+        if self.import_dialog.is_some() {
+            ui::import_dialog::show(self, ctx);
         }
     }
 

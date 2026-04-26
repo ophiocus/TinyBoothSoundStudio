@@ -1,5 +1,6 @@
 pub mod admin;
 pub mod correction;
+pub mod import_dialog;
 pub mod manual;
 pub mod mix;
 pub mod record;
