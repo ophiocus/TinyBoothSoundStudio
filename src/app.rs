@@ -137,7 +137,7 @@ impl TinyBoothApp {
                 }
                 Err(e) => {
                     config.last_project_path = None;
-                    config.save();
+                    config.save_or_log();
                     startup_status = Some(format!("Could not restore last project: {e}"));
                     Project::new("Untitled session", default_root.clone())
                 }
@@ -145,7 +145,7 @@ impl TinyBoothApp {
             Some(_) => {
                 // Path was recorded but file's gone — clear it.
                 config.last_project_path = None;
-                config.save();
+                config.save_or_log();
                 Project::new("Untitled session", default_root.clone())
             }
             None => Project::new("Untitled session", default_root.clone()),
@@ -209,7 +209,7 @@ impl TinyBoothApp {
         }
         self.active_profile_idx = idx;
         self.config.active_profile = self.profiles[idx].name.clone();
-        self.config.save();
+        self.config.save_or_log();
     }
 
     pub fn save_profiles(&mut self) {
@@ -257,25 +257,15 @@ impl TinyBoothApp {
             .strip_prefix(&self.project.root)
             .map(|p| p.to_string_lossy().replace('\\', "/"))
             .unwrap_or_else(|_| format!("tracks/{id}.wav"));
-        let channel_source = match mode {
-            SourceMode::Channel(c) => Some(c),
-            _ => None,
-        };
-        self.project.tracks.push(Track {
-            id: id.clone(),
+        self.project.tracks.push(Track::recorded(
+            id.clone(),
             name,
-            file: file_rel,
-            mute: false,
-            gain_db: 0.0,
+            file_rel,
             sample_rate,
-            channel_source,
-            duration_secs: 0.0,
-            profile: Some(profile),
-            stereo: mode.is_stereo(),
-            source: crate::project::TrackSource::Recorded,
-            correction: None,
-            gain_automation: None,
-        });
+            mode,
+            0.0,
+            profile,
+        ));
         self.project_dirty = true;
         self.pending_track_name.clear();
         Ok(())
@@ -583,7 +573,7 @@ impl TinyBoothApp {
             Err(e) => {
                 // Stale recent — drop it so the menu cleans up over time.
                 self.config.recent_projects.retain(|p| p != path);
-                self.config.save();
+                self.config.save_or_log();
                 self.status = Some(format!("open error: {e}"));
             }
         }
@@ -683,7 +673,7 @@ impl eframe::App for TinyBoothApp {
                         } else {
                             egui::Visuals::light()
                         });
-                        self.config.save();
+                        self.config.save_or_log();
                     }
                 });
                 ui.menu_button("Admin", |ui| {
@@ -746,7 +736,7 @@ impl eframe::App for TinyBoothApp {
             if self.session.is_some() {
                 self.stop_take();
             }
-            self.config.save();
+            self.config.save_or_log();
             // eframe 0.28: ask the viewport to close — the runtime
             // tears down GLOW + winit, runs Drop on `Self`, exits the
             // event loop. Strictly cleaner than process::exit().

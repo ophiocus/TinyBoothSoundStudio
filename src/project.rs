@@ -85,6 +85,85 @@ pub enum StemRole {
     Unknown,
 }
 
+impl Track {
+    /// Construct a freshly-recorded track. Centralises the field list so
+    /// future schema additions don't fan out to every literal call site.
+    /// Pass `mode` from the Record tab; `recording_profile_snapshot` is
+    /// the active recording-tone preset that produced the WAV.
+    pub fn recorded(
+        id: impl Into<String>,
+        display_name: impl Into<String>,
+        file_rel: impl Into<String>,
+        sample_rate: u32,
+        mode: crate::audio::SourceMode,
+        duration_secs: f32,
+        recording_profile_snapshot: crate::dsp::Profile,
+    ) -> Self {
+        let channel_source = match mode {
+            crate::audio::SourceMode::Channel(c) => Some(c),
+            _ => None,
+        };
+        Self {
+            id: id.into(),
+            name: display_name.into(),
+            file: file_rel.into(),
+            mute: false,
+            gain_db: 0.0,
+            sample_rate,
+            channel_source,
+            duration_secs,
+            profile: Some(recording_profile_snapshot),
+            stereo: matches!(mode, crate::audio::SourceMode::Stereo),
+            source: TrackSource::Recorded,
+            correction: None,
+            gain_automation: None,
+        }
+    }
+
+    /// Construct a track imported from a Suno stem bundle. Same role as
+    /// [`Self::recorded`] — keeps the field-list fanout localised.
+    ///
+    /// The constructor's whole purpose is to absorb the field-list growth at
+    /// a single site; routing the args through a parameter struct would only
+    /// shift the fanout to the caller. The targeted allow is intentional.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_suno_stem(
+        id: impl Into<String>,
+        display_name: impl Into<String>,
+        file_rel: impl Into<String>,
+        sample_rate: u32,
+        channels: u16,
+        duration_secs: f32,
+        role: StemRole,
+        original_filename: String,
+        session_epoch: Option<i64>,
+        session_ordinal: Option<u32>,
+        provenance: Option<String>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            name: display_name.into(),
+            file: file_rel.into(),
+            mute: false,
+            gain_db: 0.0,
+            sample_rate,
+            channel_source: None,
+            duration_secs,
+            profile: None,
+            stereo: channels >= 2,
+            source: TrackSource::SunoStem {
+                role,
+                original_filename,
+                session_epoch,
+                session_ordinal,
+                provenance,
+            },
+            correction: None,
+            gain_automation: None,
+        }
+    }
+}
+
 impl StemRole {
     pub fn label(self) -> &'static str {
         match self {
@@ -122,9 +201,13 @@ pub struct Track {
     pub channel_source: Option<u16>,
     #[serde(default)]
     pub duration_secs: f32,
-    /// Snapshot of the recording-tone profile used when this take was captured.
-    /// Stored verbatim so the project file is self-contained even if the
-    /// presets file later changes.
+    /// **Recording-time snapshot** of the chain that was active when this
+    /// take was captured (HPF/gate/comp/EQ/de-ess values frozen into the
+    /// WAV — they're *baked in*, not applied at playback). Stored
+    /// verbatim so the project file is self-contained even if the global
+    /// `profiles.json` later changes. **Read-only after capture.**
+    /// Distinct from [`Self::correction`] (post-processing chain applied
+    /// at playback / export and editable any time).
     #[serde(default)]
     pub profile: Option<crate::dsp::Profile>,
     /// True when the underlying WAV has 2 channels (L/R).
@@ -135,8 +218,11 @@ pub struct Track {
     /// Older manifests default to `Recorded`.
     #[serde(default)]
     pub source: TrackSource,
-    /// Optional post-processing chain applied at Mix-tab playback and at
-    /// export mixdown. `None` = pass-through (track is mixed unprocessed).
+    /// **Post-processing chain** applied at Mix-tab playback and at
+    /// export mixdown. `None` = pass-through (track is mixed
+    /// unprocessed). User-editable from the Mix tab's Correction window
+    /// at any time; takes effect on the next playback cycle. Distinct
+    /// from [`Self::profile`] (immutable recording-time snapshot).
     /// Added in v0.2; older manifests default to `None`.
     #[serde(default)]
     pub correction: Option<crate::dsp::Profile>,

@@ -1,3 +1,4 @@
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -57,13 +58,33 @@ impl Config {
             .unwrap_or_default()
     }
 
-    pub fn save(&self) {
-        let Some(dir) = Self::dir() else { return };
-        let _ = std::fs::create_dir_all(&dir);
-        if let Some(p) = Self::path() {
-            if let Ok(s) = serde_json::to_string_pretty(self) {
-                let _ = std::fs::write(p, s);
-            }
+    /// Persist the config atomically: write to a sibling `.tmp` first,
+    /// then rename over the canonical path. A crash or full disk during
+    /// the write leaves either the old or the new file intact, never a
+    /// truncated one. Returns the chained anyhow error so callers can
+    /// surface a useful message.
+    pub fn save(&self) -> Result<()> {
+        let dir = Self::dir().context("no platform config directory available")?;
+        std::fs::create_dir_all(&dir)
+            .with_context(|| format!("creating config dir {}", dir.display()))?;
+        let path = Self::path().context("no platform config directory available")?;
+        let tmp = path.with_extension("json.tmp");
+
+        let json = serde_json::to_string_pretty(self).context("serialising config to JSON")?;
+
+        std::fs::write(&tmp, json)
+            .with_context(|| format!("writing config to {}", tmp.display()))?;
+        std::fs::rename(&tmp, &path)
+            .with_context(|| format!("renaming {} to {}", tmp.display(), path.display()))?;
+        Ok(())
+    }
+
+    /// Save and surface any error to stderr — for the legacy callers
+    /// that don't yet propagate. Prefer the `Result`-returning `save`
+    /// when the caller has somewhere to show the message.
+    pub fn save_or_log(&self) {
+        if let Err(e) = self.save() {
+            eprintln!("config save failed: {e:#}");
         }
     }
 
@@ -79,12 +100,12 @@ impl Config {
         if self.recent_projects.len() > RECENT_CAP {
             self.recent_projects.truncate(RECENT_CAP);
         }
-        self.save();
+        self.save_or_log();
     }
 
     /// Clear the recent-projects list.
     pub fn clear_recent(&mut self) {
         self.recent_projects.clear();
-        self.save();
+        self.save_or_log();
     }
 }

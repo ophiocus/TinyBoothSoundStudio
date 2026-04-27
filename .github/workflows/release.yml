@@ -14,7 +14,10 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - uses: dtolnay/rust-toolchain@stable
+      # Pin to a specific stable so local-vs-CI clippy drift surfaces
+      # at PR time, not at tag-push time. Bump intentionally; don't
+      # silently inherit `@stable`.
+      - uses: dtolnay/rust-toolchain@1.95.0
 
       - uses: Swatinem/rust-cache@v2
 

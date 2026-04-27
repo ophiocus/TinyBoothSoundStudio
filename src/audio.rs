@@ -272,6 +272,13 @@ pub fn start_recording(
         let _ = error_tx.send(format!("input stream error: {e}"));
     };
 
+    // The double match below dispatches on the runtime `SampleFormat`
+    // enum into the generic `build_stream_*::<T>` builders. Each arm
+    // has to spell out the concrete `T` because Rust monomorphises
+    // generics at compile time — there is no `T = match ...` shortcut.
+    // A small macro could compress this, but the explicit form keeps
+    // the call sites greppable and the cost is six near-identical
+    // arms total, called once per recording start.
     let stream = if mode.is_stereo() {
         let chain = crate::dsp::FilterChainStereo::new(profile, sample_rate);
         match sample_format {

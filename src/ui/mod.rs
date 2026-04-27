@@ -5,6 +5,7 @@ pub mod import_conflict;
 pub mod import_dialog;
 pub mod manual;
 pub mod mix;
+pub mod profile_editor;
 pub mod project;
 pub mod record;
 pub mod viz;

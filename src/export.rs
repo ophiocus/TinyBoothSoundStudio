@@ -121,17 +121,18 @@ fn mixdown(project: &Project, tracks: &[&Track]) -> Result<(Vec<f32>, u32, u16)>
                 sample_rate
             ));
         }
-        let gain = db_to_lin(t.gain_db);
+        // Read raw PCM at unity (no gain pre-multiplied — gain is applied
+        // in the per-frame loop below alongside automation. Cleaner than
+        // pre-multiplying and then dividing back out.)
         let raw: Vec<f32> = match spec.sample_format {
             SampleFormat::Int => reader
                 .into_samples::<i32>()
                 .filter_map(|r| r.ok())
-                .map(|s| s as f32 / i16::MAX as f32 * gain)
+                .map(|s| s as f32 / i16::MAX as f32)
                 .collect(),
             SampleFormat::Float => reader
                 .into_samples::<f32>()
                 .filter_map(|r| r.ok())
-                .map(|s| s * gain)
                 .collect(),
         };
 
@@ -148,7 +149,8 @@ fn mixdown(project: &Project, tracks: &[&Track]) -> Result<(Vec<f32>, u32, u16)>
             .map(|p| FilterChainStereo::new(p.clone(), spec.sample_rate));
         let auto_sampler: Option<SplineSampler> =
             t.gain_automation.as_ref().map(SplineSampler::build);
-        let static_gain_db = t.gain_db; // pre-applied here, but automation can override per-frame
+        let static_gain_db = t.gain_db;
+        let static_gain_lin = db_to_lin(static_gain_db);
         let sr_f = spec.sample_rate as f32;
 
         for f in 0..frame_count {
@@ -163,17 +165,15 @@ fn mixdown(project: &Project, tracks: &[&Track]) -> Result<(Vec<f32>, u32, u16)>
                 l = ll;
                 r = rr;
             }
-            // Per-frame gain: automation overrides the static value when
-            // present and yields a sample for this position; else fall
-            // back. (Note: t.gain_db was already pre-applied via the
-            // raw-collection step above using `gain` — we need to undo
-            // that here so the final value comes from automation. To
-            // keep the loop simple we instead apply gain here per frame.)
-            let gain_db = auto_sampler
+            // Effective gain: spline sample if automation present at
+            // this time, else the cached static linear gain.
+            let g = match auto_sampler
                 .as_ref()
                 .and_then(|s| s.sample(f as f32 / sr_f))
-                .unwrap_or(static_gain_db);
-            let g = db_to_lin(gain_db) / db_to_lin(static_gain_db); // raw was scaled by static gain
+            {
+                Some(db) => db_to_lin(db),
+                None => static_gain_lin,
+            };
             let l_g = l * g;
             let r_g = r * g;
             if is_stereo_mix {

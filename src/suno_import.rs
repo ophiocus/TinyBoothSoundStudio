@@ -726,27 +726,19 @@ fn build_project(
             Some(s) => (Some(s.epoch), Some(s.provenance.clone())),
             None => (None, None),
         };
-        project.tracks.push(Track {
+        project.tracks.push(Track::from_suno_stem(
             id,
-            name: display_name,
-            file: format!("{TRACKS_DIR}/{}", d.track_filename),
-            mute: false,
-            gain_db: 0.0,
-            sample_rate: d.sample_rate,
-            channel_source: None,
-            duration_secs: d.duration_secs,
-            profile: None,
-            stereo: d.channels >= 2,
-            source: TrackSource::SunoStem {
-                role: d.role,
-                original_filename: d.original_filename,
-                session_epoch,
-                session_ordinal: Some(ordinal),
-                provenance,
-            },
-            correction: None,
-            gain_automation: None,
-        });
+            display_name,
+            format!("{TRACKS_DIR}/{}", d.track_filename),
+            d.sample_rate,
+            d.channels,
+            d.duration_secs,
+            d.role,
+            d.original_filename,
+            session_epoch,
+            Some(ordinal),
+            provenance,
+        ));
     }
     project.save()?;
     Ok(project)

@@ -1,0 +1,161 @@
+# Changelog
+
+All notable changes to TinyBooth Sound Studio.
+
+The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project tracks [Semantic Versioning](https://semver.org/) loosely (the v0.x series treats minor bumps as feature releases, patch bumps as fixes / polish).
+
+## [Unreleased]
+
+## [0.3.8] — 2026-04-27
+
+### Added
+- `CHANGELOG.md` — this file. Hand-curated; release notes from the GitHub release page remain auto-generated from commit messages.
+- `Track::recorded(...)` and `Track::from_suno_stem(...)` constructors so future schema additions don't fan out to every literal call site.
+- Profile editor body shared between **Admin → Recording-tone profiles…** and **Mix → Correction…** windows via a new `ui::profile_editor` module — single source of truth for the input-gain / HPF / EQ / de-esser / gate / compressor / makeup chain UI.
+
+### Changed
+- `chrono` now ships with `default-features = false` (audit follow-up; `clock` + `serde` + `std` are the only pieces we use). Smaller dep tree and binary.
+- CI's Rust toolchain is now pinned (`dtolnay/rust-toolchain@1.95.0`) — local-vs-CI clippy drift surfaces at PR time, not at tag-push.
+- `Config::save` returns `Result<()>` and writes atomically via a `.tmp` sibling + `rename` so a crash or full disk mid-write doesn't leave the file truncated. The UI thread surfaces failures via the status bar.
+- `export.rs::mixdown` no longer pre-multiplies samples by static gain at read time; gain is applied per-frame in the same loop as automation. Drops a ten-line apologetic comment about a "gain-undo trick" the previous shape required.
+- `audio.rs` sample-format dispatch (mono and stereo branches) gains an inline comment explaining why the six near-identical match arms exist: monomorphisation forces one arm per concrete `T`, and a macro would obscure the call sites for marginal LOC gains. Rated *Nit* in the audit; this captures the decision in-source.
+
+### Documentation
+- `Track.profile` and `Track.correction` doc comments now explicitly distinguish their roles (recording-time snapshot vs post-processing chain).
+
+## [0.3.7] — 2026-04-27
+
+### Fixed
+- CI clippy regression: `unnecessary_sort_by` on Rust 1.95.0 stable. Same content as v0.3.6 (which never got an MSI built — its CI run failed on this lint) plus a one-line `.sort_by_key(...)` swap.
+
+## [0.3.6] — 2026-04-27 *(no MSI; CI failed on the new gates)*
+
+### Added
+- 27 inline unit tests across `automation`, `analysis`, `suno_meta`, `suno_import`, `git_update`, and `project`. Coverage matches the survival guide §9.1 payback list.
+- CI quality gates: `cargo fmt --check`, `cargo clippy --release --all-targets -- -D warnings`, `cargo test --release` between version-check and build.
+- Audio-thread error channel: `cpal` `err_fn` closures push through a `mpsc::Sender<String>`; the UI thread surfaces messages in the status bar instead of locking stderr.
+
+### Changed
+- `git_update::render` returns `bool` (`#[must_use]`); on a successful installer launch the caller closes via `egui::ViewportCommand::Close` so Drop impls run (WAV writers finalise, config saves). Pre-v0.3.6's `process::exit(0)` skipped Drop entirely.
+- `git_update.rs` switched from `Result<_, String>` to `anyhow::Result`; `.map_err(format!)` calls become `.context(...)` chains.
+- Clippy hygiene: 14 warnings → 0 (redundant closures simplified, manual `div_ceil` → `.div_ceil()`, derived `Default` impls, three `else if` collapses, four `#[allow(too_many_arguments)]` on internal helpers).
+- `cargo fmt` ran across the tree; 23 files reflowed.
+
+## [0.3.5] — 2026-04-27
+
+### Changed
+- "Enable all corrections" button glyph: `+` → `✓`. The plus read as a small cross next to the destructive `⟲ Reset`; checkmark is the affirmative action.
+
+## [0.3.4] — 2026-04-27
+
+### Added
+- Persisted **Disable** button on the Mix tab. Flips `Project.corrections_disabled`, syncs `PlayerState.global_bypass`. Survives reload — non-destructive project-wide bypass.
+- `Project.default_correction` field. Drives the Enable cascade: existing `Track.correction` → `Project.default_correction` → feature default (Suno-Clean).
+
+### Changed
+- Existing destructive **Disable all** button renamed to **⟲ Reset all** to clarify it strips chain configs.
+- `enable_all_corrections` now uses the three-step cascade above.
+- Phase-B audio-callback refactor: zero per-callback `Vec` allocations; per-buffer cache for atomic loads (~250× fewer per typical 256-frame buffer); static fader gain pre-converted to linear once per buffer instead of per-sample `db_to_lin`.
+
+## [0.3.3] — 2026-04-27
+
+### Added
+- Ephemeral global A/B toggle on the Mix tab transport. Flips player's `global_bypass` atomic without touching the project state. Mid-playback, instant.
+
+## [0.3.2] — 2026-04-27
+
+### Added
+- Bulk correction toggles on the Mix tab transport: `+ Enable all corrections` / `− Disable all`. Adaptive labels showing how many tracks each affects.
+
+## [0.3.1] — 2026-04-27
+
+### Added
+- Suno session metadata captured at import: epoch (Unix integer seconds, sortable directly), ordinal (project-relative monotonic), provenance.
+- Duplicate-import detection: re-importing the same Suno render triggers a Replace/Cancel modal before any files are touched.
+- `Project.next_suno_ordinal` counter; bumped on every successful import.
+
+## [0.3.0] — 2026-04-26
+
+### Added
+- **Console mixer** on the Mix tab — vertical fader strips per track plus a master strip with stereo meters, M/S/R toggles.
+- **Volume automation** — fader gestures recorded during armed playback, replayed via Catmull-Rom splines (`splines` crate). Per-track and per-master.
+- `Track.gain_automation`, `Project.master_gain_automation`, `Project.master_gain_db`.
+
+## [0.2.2] — 2026-04-26
+
+### Fixed
+- Suno import was silent on failure. Now lenient (skips bad entries instead of bailing); writes a per-import diagnostic log to `%APPDATA%\TinyBooth Sound Studio\logs\`; pops a modal after every import (success or fail) with summary, log path, and Open Log Folder button.
+
+## [0.2.1] — 2026-04-26
+
+### Added
+- Auto-restore last project on startup via `config.last_project_path`.
+- File → Open Recent (eight most-recently-opened, dead entries auto-pruned).
+
+## [0.2.0] — 2026-04-25
+
+### Added
+- **Mix tab** with multitrack waveform lanes, synchronized playhead, transport, per-track A/B bypass, Correction editor.
+- `src/player.rs` — cpal output stream, pre-loaded track buffers, atomic playhead, transport state.
+- `Track.correction: Option<Profile>`; mixdown at export honours it.
+
+## [0.1.6] — 2026-04-25
+
+### Added
+- DSP substrate from TBSS-FR-0001: parametric EQ + de-esser added to `FilterChain` / `FilterChainStereo`; `Suno-Clean` preset shipped.
+
+## [0.1.5] — 2026-04-25
+
+### Added
+- In-app manual: 12 chapters embedded via `include_str!` of `docs/manual/*.md`. `Help → Manual…` or `F1` anywhere.
+
+## [0.1.4] — 2026-04-24
+
+### Added
+- Suno stem bundle ingestion (folder + zip). `TrackSource::SunoStem { role, original_filename }`. `StemRole` covers the documented 12-stem set plus `Instrumental`/`Master`/`Unknown`.
+
+## [0.1.3] — 2026-04-19
+
+### Added
+- Stereo visualisation: dual waveforms, dual peak meters in stereo recording mode.
+
+## [0.1.2] — 2026-04-19
+
+### Added
+- Real brand icon (walnut booth + cream mic + teal waveform). Multi-size ICO; window viewport icon embedded in exe; banner README header.
+
+## [0.1.1] — 2026-04-19
+
+### Added
+- Stereo recording: `SourceMode { Mixdown, Channel(u16), Stereo }`. `FilterChainStereo` with envelope-linked gate + compressor.
+
+## [0.1.0] — 2026-04-19
+
+Initial release. Skeleton-bootstrapped Rust + egui app:
+
+- Record tab with cpal input, channel/mixdown selection, recording-tone presets (Guitar default), live waveform + spectrum + peak meter.
+- Project tab with track table, JSON manifest format (`.tinybooth`).
+- Export tab: WAV native via hound; FLAC/MP3/Ogg/Opus/M4A via ffmpeg subprocess.
+- Self-update via GitHub Releases.
+- WiX MSI installer; tag-driven CI.
+
+[Unreleased]: https://github.com/ophiocus/TinyBoothSoundStudio/compare/v0.3.8...HEAD
+[0.3.8]: https://github.com/ophiocus/TinyBoothSoundStudio/compare/v0.3.7...v0.3.8
+[0.3.7]: https://github.com/ophiocus/TinyBoothSoundStudio/compare/v0.3.6...v0.3.7
+[0.3.6]: https://github.com/ophiocus/TinyBoothSoundStudio/compare/v0.3.5...v0.3.6
+[0.3.5]: https://github.com/ophiocus/TinyBoothSoundStudio/compare/v0.3.4...v0.3.5
+[0.3.4]: https://github.com/ophiocus/TinyBoothSoundStudio/compare/v0.3.3...v0.3.4
+[0.3.3]: https://github.com/ophiocus/TinyBoothSoundStudio/compare/v0.3.2...v0.3.3
+[0.3.2]: https://github.com/ophiocus/TinyBoothSoundStudio/compare/v0.3.1...v0.3.2
+[0.3.1]: https://github.com/ophiocus/TinyBoothSoundStudio/compare/v0.3.0...v0.3.1
+[0.3.0]: https://github.com/ophiocus/TinyBoothSoundStudio/compare/v0.2.2...v0.3.0
+[0.2.2]: https://github.com/ophiocus/TinyBoothSoundStudio/compare/v0.2.1...v0.2.2
+[0.2.1]: https://github.com/ophiocus/TinyBoothSoundStudio/compare/v0.2.0...v0.2.1
+[0.2.0]: https://github.com/ophiocus/TinyBoothSoundStudio/compare/v0.1.6...v0.2.0
+[0.1.6]: https://github.com/ophiocus/TinyBoothSoundStudio/compare/v0.1.5...v0.1.6
+[0.1.5]: https://github.com/ophiocus/TinyBoothSoundStudio/compare/v0.1.4...v0.1.5
+[0.1.4]: https://github.com/ophiocus/TinyBoothSoundStudio/compare/v0.1.3...v0.1.4
+[0.1.3]: https://github.com/ophiocus/TinyBoothSoundStudio/compare/v0.1.2...v0.1.3
+[0.1.2]: https://github.com/ophiocus/TinyBoothSoundStudio/compare/v0.1.1...v0.1.2
+[0.1.1]: https://github.com/ophiocus/TinyBoothSoundStudio/compare/v0.1.0...v0.1.1
+[0.1.0]: https://github.com/ophiocus/TinyBoothSoundStudio/releases/tag/v0.1.0
