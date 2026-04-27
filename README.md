@@ -31,6 +31,13 @@ Every parameter is editable under **Admin → Recording-tone profiles…** and p
 
 The full manual lives at [`docs/manual/`](docs/manual/) — twelve chapters covering every shipped feature, with appendices on troubleshooting and file formats. The same Markdown files are embedded into the binary at compile time, so the in-app **Help → Manual…** window (or **F1** anywhere) shows byte-identical content. Edit a chapter and it updates both surfaces on the next build.
 
+For developers / contributors:
+
+- **[`docs/architecture.md`](docs/architecture.md)** — current application anatomy: module map, threading model, three principal flows, schema versioning, build & release pipeline.
+- **[`docs/rust-survival-guide.md`](docs/rust-survival-guide.md)** — opinionated field manual for shipping Rust desktop apps. Project structure, error handling, threading, GUI patterns, serialisation compatibility, build/dist, CI, self-update, logging, testing, dependency hygiene, performance, security.
+- **[`docs/audit/`](docs/audit/)** — periodic clinical audits of the codebase with categorised findings and prioritised refactor suggestions. Latest: [2026-04-27 (v0.3.5)](docs/audit/2026-04-27-codebase-audit.md).
+- **[`docs/feature-requests/`](docs/feature-requests/)** — formal RFCs (TBSS-FR-NNNN) for past and proposed features.
+
 | Welcome | Reference | Appendix |
 |---|---|---|
 | [Welcome](docs/manual/00-index.md) | [Recording](docs/manual/02-recording.md) | [Troubleshooting](docs/manual/appendix-a-troubleshooting.md) |

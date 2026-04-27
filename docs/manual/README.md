@@ -29,3 +29,12 @@ The files in this folder are the **single source of truth**: they render here on
 ## Editing
 
 If you spot a typo or want to extend a chapter, the pages are plain Markdown. Open a PR; the next tagged release will ship the updated text both in this folder and inside the in-app manual. No separate documentation pipeline.
+
+## See also
+
+User-facing documentation lives here. For developers and contributors, sibling docs cover:
+
+- [`../architecture.md`](../architecture.md) — application anatomy and threading model
+- [`../rust-survival-guide.md`](../rust-survival-guide.md) — Rust patterns for industrial-grade desktop apps
+- [`../audit/`](../audit/) — periodic codebase audits with categorised findings
+- [`../feature-requests/`](../feature-requests/) — formal RFCs for past and proposed features
