@@ -350,6 +350,68 @@ impl TinyBoothApp {
         self.apply_import_outcome(outcome);
     }
 
+    /// Apply the Suno-Clean preset to every track that doesn't already
+    /// carry a correction chain. Bulk action — saves the user from
+    /// clicking `+ Correction` on every stem of a 9-stem project.
+    pub fn enable_all_corrections(&mut self) {
+        let seed = self.profiles.iter().find(|p| p.name == "Suno-Clean")
+            .or_else(|| self.profiles.first())
+            .cloned();
+        let Some(seed) = seed else {
+            self.status = Some("No profiles available to seed corrections.".into());
+            return;
+        };
+        let mut changed = 0;
+        let mut already = 0;
+        for (i, track) in self.project.tracks.iter_mut().enumerate() {
+            if track.correction.is_some() {
+                already += 1;
+                continue;
+            }
+            track.correction = Some(seed.clone());
+            changed += 1;
+            if let Some(player) = self.player.as_ref() {
+                if let Some(t) = player.state.tracks.get(i) {
+                    t.set_correction(Some(seed.clone()));
+                }
+            }
+        }
+        if changed > 0 {
+            self.project_dirty = true;
+            let preset = &seed.name;
+            self.status = Some(if already > 0 {
+                format!("Enabled '{preset}' on {changed} track(s) — {already} already had corrections.")
+            } else {
+                format!("Enabled '{preset}' on all {changed} track(s).")
+            });
+        } else {
+            self.status = Some(format!("All {already} track(s) already have corrections."));
+        }
+    }
+
+    /// Strip every track's correction chain. Counterpart to
+    /// `enable_all_corrections` for full project-level A/B comparison
+    /// or starting over from scratch.
+    pub fn disable_all_corrections(&mut self) {
+        let mut changed = 0;
+        for (i, track) in self.project.tracks.iter_mut().enumerate() {
+            if track.correction.is_none() { continue; }
+            track.correction = None;
+            changed += 1;
+            if let Some(player) = self.player.as_ref() {
+                if let Some(t) = player.state.tracks.get(i) {
+                    t.set_correction(None);
+                }
+            }
+        }
+        if changed > 0 {
+            self.project_dirty = true;
+            self.status = Some(format!("Disabled corrections on {changed} track(s)."));
+        } else {
+            self.status = Some("No tracks had corrections to disable.".into());
+        }
+    }
+
     /// Resolve a pending import (called by the conflict modal).
     /// `replace = true` wipes the existing project and re-imports.
     pub fn resolve_import_conflict(&mut self, replace: bool) {

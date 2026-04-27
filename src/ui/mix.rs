@@ -114,9 +114,17 @@ fn transport_bar(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
         (false, false, String::new(), 0)
     };
 
+    // How many tracks already carry a correction chain — drives the
+    // bulk-action buttons' enabled state and labels.
+    let n_tracks = app.project.tracks.len();
+    let n_with_corr = app.project.tracks.iter().filter(|t| t.correction.is_some()).count();
+    let n_without_corr = n_tracks.saturating_sub(n_with_corr);
+
     let mut click_play = false;
     let mut click_pause = false;
     let mut click_stop = false;
+    let mut click_enable_all = false;
+    let mut click_disable_all = false;
 
     ui.horizontal(|ui| {
         ui.heading("Mix");
@@ -138,12 +146,45 @@ fn transport_bar(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
             ui.monospace(pos_str);
             ui.separator();
             ui.label(format!("{} Hz · stereo bus", sample_rate));
+            ui.separator();
         }
+
+        // Bulk correction toggles. "Enable all" seeds Suno-Clean on
+        // every track currently at correction = None; doesn't overwrite
+        // tracks the user has already tweaked.
+        ui.add_enabled_ui(n_tracks > 0 && n_without_corr > 0, |ui| {
+            let label = if n_without_corr == n_tracks {
+                "+ Enable all corrections".to_string()
+            } else {
+                format!("+ Enable corrections on {n_without_corr}/{n_tracks}")
+            };
+            if ui.add(egui::Button::new(label).min_size(egui::vec2(160.0, 28.0)))
+                .on_hover_text("Apply Suno-Clean to every track without an existing correction chain. Doesn't overwrite tracks you've already edited.")
+                .clicked()
+            {
+                click_enable_all = true;
+            }
+        });
+        ui.add_enabled_ui(n_with_corr > 0, |ui| {
+            let label = if n_with_corr == n_tracks {
+                "− Disable all".to_string()
+            } else {
+                format!("− Disable {n_with_corr}/{n_tracks}")
+            };
+            if ui.add(egui::Button::new(label).min_size(egui::vec2(120.0, 28.0)))
+                .on_hover_text("Strip every correction chain. Project-level A/B — re-enable to restore.")
+                .clicked()
+            {
+                click_disable_all = true;
+            }
+        });
     });
 
     if click_play  { if let Some(p) = app.player.as_ref() { p.play(); } }
     if click_pause { if let Some(p) = app.player.as_ref() { p.pause(); } }
     if click_stop  { stop_and_commit_automation(app); }
+    if click_enable_all  { app.enable_all_corrections(); }
+    if click_disable_all { app.disable_all_corrections(); }
 }
 
 // ───────────────────── multitrack lane view ─────────────────────
