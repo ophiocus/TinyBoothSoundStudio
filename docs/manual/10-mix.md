@@ -74,7 +74,7 @@ Four buttons to the right of the time/rate cluster apply correction state at the
 
 | Button | Action | Mutates project? | Persisted? | Destructive? |
 |---|---|---|---|---|
-| **`+ Enable all corrections`** | Fills any track without a chain via the cascade below. | Yes (track.correction) | Yes (after Save) | No |
+| **`✓ Enable all corrections`** | Fills any track without a chain via the cascade below. | Yes (track.correction) | Yes (after Save) | No |
 | **`⊘ Disable (saves)`** | Sets `Project.corrections_disabled = true`. Player bypasses every chain at playback and export. Chain configs stay put. | Yes (project flag) | Yes (after Save) | No |
 | **`⟲ Reset all`** | Strips every track's chain (`correction = None`). | Yes (track.correction) | Yes (after Save) | **Yes — tweaks are lost.** |
 | **`A/B ☐ live` / `A/B ▣ bypassed`** | Flips the player's `global_bypass` atomic. Ephemeral. | No | No (lost on reload) | No |

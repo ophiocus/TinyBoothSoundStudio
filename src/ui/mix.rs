@@ -168,9 +168,9 @@ fn transport_bar(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
         // tracks the user has already tweaked.
         ui.add_enabled_ui(n_tracks > 0 && n_without_corr > 0, |ui| {
             let label = if n_without_corr == n_tracks {
-                "+ Enable all corrections".to_string()
+                "✓ Enable all corrections".to_string()
             } else {
-                format!("+ Enable corrections on {n_without_corr}/{n_tracks}")
+                format!("✓ Enable corrections on {n_without_corr}/{n_tracks}")
             };
             if ui.add(egui::Button::new(label).min_size(egui::vec2(160.0, 28.0)))
                 .on_hover_text("Apply Suno-Clean to every track without an existing correction chain. Doesn't overwrite tracks you've already edited.")
