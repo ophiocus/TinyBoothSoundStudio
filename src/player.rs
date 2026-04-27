@@ -379,17 +379,23 @@ fn build_output_stream(state: Arc<PlayerState>) -> Result<Stream> {
 
     let err_fn = |e| eprintln!("cpal output stream error: {e}");
 
-    // Per-track local audio-thread state, owned by the closure.
+    // ── Closure-owned audio-thread state. Allocated once at stream
+    //    creation; the callback NEVER allocates (cf. TBSS-FR-0004
+    //    follow-up Rust pass — all per-callback Vec allocs gone).
     let n = state.tracks.len();
     let mut chains: Vec<Option<FilterChainStereo>> = (0..n).map(|_| None).collect();
-    let mut seen_corr_gen: Vec<u64> = vec![0; n];
     let mut samplers: Vec<SplineSampler> = (0..n).map(|_| SplineSampler::default()).collect();
+    let mut seen_corr_gen: Vec<u64> = vec![0; n];
     let mut seen_auto_gen: Vec<u64> = vec![0; n];
     let mut master_sampler = SplineSampler::default();
     let mut seen_master_auto_gen: u64 = 0;
-    // Per-track and per-master peak running maxes — published every
-    // callback. Fast-attack / slow-release smoothing happens on the UI
-    // side when reading.
+    // Per-track per-buffer cache of values that DON'T change inside
+    // a single callback. Loaded once per buffer instead of once per
+    // sample — turns ~5 atomic loads × n_tracks × n_frames per buffer
+    // into ~5 atomic loads × n_tracks per buffer (~250× fewer loads
+    // for typical 256-frame buffers).
+    let mut buf_cache: Vec<TrackBufCache> = vec![TrackBufCache::default(); n];
+    let mut track_peaks: Vec<f32> = vec![0.0; n];
     let sample_rate_f = state.sample_rate as f32;
 
     let stream = dev.build_output_stream(
@@ -431,10 +437,31 @@ fn build_output_stream(state: Arc<PlayerState>) -> Result<Stream> {
             let master_armed = state.master_recording_armed.load(Ordering::Relaxed);
             let global_bypass = state.global_bypass.load(Ordering::Relaxed);
 
-            // Per-callback peak running maxes.
+            // ── Per-buffer cache (one atomic-load fan-out per track) ──
+            for (i, t) in state.tracks.iter().enumerate() {
+                let muted = t.mute.load(Ordering::Relaxed);
+                let solo  = t.solo.load(Ordering::Relaxed);
+                let bypass = global_bypass || t.bypass_correction.load(Ordering::Relaxed);
+                let armed  = t.recording_armed.load(Ordering::Relaxed);
+                let gain_db = t.gain_db();
+                buf_cache[i] = TrackBufCache {
+                    skip: muted || (any_solo && !solo),
+                    bypass,
+                    armed,
+                    static_gain_db: gain_db,
+                    static_gain_lin: db_to_lin(gain_db),
+                    has_chain: chains[i].is_some(),
+                    has_automation: !samplers[i].is_empty(),
+                };
+            }
+            let master_static_db = state.master_gain_db();
+            let master_static_lin = db_to_lin(master_static_db);
+            let master_has_auto = !master_sampler.is_empty();
+
+            // Reset per-track peak running maxes for this buffer.
+            for p in track_peaks.iter_mut() { *p = 0.0; }
             let mut peak_l = 0.0f32;
             let mut peak_r = 0.0f32;
-            let mut track_peaks = vec![0.0f32; n];
 
             for f in 0..frames {
                 let mut l_sum = 0.0f32;
@@ -443,44 +470,43 @@ fn build_output_stream(state: Arc<PlayerState>) -> Result<Stream> {
                 if play_state == PlayState::Playing && pos < state.longest_frames {
                     let t_secs = pos as f32 / sample_rate_f;
                     for (i, t) in state.tracks.iter().enumerate() {
-                        if t.mute.load(Ordering::Relaxed) { continue; }
-                        if any_solo && !t.solo.load(Ordering::Relaxed) { continue; }
+                        let c = &buf_cache[i];
+                        if c.skip { continue; }
                         if pos >= t.frame_count { continue; }
-                        let bypass = global_bypass || t.bypass_correction.load(Ordering::Relaxed);
-                        let armed = t.recording_armed.load(Ordering::Relaxed);
                         let (l_raw, r_raw) = read_frame(t, pos);
-                        let (l, r) = if !bypass {
-                            if let Some(c) = chains[i].as_mut() {
-                                c.process(l_raw, r_raw)
-                            } else { (l_raw, r_raw) }
+                        let (l, r) = if !c.bypass && c.has_chain {
+                            // SAFETY: has_chain == true ⇒ chains[i] is Some.
+                            chains[i].as_mut().unwrap().process(l_raw, r_raw)
                         } else { (l_raw, r_raw) };
-                        // Effective gain: spline sample if available and not
-                        // armed (and not bypassed); else the static fader value.
-                        let effective_gain_db = if !bypass && !armed {
-                            samplers[i].sample(t_secs).unwrap_or_else(|| t.gain_db())
+                        // Static gain dominates: pre-computed in buf_cache.
+                        // Only re-derive when automation is active and not
+                        // overridden by bypass / arm.
+                        let g = if c.has_automation && !c.bypass && !c.armed {
+                            let auto_db = samplers[i].sample(t_secs).unwrap_or(c.static_gain_db);
+                            db_to_lin(auto_db)
                         } else {
-                            t.gain_db()
+                            c.static_gain_lin
                         };
-                        let g = db_to_lin(effective_gain_db);
                         let post_l = l * g;
                         let post_r = r * g;
                         l_sum += post_l;
                         r_sum += post_r;
-                        // Per-track peak (post-fader, post-correction).
                         let peak = post_l.abs().max(post_r.abs());
                         if peak > track_peaks[i] { track_peaks[i] = peak; }
                     }
                     pos += 1;
                 }
 
-                // Master fader + automation.
-                let master_db = if !master_armed {
-                    master_sampler.sample(pos as f32 / sample_rate_f)
-                        .unwrap_or_else(|| state.master_gain_db())
+                // Master fader + automation. Static path uses the
+                // pre-computed linear gain; only the automation branch
+                // does a per-frame db_to_lin.
+                let master_g = if master_has_auto && !master_armed {
+                    let db = master_sampler.sample(pos as f32 / sample_rate_f)
+                        .unwrap_or(master_static_db);
+                    db_to_lin(db)
                 } else {
-                    state.master_gain_db()
+                    master_static_lin
                 };
-                let master_g = db_to_lin(master_db);
                 let out_l = (l_sum * master_g).clamp(-1.0, 1.0);
                 let out_r = (r_sum * master_g).clamp(-1.0, 1.0);
 
@@ -525,6 +551,32 @@ fn build_output_stream(state: Arc<PlayerState>) -> Result<Stream> {
         None,
     )?;
     Ok(stream)
+}
+
+/// Per-buffer per-track cache. Lives in the audio callback's closure
+/// state; refreshed once per buffer so the per-sample inner loop avoids
+/// re-loading atomics and re-computing `db_to_lin` for unchanged values.
+#[derive(Debug, Clone, Copy, Default)]
+struct TrackBufCache {
+    /// True when this track is excluded from the mix (mute, or solo
+    /// active elsewhere and this track isn't soloed).
+    skip: bool,
+    /// True when this track's correction chain (and automation) should
+    /// be skipped — global_bypass OR per-track bypass_correction.
+    bypass: bool,
+    /// True when the track is currently arming an automation lane
+    /// recording — disables automation playback so the user's hand is
+    /// authoritative.
+    armed: bool,
+    /// Pre-cached fader value (dB) for the rare automation-active path.
+    static_gain_db: f32,
+    /// Pre-cached fader value already converted to linear — used by
+    /// every sample whose gain isn't being driven by automation.
+    static_gain_lin: f32,
+    /// Whether the track has a non-empty correction chain installed.
+    has_chain: bool,
+    /// Whether the track's automation sampler can produce values.
+    has_automation: bool,
 }
 
 /// Read one frame at the given position. Mono tracks pan to centre
