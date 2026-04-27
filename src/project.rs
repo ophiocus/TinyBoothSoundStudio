@@ -19,16 +19,21 @@ use crate::automation::AutomationLane;
 pub const MANIFEST_NAME: &str = "project.tinybooth";
 pub const TRACKS_DIR: &str = "tracks";
 
-fn default_master_gain_db() -> f32 { 0.0 }
-fn default_next_suno_ordinal() -> u32 { 1 }
+fn default_master_gain_db() -> f32 {
+    0.0
+}
+fn default_next_suno_ordinal() -> u32 {
+    1
+}
 
 /// What kind of source a track came from. Drives downstream UX (e.g. the
 /// Clean tab can dispatch role-aware processing on Suno stems while
 /// leaving Recorded takes alone).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum TrackSource {
     /// Default — captured by TinyBooth's own Record tab.
+    #[default]
     Recorded,
     /// Imported from a Suno stem bundle.
     SunoStem {
@@ -51,10 +56,6 @@ pub enum TrackSource {
         #[serde(default)]
         provenance: Option<String>,
     },
-}
-
-impl Default for TrackSource {
-    fn default() -> Self { Self::Recorded }
 }
 
 /// Stem identity inferred from a Suno bundle's filenames. Covers the
@@ -178,9 +179,11 @@ pub struct Project {
 
     /// Project-level default correction profile. Used by "Enable all"
     /// as the seed when a track has no chain yet — cascade is:
-    ///   1. existing track.correction (kept as-is if Some)
-    ///   2. this project default (if Some)
-    ///   3. feature default (Suno-Clean from builtin_profiles)
+    ///
+    /// 1. existing track.correction (kept as-is if Some)
+    /// 2. this project default (if Some)
+    /// 3. feature default (Suno-Clean from builtin_profiles)
+    ///
     /// Edit by hand in the manifest until a UI lands. Added v0.3.4.
     #[serde(default)]
     pub default_correction: Option<crate::dsp::Profile>,
@@ -206,8 +209,12 @@ impl Project {
         }
     }
 
-    pub fn manifest_path(&self) -> PathBuf { self.root.join(MANIFEST_NAME) }
-    pub fn tracks_dir(&self) -> PathBuf { self.root.join(TRACKS_DIR) }
+    pub fn manifest_path(&self) -> PathBuf {
+        self.root.join(MANIFEST_NAME)
+    }
+    pub fn tracks_dir(&self) -> PathBuf {
+        self.root.join(TRACKS_DIR)
+    }
 
     pub fn save(&self) -> Result<()> {
         std::fs::create_dir_all(&self.root).context("creating project dir")?;
@@ -224,7 +231,7 @@ impl Project {
         p.root = manifest
             .parent()
             .map(|p| p.to_path_buf())
-            .unwrap_or_else(PathBuf::new);
+            .unwrap_or_default();
         Ok(p)
     }
 
@@ -241,5 +248,146 @@ impl Project {
 
     pub fn track_abs_path(&self, track: &Track) -> PathBuf {
         self.root.join(&track.file)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::automation::{AutomationLane, AutomationPoint};
+
+    fn fixture_track() -> Track {
+        Track {
+            id: "track-001".into(),
+            name: "Vocals".into(),
+            file: "tracks/track-001.wav".into(),
+            mute: false,
+            gain_db: -3.0,
+            sample_rate: 48_000,
+            channel_source: None,
+            duration_secs: 47.2,
+            profile: None,
+            stereo: true,
+            source: TrackSource::SunoStem {
+                role: StemRole::Vocals,
+                original_filename: "vocals.wav".into(),
+                session_epoch: Some(1_777_095_097),
+                session_ordinal: Some(1),
+                provenance: Some("made with suno studio".into()),
+            },
+            correction: None,
+            gain_automation: Some(AutomationLane {
+                points: vec![
+                    AutomationPoint {
+                        time_secs: 0.0,
+                        gain_db: -3.0,
+                    },
+                    AutomationPoint {
+                        time_secs: 5.0,
+                        gain_db: -1.5,
+                    },
+                    AutomationPoint {
+                        time_secs: 10.0,
+                        gain_db: -3.0,
+                    },
+                ],
+            }),
+        }
+    }
+
+    fn fixture_project() -> Project {
+        Project {
+            version: 1,
+            name: "test session".into(),
+            created: chrono::Utc::now(),
+            tracks: vec![fixture_track()],
+            master_gain_db: -1.5,
+            master_gain_automation: None,
+            next_suno_ordinal: 2,
+            corrections_disabled: false,
+            default_correction: None,
+            root: PathBuf::from("/tmp/test"),
+        }
+    }
+
+    #[test]
+    fn round_trip_preserves_all_fields() {
+        let original = fixture_project();
+        let json = serde_json::to_string_pretty(&original).expect("serialise");
+        let restored: Project = serde_json::from_str(&json).expect("deserialise");
+
+        // root is #[serde(skip)] so it's expected to come back as default.
+        assert_eq!(original.version, restored.version);
+        assert_eq!(original.name, restored.name);
+        assert_eq!(original.master_gain_db, restored.master_gain_db);
+        assert_eq!(original.next_suno_ordinal, restored.next_suno_ordinal);
+        assert_eq!(original.corrections_disabled, restored.corrections_disabled);
+        assert_eq!(original.tracks.len(), restored.tracks.len());
+
+        let t0 = &restored.tracks[0];
+        assert_eq!(t0.id, "track-001");
+        assert_eq!(t0.name, "Vocals");
+        assert_eq!(t0.gain_db, -3.0);
+        assert!(t0.stereo);
+        assert!(t0.gain_automation.is_some());
+        assert_eq!(t0.gain_automation.as_ref().unwrap().points.len(), 3);
+
+        match &t0.source {
+            TrackSource::SunoStem {
+                role,
+                session_epoch,
+                session_ordinal,
+                provenance,
+                original_filename,
+            } => {
+                assert_eq!(*role, StemRole::Vocals);
+                assert_eq!(*session_epoch, Some(1_777_095_097));
+                assert_eq!(*session_ordinal, Some(1));
+                assert_eq!(provenance.as_deref(), Some("made with suno studio"));
+                assert_eq!(original_filename, "vocals.wav");
+            }
+            _ => panic!("source should round-trip as SunoStem"),
+        }
+    }
+
+    #[test]
+    fn old_v0_1_manifest_loads_with_defaults() {
+        // Minimal manifest as v0.1 would have written it — no stereo,
+        // no profile, no source, no correction, no automation, no
+        // master_gain_db, no next_suno_ordinal, no corrections_disabled,
+        // no default_correction. All must default cleanly.
+        let json = r#"{
+            "version": 1,
+            "name": "old session",
+            "created": "2026-01-01T00:00:00Z",
+            "tracks": [
+                {
+                    "id": "track-001",
+                    "name": "take-1",
+                    "file": "tracks/track-001.wav",
+                    "mute": false,
+                    "gain_db": 0.0,
+                    "sample_rate": 48000,
+                    "channel_source": null
+                }
+            ]
+        }"#;
+        let p: Project = serde_json::from_str(json).expect("v0.1 manifest must load");
+        assert_eq!(p.tracks.len(), 1);
+        assert_eq!(p.master_gain_db, 0.0);
+        assert_eq!(p.next_suno_ordinal, 1);
+        assert!(!p.corrections_disabled);
+        assert!(p.default_correction.is_none());
+
+        let t = &p.tracks[0];
+        assert!(!t.stereo);
+        assert!(t.profile.is_none());
+        assert!(t.correction.is_none());
+        assert!(t.gain_automation.is_none());
+        // TrackSource defaults to Recorded.
+        match &t.source {
+            TrackSource::Recorded => {}
+            _ => panic!("missing source field should default to Recorded"),
+        }
     }
 }

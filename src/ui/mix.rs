@@ -44,7 +44,7 @@ pub fn show(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
     if need_rebuild {
         app.player = None;
         app.player_error = None;
-        match Player::new(&app.project) {
+        match Player::new(&app.project, app.audio_err_tx.clone()) {
             Ok(p) => app.player = Some(p),
             Err(e) => app.player_error = Some(format!("{e}")),
         }
@@ -56,7 +56,9 @@ pub fn show(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
         ui.colored_label(Color32::LIGHT_RED, err);
         return;
     }
-    if app.player.is_none() { return; }
+    if app.player.is_none() {
+        return;
+    }
 
     ui.separator();
 
@@ -74,19 +76,28 @@ pub fn show(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
     egui::TopBottomPanel::top("mix_lanes_panel")
         .resizable(false)
         .exact_height(lanes_h)
-        .show_inside(ui, |ui| { lanes_view(app, ui); });
+        .show_inside(ui, |ui| {
+            lanes_view(app, ui);
+        });
 
     // Resize handle.
     ui.add_space(2.0);
-    let (drag_rect, drag_resp) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), 6.0),
-        egui::Sense::drag(),
-    );
+    let (drag_rect, drag_resp) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 6.0), egui::Sense::drag());
     let painter = ui.painter_at(drag_rect);
     painter.line_segment(
-        [Pos2::new(drag_rect.min.x + 60.0, drag_rect.center().y),
-         Pos2::new(drag_rect.max.x - 60.0, drag_rect.center().y)],
-        Stroke::new(2.0, if drag_resp.hovered() { Color32::from_gray(120) } else { Color32::from_gray(60) }),
+        [
+            Pos2::new(drag_rect.min.x + 60.0, drag_rect.center().y),
+            Pos2::new(drag_rect.max.x - 60.0, drag_rect.center().y),
+        ],
+        Stroke::new(
+            2.0,
+            if drag_resp.hovered() {
+                Color32::from_gray(120)
+            } else {
+                Color32::from_gray(60)
+            },
+        ),
     );
     if drag_resp.dragged() {
         let dy = drag_resp.drag_delta().y / total;
@@ -117,13 +128,21 @@ fn transport_bar(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
     // How many tracks already carry a correction chain — drives the
     // bulk-action buttons' enabled state and labels.
     let n_tracks = app.project.tracks.len();
-    let n_with_corr = app.project.tracks.iter().filter(|t| t.correction.is_some()).count();
+    let n_with_corr = app
+        .project
+        .tracks
+        .iter()
+        .filter(|t| t.correction.is_some())
+        .count();
     let n_without_corr = n_tracks.saturating_sub(n_with_corr);
 
     // Ephemeral global bypass — atomic on PlayerState, set by either
     // the A/B button (transient) or the persisted Disable toggle.
     let global_bypass_on = match app.player.as_ref() {
-        Some(p) => p.state.global_bypass.load(std::sync::atomic::Ordering::Relaxed),
+        Some(p) => p
+            .state
+            .global_bypass
+            .load(std::sync::atomic::Ordering::Relaxed),
         None => false,
     };
     // Persisted project flag — separate from the atomic so the user can
@@ -222,19 +241,39 @@ fn transport_bar(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
         });
     });
 
-    if click_play  { if let Some(p) = app.player.as_ref() { p.play(); } }
-    if click_pause { if let Some(p) = app.player.as_ref() { p.pause(); } }
-    if click_stop  { stop_and_commit_automation(app); }
-    if click_enable_all       { app.enable_all_corrections(); }
-    if click_disable_persisted { app.toggle_corrections_disabled(); }
-    if click_reset_all        { app.reset_all_corrections(); }
-    if click_toggle_bypass    { app.toggle_global_bypass(); }
+    if click_play {
+        if let Some(p) = app.player.as_ref() {
+            p.play();
+        }
+    }
+    if click_pause {
+        if let Some(p) = app.player.as_ref() {
+            p.pause();
+        }
+    }
+    if click_stop {
+        stop_and_commit_automation(app);
+    }
+    if click_enable_all {
+        app.enable_all_corrections();
+    }
+    if click_disable_persisted {
+        app.toggle_corrections_disabled();
+    }
+    if click_reset_all {
+        app.reset_all_corrections();
+    }
+    if click_toggle_bypass {
+        app.toggle_global_bypass();
+    }
 }
 
 // ───────────────────── multitrack lane view ─────────────────────
 
 fn lanes_view(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
-    let Some(player) = app.player.as_ref() else { return };
+    let Some(player) = app.player.as_ref() else {
+        return;
+    };
     let dur = player.state.duration_secs().max(0.001);
     let pos = player.state.position_secs();
 
@@ -253,15 +292,24 @@ fn lanes_view(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
                             let mut bypass = track.bypass_correction.load(Ordering::Relaxed);
                             let has_corr = track.correction().is_some();
                             ui.add_enabled_ui(has_corr, |ui| {
-                                if ui.add(egui::SelectableLabel::new(bypass, "A/B"))
-                                    .on_hover_text(if bypass { "Bypassed (original)" } else { "Correction active" })
+                                if ui
+                                    .add(egui::SelectableLabel::new(bypass, "A/B"))
+                                    .on_hover_text(if bypass {
+                                        "Bypassed (original)"
+                                    } else {
+                                        "Correction active"
+                                    })
                                     .clicked()
                                 {
                                     bypass = !bypass;
                                     track.bypass_correction.store(bypass, Ordering::Relaxed);
                                 }
                             });
-                            let label = if has_corr { "Correction" } else { "+ Correction" };
+                            let label = if has_corr {
+                                "Correction"
+                            } else {
+                                "+ Correction"
+                            };
                             if ui.button(label).clicked() {
                                 requested_correction = Some(idx);
                             }
@@ -270,8 +318,18 @@ fn lanes_view(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
                 );
 
                 let avail = ui.available_size().x.max(200.0);
-                let (rect, _) = ui.allocate_exact_size(egui::vec2(avail, LANE_H), egui::Sense::hover());
-                draw_lane(ui, rect, &track.peaks, dur, pos, track.frame_count, track.sample_rate, track.automation().as_ref());
+                let (rect, _) =
+                    ui.allocate_exact_size(egui::vec2(avail, LANE_H), egui::Sense::hover());
+                draw_lane(
+                    ui,
+                    rect,
+                    &track.peaks,
+                    dur,
+                    pos,
+                    track.frame_count,
+                    track.sample_rate,
+                    track.automation().as_ref(),
+                );
             });
             ui.add_space(ROW_GAP);
         }
@@ -279,8 +337,12 @@ fn lanes_view(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
 
     if let Some(i) = requested_correction {
         if app.project.tracks[i].correction.is_none() {
-            let seed = app.profiles.iter().find(|p| p.name == "Suno-Clean")
-                .or_else(|| app.profiles.first()).cloned();
+            let seed = app
+                .profiles
+                .iter()
+                .find(|p| p.name == "Suno-Clean")
+                .or_else(|| app.profiles.first())
+                .cloned();
             app.project.tracks[i].correction = seed.clone();
             app.project_dirty = true;
             if let Some(player) = app.player.as_ref() {
@@ -293,6 +355,7 @@ fn lanes_view(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_lane(
     ui: &mut egui::Ui,
     rect: Rect,
@@ -305,7 +368,9 @@ fn draw_lane(
 ) {
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 4.0, Color32::from_rgb(10, 10, 14));
-    if peaks.is_empty() { return; }
+    if peaks.is_empty() {
+        return;
+    }
 
     let track_secs = track_frames as f32 / sample_rate.max(1) as f32;
     let track_w = rect.width() * (track_secs / total_secs).min(1.0);
@@ -368,23 +433,34 @@ fn draw_lane(
 // ───────────────────── console deck ─────────────────────
 
 fn console_deck(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
-    let n_tracks = match app.player.as_ref() { Some(p) => p.state.tracks.len(), None => return };
+    let n_tracks = match app.player.as_ref() {
+        Some(p) => p.state.tracks.len(),
+        None => return,
+    };
     let mut commit_track: Option<usize> = None;
     let mut commit_master = false;
 
     egui::ScrollArea::horizontal().show(ui, |ui| {
         ui.horizontal(|ui| {
             for idx in 0..n_tracks {
-                if strip(app, ui, idx) { commit_track = Some(idx); }
+                if strip(app, ui, idx) {
+                    commit_track = Some(idx);
+                }
                 ui.add_space(STRIP_GAP);
             }
             ui.add_space(STRIP_GAP * 2.0);
-            if master_strip(app, ui) { commit_master = true; }
+            if master_strip(app, ui) {
+                commit_master = true;
+            }
         });
     });
 
-    if let Some(i) = commit_track { commit_track_automation(app, i); }
-    if commit_master { commit_master_automation(app); }
+    if let Some(i) = commit_track {
+        commit_track_automation(app, i);
+    }
+    if commit_master {
+        commit_master_automation(app);
+    }
 }
 
 /// Returns true if the strip's R toggle was just turned OFF (caller
@@ -393,7 +469,10 @@ fn strip(app: &mut TinyBoothApp, ui: &mut egui::Ui, idx: usize) -> bool {
     // Clone the Arc so we can drop the immutable borrow on app before
     // any mutation. Cheap — Arc clone is two atomic ops.
     let track = match app.player.as_ref() {
-        Some(p) => match p.state.tracks.get(idx) { Some(t) => t.clone(), None => return false },
+        Some(p) => match p.state.tracks.get(idx) {
+            Some(t) => t.clone(),
+            None => return false,
+        },
         None => return false,
     };
 
@@ -411,30 +490,42 @@ fn strip(app: &mut TinyBoothApp, ui: &mut egui::Ui, idx: usize) -> bool {
         .show(ui, |ui| {
             ui.set_width(STRIP_W);
             ui.vertical_centered(|ui| {
-                let name = if track.name.len() > 9 { &track.name[..9] } else { &track.name };
+                let name = if track.name.len() > 9 {
+                    &track.name[..9]
+                } else {
+                    &track.name
+                };
                 ui.label(egui::RichText::new(name).small().strong());
             });
             ui.add_space(2.0);
             ui.horizontal(|ui| {
                 let mute = track.mute.load(Ordering::Relaxed);
-                if ui.add_sized([20.0, 18.0], egui::SelectableLabel::new(mute, "M"))
-                    .on_hover_text("Mute").clicked()
+                if ui
+                    .add_sized([20.0, 18.0], egui::SelectableLabel::new(mute, "M"))
+                    .on_hover_text("Mute")
+                    .clicked()
                 {
                     track.mute.store(!mute, Ordering::Relaxed);
                 }
                 let solo = track.solo.load(Ordering::Relaxed);
-                if ui.add_sized([20.0, 18.0], egui::SelectableLabel::new(solo, "S"))
-                    .on_hover_text("Solo").clicked()
+                if ui
+                    .add_sized([20.0, 18.0], egui::SelectableLabel::new(solo, "S"))
+                    .on_hover_text("Solo")
+                    .clicked()
                 {
                     track.solo.store(!solo, Ordering::Relaxed);
                 }
                 let armed = track.recording_armed.load(Ordering::Relaxed);
-                if ui.add_sized([20.0, 18.0], egui::SelectableLabel::new(armed, "R"))
-                    .on_hover_text("Arm — record fader gestures during playback").clicked()
+                if ui
+                    .add_sized([20.0, 18.0], egui::SelectableLabel::new(armed, "R"))
+                    .on_hover_text("Arm — record fader gestures during playback")
+                    .clicked()
                 {
                     let new_armed = !armed;
                     track.recording_armed.store(new_armed, Ordering::Relaxed);
-                    if !new_armed { just_disarmed = true; }
+                    if !new_armed {
+                        just_disarmed = true;
+                    }
                 }
             });
             ui.add_space(4.0);
@@ -446,7 +537,9 @@ fn strip(app: &mut TinyBoothApp, ui: &mut egui::Ui, idx: usize) -> bool {
                         .vertical()
                         .show_value(false),
                 );
-                if resp.changed() { track.set_gain_db(gain); }
+                if resp.changed() {
+                    track.set_gain_db(gain);
+                }
                 draw_meter(ui, track.peak(), FADER_H);
             });
             ui.add_space(2.0);
@@ -462,7 +555,10 @@ fn strip(app: &mut TinyBoothApp, ui: &mut egui::Ui, idx: usize) -> bool {
 fn master_strip(app: &mut TinyBoothApp, ui: &mut egui::Ui) -> bool {
     // Clone the Arc<PlayerState> so we drop the immutable borrow on app
     // before any project-level mutation.
-    let state = match app.player.as_ref() { Some(p) => p.state.clone(), None => return false };
+    let state = match app.player.as_ref() {
+        Some(p) => p.state.clone(),
+        None => return false,
+    };
 
     let mut frame_color = Color32::from_rgb(28, 28, 36);
     if state.master_recording_armed.load(Ordering::Relaxed) {
@@ -477,8 +573,12 @@ fn master_strip(app: &mut TinyBoothApp, ui: &mut egui::Ui) -> bool {
         .show(ui, |ui| {
             ui.set_width(STRIP_W + 12.0);
             ui.vertical_centered(|ui| {
-                ui.label(egui::RichText::new("MASTER").small().strong()
-                    .color(Color32::from_rgb(230, 200, 80)));
+                ui.label(
+                    egui::RichText::new("MASTER")
+                        .small()
+                        .strong()
+                        .color(Color32::from_rgb(230, 200, 80)),
+                );
             });
             ui.add_space(2.0);
             ui.horizontal(|ui| {
@@ -487,12 +587,18 @@ fn master_strip(app: &mut TinyBoothApp, ui: &mut egui::Ui) -> bool {
                 ui.add_sized([20.0, 18.0], egui::SelectableLabel::new(false, "S"))
                     .on_hover_text("Solo (no-op on bus)");
                 let armed = state.master_recording_armed.load(Ordering::Relaxed);
-                if ui.add_sized([20.0, 18.0], egui::SelectableLabel::new(armed, "R"))
-                    .on_hover_text("Arm — record master fader gestures").clicked()
+                if ui
+                    .add_sized([20.0, 18.0], egui::SelectableLabel::new(armed, "R"))
+                    .on_hover_text("Arm — record master fader gestures")
+                    .clicked()
                 {
                     let new_armed = !armed;
-                    state.master_recording_armed.store(new_armed, Ordering::Relaxed);
-                    if !new_armed { just_disarmed = true; }
+                    state
+                        .master_recording_armed
+                        .store(new_armed, Ordering::Relaxed);
+                    if !new_armed {
+                        just_disarmed = true;
+                    }
                 }
             });
             ui.add_space(4.0);
@@ -508,8 +614,12 @@ fn master_strip(app: &mut TinyBoothApp, ui: &mut egui::Ui) -> bool {
                     state.set_master_gain_db(gain);
                     new_master_db = Some(gain);
                 }
-                ui.vertical(|ui| { draw_meter(ui, state.master_peak_left(), FADER_H); });
-                ui.vertical(|ui| { draw_meter(ui, state.master_peak_right(), FADER_H); });
+                ui.vertical(|ui| {
+                    draw_meter(ui, state.master_peak_left(), FADER_H);
+                });
+                ui.vertical(|ui| {
+                    draw_meter(ui, state.master_peak_right(), FADER_H);
+                });
             });
             ui.add_space(2.0);
             ui.vertical_centered(|ui| {
@@ -545,8 +655,12 @@ fn draw_meter(ui: &mut egui::Ui, peak: f32, height: f32) {
 // ───────────────────── automation recorder hooks ─────────────────────
 
 fn capture_automation(app: &mut TinyBoothApp) {
-    let Some(player) = app.player.as_ref() else { return };
-    if player.state.play_state() != PlayState::Playing { return; }
+    let Some(player) = app.player.as_ref() else {
+        return;
+    };
+    if player.state.play_state() != PlayState::Playing {
+        return;
+    }
     let t = player.state.position_secs();
     for (i, track) in player.state.tracks.iter().enumerate() {
         if track.recording_armed.load(Ordering::Relaxed) {
@@ -559,18 +673,27 @@ fn capture_automation(app: &mut TinyBoothApp) {
 }
 
 fn stop_and_commit_automation(app: &mut TinyBoothApp) {
-    if let Some(p) = app.player.as_ref() { p.stop(); }
+    if let Some(p) = app.player.as_ref() {
+        p.stop();
+    }
     // Commit any in-flight scratch lanes from armed strips.
     let arm_idxs: Vec<usize> = if let Some(p) = app.player.as_ref() {
-        p.state.tracks.iter().enumerate()
+        p.state
+            .tracks
+            .iter()
+            .enumerate()
             .filter(|(_, t)| t.recording_armed.load(Ordering::Relaxed))
             .map(|(i, _)| i)
             .collect()
-    } else { Vec::new() };
+    } else {
+        Vec::new()
+    };
     for i in arm_idxs {
         commit_track_automation(app, i);
     }
-    let master_armed = app.player.as_ref()
+    let master_armed = app
+        .player
+        .as_ref()
         .map(|p| p.state.master_recording_armed.load(Ordering::Relaxed))
         .unwrap_or(false);
     if master_armed {

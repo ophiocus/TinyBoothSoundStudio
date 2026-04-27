@@ -1,6 +1,6 @@
 [package]
 name = "tinybooth-sound-studio"
-version = "0.3.5"
+version = "0.3.6"
 edition = "2021"
 authors = ["ophiocus <csantanad@gmail.com>"]
 description = "Channel recorder, visualizer, and TinyBooth project exporter"

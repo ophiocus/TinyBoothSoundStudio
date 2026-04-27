@@ -23,7 +23,11 @@ pub fn show(app: &mut TinyBoothApp, ctx: &egui::Context) {
     let mut open_log_folder = false;
     let mut go_to_project_tab = false;
 
-    let title = if success { "✅  Import complete" } else { "⚠  Import did not complete" };
+    let title = if success {
+        "✅  Import complete"
+    } else {
+        "⚠  Import did not complete"
+    };
 
     egui::Window::new(title)
         .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
@@ -32,32 +36,47 @@ pub fn show(app: &mut TinyBoothApp, ctx: &egui::Context) {
         .min_width(520.0)
         .max_width(720.0)
         .show(ctx, |ui| {
-            ui.label(egui::RichText::new(if success { "Done." } else { "Nothing was imported." })
+            ui.label(
+                egui::RichText::new(if success {
+                    "Done."
+                } else {
+                    "Nothing was imported."
+                })
                 .color(if success {
                     egui::Color32::from_rgb(100, 220, 150)
                 } else {
                     egui::Color32::from_rgb(230, 180, 100)
                 })
-                .strong());
+                .strong(),
+            );
             ui.add_space(6.0);
             ui.label(format!("Source: {source}"));
             ui.separator();
-            egui::ScrollArea::vertical().max_height(280.0).show(ui, |ui| {
-                ui.label(summary);
-            });
+            egui::ScrollArea::vertical()
+                .max_height(280.0)
+                .show(ui, |ui| {
+                    ui.label(summary);
+                });
             ui.separator();
             ui.horizontal(|ui| {
-                if success {
-                    if ui.button("Go to Project tab").clicked() { go_to_project_tab = true; close = true; }
+                if success && ui.button("Go to Project tab").clicked() {
+                    go_to_project_tab = true;
+                    close = true;
                 }
-                if ui.button("Open log").on_hover_text(log_path.display().to_string()).clicked() {
+                if ui
+                    .button("Open log")
+                    .on_hover_text(log_path.display().to_string())
+                    .clicked()
+                {
                     open_log = true;
                 }
                 if ui.button("Open log folder").clicked() {
                     open_log_folder = true;
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("Close").clicked() { close = true; }
+                    if ui.button("Close").clicked() {
+                        close = true;
+                    }
                 });
             });
         });

@@ -29,7 +29,10 @@ pub fn show(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
     });
 
     ui.add_space(6.0);
-    ui.label(format!("Created: {}", app.project.created.format("%Y-%m-%d %H:%M UTC")));
+    ui.label(format!(
+        "Created: {}",
+        app.project.created.format("%Y-%m-%d %H:%M UTC")
+    ));
     ui.separator();
 
     if app.project.tracks.is_empty() {
@@ -64,8 +67,18 @@ pub fn show(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
                     app.project_dirty = true;
                 }
                 let (src, hover) = match &t.source {
-                    crate::project::TrackSource::SunoStem { role, original_filename, session_epoch, session_ordinal, provenance } => {
-                        let mut h = format!("Suno stem — {}\nfilename: {}", role.label(), original_filename);
+                    crate::project::TrackSource::SunoStem {
+                        role,
+                        original_filename,
+                        session_epoch,
+                        session_ordinal,
+                        provenance,
+                    } => {
+                        let mut h = format!(
+                            "Suno stem — {}\nfilename: {}",
+                            role.label(),
+                            original_filename
+                        );
                         if let Some(ord) = session_ordinal {
                             h.push_str(&format!("\nsession ordinal: {ord}"));
                         }

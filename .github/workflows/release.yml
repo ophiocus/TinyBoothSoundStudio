@@ -29,6 +29,17 @@ jobs:
           }
           echo "Release version: $tag"
 
+      # ── Quality gates (survival-guide §12). Fail fast if any of fmt
+      #    / clippy / tests would catch a regression that's about to ship.
+      - name: cargo fmt --check
+        run: cargo fmt --check
+
+      - name: cargo clippy
+        run: cargo clippy --release --all-targets -- -D warnings
+
+      - name: cargo test
+        run: cargo test --release
+
       - name: Build release
         run: cargo build --release
 

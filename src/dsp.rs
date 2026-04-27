@@ -14,9 +14,7 @@
 //!   4. Makeup + input gain                    — trim levels
 
 use anyhow::{Context, Result};
-use biquad::{
-    Biquad, Coefficients, DirectForm2Transposed, ToHertz, Type, Q_BUTTERWORTH_F32,
-};
+use biquad::{Biquad, Coefficients, DirectForm2Transposed, ToHertz, Type, Q_BUTTERWORTH_F32};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -37,7 +35,12 @@ pub struct EqBand {
 
 impl EqBand {
     pub const fn bypass() -> Self {
-        Self { kind: EqBandKind::Bypass, hz: 1000.0, gain_db: 0.0, q: 1.0 }
+        Self {
+            kind: EqBandKind::Bypass,
+            hz: 1000.0,
+            gain_db: 0.0,
+            q: 1.0,
+        }
     }
 }
 
@@ -60,7 +63,9 @@ impl EqBandKind {
     }
 }
 
-fn default_eq_bands() -> [EqBand; 4] { [EqBand::bypass(); 4] }
+fn default_eq_bands() -> [EqBand; 4] {
+    [EqBand::bypass(); 4]
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Profile {
@@ -102,9 +107,15 @@ pub struct Profile {
     pub deess_ratio: f32,
 }
 
-fn default_deess_hz() -> f32 { 6500.0 }
-fn default_deess_threshold() -> f32 { -18.0 }
-fn default_deess_ratio() -> f32 { 3.0 }
+fn default_deess_hz() -> f32 {
+    6500.0
+}
+fn default_deess_threshold() -> f32 {
+    -18.0
+}
+fn default_deess_ratio() -> f32 {
+    3.0
+}
 
 impl Profile {
     pub fn raw(name: &str) -> Self {
@@ -138,6 +149,7 @@ pub fn builtin_profiles() -> Vec<Profile> {
     // Helper closure: take an existing profile-builder and stamp the
     // post-Phase-1 fields onto it as defaults so the existing presets
     // are unchanged in behaviour.
+    #[allow(clippy::too_many_arguments)]
     fn rec(
         name: &str,
         description: &str,
@@ -184,33 +196,73 @@ pub fn builtin_profiles() -> Vec<Profile> {
             "Guitar",
             "Acoustic or lightly-overdriven electric into a single mic. \
              Low rumble trim, no gate (keeps decay), light compression to even strums.",
-            0.0, true, 60.0,
-            false, -55.0, 3.0, 150.0,
-            true, -20.0, 2.5, 20.0, 150.0, 3.0,
+            0.0,
+            true,
+            60.0,
+            false,
+            -55.0,
+            3.0,
+            150.0,
+            true,
+            -20.0,
+            2.5,
+            20.0,
+            150.0,
+            3.0,
         ),
         rec(
             "Vocals",
             "Spoken or sung vocals. Aggressive low cut, gate for breath, \
              moderate compression for intelligibility.",
-            0.0, true, 100.0,
-            true, -42.0, 3.0, 80.0,
-            true, -18.0, 3.5, 8.0, 120.0, 4.0,
+            0.0,
+            true,
+            100.0,
+            true,
+            -42.0,
+            3.0,
+            80.0,
+            true,
+            -18.0,
+            3.5,
+            8.0,
+            120.0,
+            4.0,
         ),
         rec(
             "Wind / Brass",
             "Sax, flute, trumpet, harmonica. Gentle HPF. No gate (breath IS the sound). \
              Compression only catches peaks — keep dynamics.",
-            -3.0, true, 50.0,
-            false, -60.0, 5.0, 100.0,
-            true, -10.0, 2.0, 15.0, 180.0, 1.0,
+            -3.0,
+            true,
+            50.0,
+            false,
+            -60.0,
+            5.0,
+            100.0,
+            true,
+            -10.0,
+            2.0,
+            15.0,
+            180.0,
+            1.0,
         ),
         rec(
             "Drums / Percussion",
             "Room mic or overhead on drums/hand percussion. HPF off (sub-bass matters). \
              Fast compression tames transients without squashing.",
-            -6.0, false, 40.0,
-            false, -50.0, 2.0, 60.0,
-            true, -8.0, 4.0, 3.0, 80.0, 2.0,
+            -6.0,
+            false,
+            40.0,
+            false,
+            -50.0,
+            2.0,
+            60.0,
+            true,
+            -8.0,
+            4.0,
+            3.0,
+            80.0,
+            2.0,
         ),
         Profile::raw("Raw / Clean"),
         // ── Post-processing preset for Suno-imported stems (TBSS-FR-0001 §5).
@@ -221,7 +273,8 @@ pub fn builtin_profiles() -> Vec<Profile> {
             description: "Post-process a Suno export: trim mud, tame shimmer, \
                           add air, gentle glue. Apply per stem in the Mix tab \
                           (Phase 2) or as a recording-tone profile to capture \
-                          along.".into(),
+                          along."
+                .into(),
             input_gain_db: 0.0,
             hpf_enabled: true,
             hpf_hz: 30.0,
@@ -236,9 +289,24 @@ pub fn builtin_profiles() -> Vec<Profile> {
             compressor_release_ms: 200.0,
             compressor_makeup_db: 1.5,
             eq_bands: [
-                EqBand { kind: EqBandKind::Peak,      hz: 300.0,    gain_db: -3.0, q: 1.0 },
-                EqBand { kind: EqBandKind::HighShelf, hz: 10_000.0, gain_db:  2.0, q: 0.7 },
-                EqBand { kind: EqBandKind::Peak,      hz: 13_000.0, gain_db: -2.0, q: 2.0 },
+                EqBand {
+                    kind: EqBandKind::Peak,
+                    hz: 300.0,
+                    gain_db: -3.0,
+                    q: 1.0,
+                },
+                EqBand {
+                    kind: EqBandKind::HighShelf,
+                    hz: 10_000.0,
+                    gain_db: 2.0,
+                    q: 0.7,
+                },
+                EqBand {
+                    kind: EqBandKind::Peak,
+                    hz: 13_000.0,
+                    gain_db: -2.0,
+                    q: 2.0,
+                },
                 EqBand::bypass(),
             ],
             deess_enabled: true,
@@ -257,10 +325,14 @@ pub fn profiles_path() -> Option<PathBuf> {
 
 /// Load profiles from disk, or seed the built-in set on first run.
 pub fn load_or_seed() -> Vec<Profile> {
-    let Some(path) = profiles_path() else { return builtin_profiles() };
+    let Some(path) = profiles_path() else {
+        return builtin_profiles();
+    };
     if let Ok(s) = std::fs::read_to_string(&path) {
         if let Ok(v) = serde_json::from_str::<Vec<Profile>>(&s) {
-            if !v.is_empty() { return v; }
+            if !v.is_empty() {
+                return v;
+            }
         }
     }
     let defaults = builtin_profiles();
@@ -269,8 +341,12 @@ pub fn load_or_seed() -> Vec<Profile> {
 }
 
 pub fn save_profiles(profiles: &[Profile]) -> Result<()> {
-    let Some(path) = profiles_path() else { anyhow::bail!("no config dir") };
-    if let Some(p) = path.parent() { std::fs::create_dir_all(p)?; }
+    let Some(path) = profiles_path() else {
+        anyhow::bail!("no config dir")
+    };
+    if let Some(p) = path.parent() {
+        std::fs::create_dir_all(p)?;
+    }
     let json = serde_json::to_string_pretty(profiles).context("serialising profiles")?;
     std::fs::write(&path, json).with_context(|| format!("writing {}", path.display()))?;
     Ok(())
@@ -303,7 +379,11 @@ impl FilterChain {
         let sr = sample_rate as f32;
         let hpf = build_hpf(&profile, sr);
         let eq = build_eq_bands(&profile.eq_bands, sr);
-        let deess_bp = if profile.deess_enabled { build_deess_bandpass(profile.deess_hz, sr) } else { None };
+        let deess_bp = if profile.deess_enabled {
+            build_deess_bandpass(profile.deess_hz, sr)
+        } else {
+            None
+        };
         Self {
             sample_rate: sr,
             profile,
@@ -328,7 +408,9 @@ impl FilterChain {
         }
 
         for slot in self.eq.iter_mut() {
-            if let Some(b) = slot.as_mut() { s = b.run(s); }
+            if let Some(b) = slot.as_mut() {
+                s = b.run(s);
+            }
         }
 
         if self.profile.deess_enabled {
@@ -354,7 +436,11 @@ impl FilterChain {
         // Fixed fast attack / release for sibilance — we want it transparent.
         let attack = time_coef(2.0, self.sample_rate);
         let release = time_coef(40.0, self.sample_rate);
-        let band = if let Some(b) = self.deess_bp.as_mut() { b.run(s) } else { s };
+        let band = if let Some(b) = self.deess_bp.as_mut() {
+            b.run(s)
+        } else {
+            s
+        };
         let det = band.abs();
         self.deess_env = if det > self.deess_env {
             attack * self.deess_env + (1.0 - attack) * det
@@ -384,7 +470,11 @@ impl FilterChain {
             1.0
         };
         // Smooth gain changes to avoid clicks.
-        let gain_smooth = if target > self.gate_gain { attack } else { release };
+        let gain_smooth = if target > self.gate_gain {
+            attack
+        } else {
+            release
+        };
         self.gate_gain = gain_smooth * self.gate_gain + (1.0 - gain_smooth) * target;
         s * self.gate_gain
     }
@@ -405,7 +495,11 @@ impl FilterChain {
         // Target linear gain (before makeup).
         let target_gain = db_to_lin(-reduction_db);
         // Smooth the gain envelope.
-        let smooth = if target_gain < self.comp_gain { attack } else { release };
+        let smooth = if target_gain < self.comp_gain {
+            attack
+        } else {
+            release
+        };
         self.comp_gain = smooth * self.comp_gain + (1.0 - smooth) * target_gain;
         s * self.comp_gain * db_to_lin(p.compressor_makeup_db)
     }
@@ -417,13 +511,19 @@ fn time_coef(ms: f32, sample_rate: f32) -> f32 {
     (-1.0 / (sample_rate * tau)).exp()
 }
 
-fn db_to_lin(db: f32) -> f32 { 10f32.powf(db / 20.0) }
-fn lin_to_db(lin: f32) -> f32 { 20.0 * lin.max(1e-9).log10() }
+fn db_to_lin(db: f32) -> f32 {
+    10f32.powf(db / 20.0)
+}
+fn lin_to_db(lin: f32) -> f32 {
+    20.0 * lin.max(1e-9).log10()
+}
 
 // ───────────── biquad builders shared by mono + stereo chains ─────────────
 
 fn build_hpf(profile: &Profile, sr: f32) -> Option<DirectForm2Transposed<f32>> {
-    if !profile.hpf_enabled { return None; }
+    if !profile.hpf_enabled {
+        return None;
+    }
     Coefficients::<f32>::from_params(
         Type::HighPass,
         sr.hz(),
@@ -516,17 +616,22 @@ impl FilterChainStereo {
         let eq_l = build_eq_bands(&profile.eq_bands, sr);
         let eq_r = build_eq_bands(&profile.eq_bands, sr);
         let (deess_bp_l, deess_bp_r) = if profile.deess_enabled {
-            (build_deess_bandpass(profile.deess_hz, sr),
-             build_deess_bandpass(profile.deess_hz, sr))
+            (
+                build_deess_bandpass(profile.deess_hz, sr),
+                build_deess_bandpass(profile.deess_hz, sr),
+            )
         } else {
             (None, None)
         };
         Self {
             sample_rate: sr,
             profile,
-            hpf_l, hpf_r,
-            eq_l, eq_r,
-            deess_bp_l, deess_bp_r,
+            hpf_l,
+            hpf_r,
+            eq_l,
+            eq_r,
+            deess_bp_l,
+            deess_bp_r,
             deess_env_l: 0.0,
             deess_env_r: 0.0,
             gate_env: 0.0,
@@ -541,14 +646,22 @@ impl FilterChainStereo {
         let mut l = l * ig;
         let mut r = r * ig;
 
-        if let Some(h) = self.hpf_l.as_mut() { l = h.run(l); }
-        if let Some(h) = self.hpf_r.as_mut() { r = h.run(r); }
+        if let Some(h) = self.hpf_l.as_mut() {
+            l = h.run(l);
+        }
+        if let Some(h) = self.hpf_r.as_mut() {
+            r = h.run(r);
+        }
 
         for slot in self.eq_l.iter_mut() {
-            if let Some(b) = slot.as_mut() { l = b.run(l); }
+            if let Some(b) = slot.as_mut() {
+                l = b.run(l);
+            }
         }
         for slot in self.eq_r.iter_mut() {
-            if let Some(b) = slot.as_mut() { r = b.run(r); }
+            if let Some(b) = slot.as_mut() {
+                r = b.run(r);
+            }
         }
 
         if self.profile.deess_enabled {
@@ -577,8 +690,16 @@ impl FilterChainStereo {
         let p = &self.profile;
         let attack = time_coef(2.0, self.sample_rate);
         let release = time_coef(40.0, self.sample_rate);
-        let band_l = if let Some(b) = self.deess_bp_l.as_mut() { b.run(l) } else { l };
-        let band_r = if let Some(b) = self.deess_bp_r.as_mut() { b.run(r) } else { r };
+        let band_l = if let Some(b) = self.deess_bp_l.as_mut() {
+            b.run(l)
+        } else {
+            l
+        };
+        let band_r = if let Some(b) = self.deess_bp_r.as_mut() {
+            b.run(r)
+        } else {
+            r
+        };
         let det_l = band_l.abs();
         let det_r = band_r.abs();
         self.deess_env_l = if det_l > self.deess_env_l {
@@ -613,7 +734,11 @@ impl FilterChainStereo {
         } else {
             1.0
         };
-        let smooth = if target > self.gate_gain { attack } else { release };
+        let smooth = if target > self.gate_gain {
+            attack
+        } else {
+            release
+        };
         self.gate_gain = smooth * self.gate_gain + (1.0 - smooth) * target;
         self.gate_gain
     }
@@ -632,7 +757,11 @@ impl FilterChainStereo {
         let excess = (env_db - p.compressor_threshold_db).max(0.0);
         let reduction_db = excess * (1.0 - 1.0 / p.compressor_ratio.max(1.0));
         let target = db_to_lin(-reduction_db);
-        let smooth = if target < self.comp_gain { attack } else { release };
+        let smooth = if target < self.comp_gain {
+            attack
+        } else {
+            release
+        };
         self.comp_gain = smooth * self.comp_gain + (1.0 - smooth) * target;
         self.comp_gain
     }

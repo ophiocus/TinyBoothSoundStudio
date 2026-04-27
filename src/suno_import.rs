@@ -61,7 +61,11 @@ struct Detected {
 
 /// Import every WAV stem in `source_folder` into a brand-new project at
 /// `project_root`.
-pub fn import_folder(source_folder: &Path, project_root: &Path, project_name: &str) -> ImportOutcome {
+pub fn import_folder(
+    source_folder: &Path,
+    project_root: &Path,
+    project_name: &str,
+) -> ImportOutcome {
     let source = source_folder.display().to_string();
     let mut log = ImportLog::open("folder", project_name);
     log.line(&format!("source folder = {}", source));
@@ -71,16 +75,27 @@ pub fn import_folder(source_folder: &Path, project_root: &Path, project_name: &s
         let summary = format!("Source is not a folder:\n  {}", source);
         log.line(&format!("FATAL: {summary}"));
         return ImportOutcome {
-            project: None, log_path: log.path.clone(), summary, success: false, source,
+            project: None,
+            log_path: log.path.clone(),
+            summary,
+            success: false,
+            source,
         };
     }
 
     if let Err(e) = prepare_project_dirs(project_root) {
-        let summary = format!("Could not create project folders:\n  {}\n  {}",
-            project_root.display(), e);
+        let summary = format!(
+            "Could not create project folders:\n  {}\n  {}",
+            project_root.display(),
+            e
+        );
         log.line(&format!("FATAL: {summary}"));
         return ImportOutcome {
-            project: None, log_path: log.path.clone(), summary, success: false, source,
+            project: None,
+            log_path: log.path.clone(),
+            summary,
+            success: false,
+            source,
         };
     }
 
@@ -93,7 +108,11 @@ pub fn import_folder(source_folder: &Path, project_root: &Path, project_name: &s
             let summary = format!("Could not read folder:\n  {}\n  {}", source, e);
             log.line(&format!("FATAL: {summary}"));
             return ImportOutcome {
-                project: None, log_path: log.path.clone(), summary, success: false, source,
+                project: None,
+                log_path: log.path.clone(),
+                summary,
+                success: false,
+                source,
             };
         }
     };
@@ -115,7 +134,11 @@ pub fn import_folder(source_folder: &Path, project_root: &Path, project_name: &s
             counts.skipped_dir += 1;
             continue;
         }
-        let lower = path.file_name().and_then(|n| n.to_str()).map(|s| s.to_ascii_lowercase()).unwrap_or_default();
+        let lower = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|s| s.to_ascii_lowercase())
+            .unwrap_or_default();
         if !lower.ends_with(".wav") {
             log.line(&format!("SKIP non-wav: {display}"));
             counts.skipped_non_wav += 1;
@@ -127,28 +150,36 @@ pub fn import_folder(source_folder: &Path, project_root: &Path, project_name: &s
             continue;
         }
 
-        let original = path.file_name()
+        let original = path
+            .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
         let role = match_role(&original);
         let track_filename = match unique_track_filename(project_root, &original) {
             Ok(s) => s,
             Err(e) => {
-                log.line(&format!("SKIP (filename collision exhausted): {original} — {e}"));
+                log.line(&format!(
+                    "SKIP (filename collision exhausted): {original} — {e}"
+                ));
                 counts.extract_errors += 1;
                 continue;
             }
         };
         let dest = project_root.join(TRACKS_DIR).join(&track_filename);
         if let Err(e) = fs::copy(&path, &dest) {
-            log.line(&format!("SKIP (copy failed): {} -> {} — {e}", path.display(), dest.display()));
+            log.line(&format!(
+                "SKIP (copy failed): {} -> {} — {e}",
+                path.display(),
+                dest.display()
+            ));
             counts.extract_errors += 1;
             continue;
         }
         match read_wav_meta(&dest) {
             Ok(info) => {
                 let session = read_wav_session(&dest);
-                let session_str = session.as_ref()
+                let session_str = session
+                    .as_ref()
                     .map(|s| format!(" suno_epoch={} iso={}", s.epoch, s.iso_timestamp))
                     .unwrap_or_default();
                 log.line(&format!(
@@ -167,7 +198,10 @@ pub fn import_folder(source_folder: &Path, project_root: &Path, project_name: &s
                 });
             }
             Err(e) => {
-                log.line(&format!("SKIP (WAV header read failed): {} — {e}", dest.display()));
+                log.line(&format!(
+                    "SKIP (WAV header read failed): {} — {e}",
+                    dest.display()
+                ));
                 let _ = fs::remove_file(&dest);
                 counts.wav_meta_errors += 1;
             }
@@ -191,7 +225,11 @@ pub fn import_zip(zip_path: &Path, project_root: &Path, project_name: &str) -> I
             let summary = format!("Could not open zip:\n  {}\n  {}", source, e);
             log.line(&format!("FATAL: {summary}"));
             return ImportOutcome {
-                project: None, log_path: log.path.clone(), summary, success: false, source,
+                project: None,
+                log_path: log.path.clone(),
+                summary,
+                success: false,
+                source,
             };
         }
     };
@@ -201,7 +239,11 @@ pub fn import_zip(zip_path: &Path, project_root: &Path, project_name: &str) -> I
             let summary = format!("Could not read zip archive:\n  {}\n  {}", source, e);
             log.line(&format!("FATAL: {summary}"));
             return ImportOutcome {
-                project: None, log_path: log.path.clone(), summary, success: false, source,
+                project: None,
+                log_path: log.path.clone(),
+                summary,
+                success: false,
+                source,
             };
         }
     };
@@ -209,11 +251,18 @@ pub fn import_zip(zip_path: &Path, project_root: &Path, project_name: &str) -> I
     log.line(&format!("zip entries  = {}", archive.len()));
 
     if let Err(e) = prepare_project_dirs(project_root) {
-        let summary = format!("Could not create project folders:\n  {}\n  {}",
-            project_root.display(), e);
+        let summary = format!(
+            "Could not create project folders:\n  {}\n  {}",
+            project_root.display(),
+            e
+        );
         log.line(&format!("FATAL: {summary}"));
         return ImportOutcome {
-            project: None, log_path: log.path.clone(), summary, success: false, source,
+            project: None,
+            log_path: log.path.clone(),
+            summary,
+            success: false,
+            source,
         };
     }
 
@@ -246,7 +295,8 @@ pub fn import_zip(zip_path: &Path, project_root: &Path, project_name: &str) -> I
                 continue;
             }
         };
-        let lower = entry_name.file_name()
+        let lower = entry_name
+            .file_name()
             .and_then(|n| n.to_str())
             .map(|s| s.to_ascii_lowercase())
             .unwrap_or_default();
@@ -261,28 +311,35 @@ pub fn import_zip(zip_path: &Path, project_root: &Path, project_name: &str) -> I
             continue;
         }
 
-        let original = entry_name.file_name()
+        let original = entry_name
+            .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
         let role = match_role(&original);
         let track_filename = match unique_track_filename(project_root, &original) {
             Ok(s) => s,
             Err(e) => {
-                log.line(&format!("SKIP (filename collision exhausted): {original} — {e}"));
+                log.line(&format!(
+                    "SKIP (filename collision exhausted): {original} — {e}"
+                ));
                 counts.extract_errors += 1;
                 continue;
             }
         };
         let dest = project_root.join(TRACKS_DIR).join(&track_filename);
         if let Err(e) = copy_zip_entry(&mut entry, &dest) {
-            log.line(&format!("SKIP (extract failed): {raw_name} -> {} — {e}", dest.display()));
+            log.line(&format!(
+                "SKIP (extract failed): {raw_name} -> {} — {e}",
+                dest.display()
+            ));
             counts.extract_errors += 1;
             continue;
         }
         match read_wav_meta(&dest) {
             Ok(info) => {
                 let session = read_wav_session(&dest);
-                let session_str = session.as_ref()
+                let session_str = session
+                    .as_ref()
                     .map(|s| format!(" suno_epoch={} iso={}", s.epoch, s.iso_timestamp))
                     .unwrap_or_default();
                 log.line(&format!(
@@ -301,7 +358,10 @@ pub fn import_zip(zip_path: &Path, project_root: &Path, project_name: &str) -> I
                 });
             }
             Err(e) => {
-                log.line(&format!("SKIP (WAV header read failed): {} — {e}", dest.display()));
+                log.line(&format!(
+                    "SKIP (WAV header read failed): {} — {e}",
+                    dest.display()
+                ));
                 let _ = fs::remove_file(&dest);
                 counts.wav_meta_errors += 1;
             }
@@ -316,7 +376,10 @@ pub fn import_zip(zip_path: &Path, project_root: &Path, project_name: &str) -> I
 /// Folder vs. zip kind. The conflict-resolution path needs to remember
 /// which import function to re-invoke after the user says Replace.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ImportKind { Folder, Zip }
+pub enum ImportKind {
+    Folder,
+    Zip,
+}
 
 /// An import that has been deferred because the target project root
 /// already contains a manifest with a matching Suno session epoch.
@@ -389,9 +452,13 @@ fn first_session_in_folder(folder: &Path) -> Option<SunoSession> {
     let entries = fs::read_dir(folder).ok()?;
     for e in entries.flatten() {
         let p = e.path();
-        if !p.is_file() { continue; }
+        if !p.is_file() {
+            continue;
+        }
         let lower = p.file_name()?.to_str()?.to_ascii_lowercase();
-        if !lower.ends_with(".wav") || is_tempo_locked(&lower) { continue; }
+        if !lower.ends_with(".wav") || is_tempo_locked(&lower) {
+            continue;
+        }
         if let Some(s) = read_wav_session(&p) {
             return Some(s);
         }
@@ -404,23 +471,37 @@ fn first_session_in_zip(zip_path: &Path) -> Option<SunoSession> {
     let mut archive = zip::ZipArchive::new(f).ok()?;
     let tmp = std::env::temp_dir().join(format!("tinybooth-probe-{}.wav", std::process::id()));
     for i in 0..archive.len() {
-        let mut entry = match archive.by_index(i) { Ok(e) => e, Err(_) => continue };
-        if entry.is_dir() { continue; }
-        let name = match entry.enclosed_name() { Some(p) => p.to_path_buf(), None => continue };
+        let mut entry = match archive.by_index(i) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        if entry.is_dir() {
+            continue;
+        }
+        let name = match entry.enclosed_name() {
+            Some(p) => p.to_path_buf(),
+            None => continue,
+        };
         let lower = match name.file_name().and_then(|n| n.to_str()) {
             Some(s) => s.to_ascii_lowercase(),
             None => continue,
         };
-        if !lower.ends_with(".wav") || is_tempo_locked(&lower) { continue; }
+        if !lower.ends_with(".wav") || is_tempo_locked(&lower) {
+            continue;
+        }
         // Extract just enough to read the header chunks. RIFF metadata
         // sits at the front; copying the whole file would be wasteful
         // but copying a known prefix is fragile across encoders, so we
         // just take the whole thing — these files are 30–50 MB and the
         // probe runs once per import.
-        if copy_zip_entry(&mut entry, &tmp).is_err() { continue; }
+        if copy_zip_entry(&mut entry, &tmp).is_err() {
+            continue;
+        }
         let session = read_wav_session(&tmp);
         let _ = fs::remove_file(&tmp);
-        if session.is_some() { return session; }
+        if session.is_some() {
+            return session;
+        }
     }
     None
 }
@@ -429,9 +510,13 @@ fn first_session_in_zip(zip_path: &Path) -> Option<SunoSession> {
 /// common Suno session epoch among its tracks alongside the project
 /// name and track count. Returns None if no manifest, no Suno tracks,
 /// or any read error.
-fn existing_session_at_root(project_root: &Path) -> Option<(SunoSession, String, usize, Option<u32>)> {
+fn existing_session_at_root(
+    project_root: &Path,
+) -> Option<(SunoSession, String, usize, Option<u32>)> {
     let manifest = project_root.join(MANIFEST_NAME);
-    if !manifest.exists() { return None; }
+    if !manifest.exists() {
+        return None;
+    }
     let s = fs::read_to_string(&manifest).ok()?;
     let proj: Project = serde_json::from_str(&s).ok()?;
 
@@ -440,7 +525,12 @@ fn existing_session_at_root(project_root: &Path) -> Option<(SunoSession, String,
     // representative.
     let mut chosen: Option<(i64, Option<u32>)> = None;
     for t in &proj.tracks {
-        if let TrackSource::SunoStem { session_epoch: Some(e), session_ordinal, .. } = &t.source {
+        if let TrackSource::SunoStem {
+            session_epoch: Some(e),
+            session_ordinal,
+            ..
+        } = &t.source
+        {
             chosen = Some((*e, *session_ordinal));
             break;
         }
@@ -453,7 +543,11 @@ fn existing_session_at_root(project_root: &Path) -> Option<(SunoSession, String,
         .map(|d| d.to_rfc3339())
         .unwrap_or_default();
     Some((
-        SunoSession { epoch, iso_timestamp: iso, provenance: String::new() },
+        SunoSession {
+            epoch,
+            iso_timestamp: iso,
+            provenance: String::new(),
+        },
         proj.name,
         proj.tracks.len(),
         ordinal,
@@ -492,7 +586,10 @@ fn finalize(
     log.line(&format!("skipped (dir)       = {}", counts.skipped_dir));
     log.line(&format!("skipped (unsafe)    = {}", counts.skipped_unsafe));
     log.line(&format!("skipped (non-wav)   = {}", counts.skipped_non_wav));
-    log.line(&format!("skipped (tempo lk)  = {}", counts.skipped_tempo_locked));
+    log.line(&format!(
+        "skipped (tempo lk)  = {}",
+        counts.skipped_tempo_locked
+    ));
     log.line(&format!("errors (extract)    = {}", counts.extract_errors));
     log.line(&format!("errors (wav meta)   = {}", counts.wav_meta_errors));
 
@@ -508,7 +605,11 @@ fn finalize(
              if your bundle is MP3.\n\n\
              Full log:\n  {}",
             counts.total_entries,
-            if counts.total_entries == 1 { "y" } else { "ies" },
+            if counts.total_entries == 1 {
+                "y"
+            } else {
+                "ies"
+            },
             counts.skipped_non_wav,
             counts.skipped_tempo_locked,
             counts.extract_errors,
@@ -518,37 +619,59 @@ fn finalize(
         log.line(&format!("OUTCOME: empty — {summary}"));
         log.flush();
         return ImportOutcome {
-            project: None, log_path: log.path.clone(), summary,
-            success: false, source,
+            project: None,
+            log_path: log.path.clone(),
+            summary,
+            success: false,
+            source,
         };
     }
 
     let project = match build_project(project_root, project_name, detected) {
         Ok(p) => p,
         Err(e) => {
-            let summary = format!("Stems extracted but project save failed:\n  {e}\n\nFull log:\n  {}", log.path.display());
+            let summary = format!(
+                "Stems extracted but project save failed:\n  {e}\n\nFull log:\n  {}",
+                log.path.display()
+            );
             log.line(&format!("FATAL on save: {e}"));
             log.flush();
             return ImportOutcome {
-                project: None, log_path: log.path.clone(), summary,
-                success: false, source,
+                project: None,
+                log_path: log.path.clone(),
+                summary,
+                success: false,
+                source,
             };
         }
     };
 
     // Pull the Suno session info off the first track that has it
     // (every Suno track in this import shares the session).
-    let session_line = project.tracks.iter().find_map(|t| {
-        if let TrackSource::SunoStem { session_epoch, session_ordinal, .. } = &t.source {
-            session_epoch.map(|e| {
-                let iso = chrono::DateTime::<chrono::Utc>::from_timestamp(e, 0)
-                    .map(|d| d.to_rfc3339())
-                    .unwrap_or_else(|| e.to_string());
-                let ord = session_ordinal.map(|o| format!(" (import #{o})")).unwrap_or_default();
-                format!("\n\nSuno session: epoch {e}  ({iso}){ord}")
-            })
-        } else { None }
-    }).unwrap_or_default();
+    let session_line = project
+        .tracks
+        .iter()
+        .find_map(|t| {
+            if let TrackSource::SunoStem {
+                session_epoch,
+                session_ordinal,
+                ..
+            } = &t.source
+            {
+                session_epoch.map(|e| {
+                    let iso = chrono::DateTime::<chrono::Utc>::from_timestamp(e, 0)
+                        .map(|d| d.to_rfc3339())
+                        .unwrap_or_else(|| e.to_string());
+                    let ord = session_ordinal
+                        .map(|o| format!(" (import #{o})"))
+                        .unwrap_or_default();
+                    format!("\n\nSuno session: epoch {e}  ({iso}){ord}")
+                })
+            } else {
+                None
+            }
+        })
+        .unwrap_or_default();
 
     let summary = format!(
         "Imported {} stem(s) into:\n  {}{}\n\nLog:\n  {}",
@@ -557,7 +680,10 @@ fn finalize(
         session_line,
         log.path.display(),
     );
-    log.line(&format!("OUTCOME: success — {} tracks", project.tracks.len()));
+    log.line(&format!(
+        "OUTCOME: success — {} tracks",
+        project.tracks.len()
+    ));
     log.flush();
 
     ImportOutcome {
@@ -569,7 +695,11 @@ fn finalize(
     }
 }
 
-fn build_project(project_root: &Path, name: &str, detected: Vec<Detected>) -> anyhow::Result<Project> {
+fn build_project(
+    project_root: &Path,
+    name: &str,
+    detected: Vec<Detected>,
+) -> anyhow::Result<Project> {
     // If a project.tinybooth already exists at this root we ALWAYS create
     // a fresh project here (the duplicate-detection path runs before us
     // and has already cleared the old contents on Replace). Old manifest
@@ -635,22 +765,54 @@ fn is_tempo_locked(lower_name: &str) -> bool {
 pub fn match_role(filename: &str) -> StemRole {
     let s = filename.to_ascii_lowercase();
     let has = |needle: &str| s.contains(needle);
-    if has("vocal") && has("back") { return StemRole::BackingVocals; }
-    if has("vocal") { return StemRole::Vocals; }
-    if has("drum") { return StemRole::Drums; }
-    if has("bass") { return StemRole::Bass; }
-    if has("electric") && has("guitar") { return StemRole::ElectricGuitar; }
-    if has("acoustic") && has("guitar") { return StemRole::AcousticGuitar; }
-    if has("guitar") { return StemRole::ElectricGuitar; }
-    if has("piano") || has("key") { return StemRole::Keys; }
-    if has("synth") || has("lead") { return StemRole::Synth; }
-    if has("pad") || has("chord") { return StemRole::Pads; }
-    if has("string") { return StemRole::Strings; }
-    if has("brass") || has("wood") { return StemRole::Brass; }
-    if has("perc") { return StemRole::Percussion; }
-    if has("fx") || has("other") { return StemRole::FxOther; }
-    if has("instrumental") { return StemRole::Instrumental; }
-    if has("master") || has("mix") || has("final") { return StemRole::Master; }
+    if has("vocal") && has("back") {
+        return StemRole::BackingVocals;
+    }
+    if has("vocal") {
+        return StemRole::Vocals;
+    }
+    if has("drum") {
+        return StemRole::Drums;
+    }
+    if has("bass") {
+        return StemRole::Bass;
+    }
+    if has("electric") && has("guitar") {
+        return StemRole::ElectricGuitar;
+    }
+    if has("acoustic") && has("guitar") {
+        return StemRole::AcousticGuitar;
+    }
+    if has("guitar") {
+        return StemRole::ElectricGuitar;
+    }
+    if has("piano") || has("key") {
+        return StemRole::Keys;
+    }
+    if has("synth") || has("lead") {
+        return StemRole::Synth;
+    }
+    if has("pad") || has("chord") {
+        return StemRole::Pads;
+    }
+    if has("string") {
+        return StemRole::Strings;
+    }
+    if has("brass") || has("wood") {
+        return StemRole::Brass;
+    }
+    if has("perc") {
+        return StemRole::Percussion;
+    }
+    if has("fx") || has("other") {
+        return StemRole::FxOther;
+    }
+    if has("instrumental") {
+        return StemRole::Instrumental;
+    }
+    if has("master") || has("mix") || has("final") {
+        return StemRole::Master;
+    }
     StemRole::Unknown
 }
 
@@ -664,7 +826,11 @@ fn read_wav_meta(path: &Path) -> anyhow::Result<WavMeta> {
     let reader = hound::WavReader::open(path)?;
     let spec = reader.spec();
     let frames = reader.duration() as f32;
-    let dur = if spec.sample_rate > 0 { frames / spec.sample_rate as f32 } else { 0.0 };
+    let dur = if spec.sample_rate > 0 {
+        frames / spec.sample_rate as f32
+    } else {
+        0.0
+    };
     Ok(WavMeta {
         sample_rate: spec.sample_rate,
         channels: spec.channels,
@@ -696,7 +862,9 @@ fn unique_track_filename(project_root: &Path, source_name: &str) -> anyhow::Resu
 }
 
 fn copy_zip_entry<R: Read>(entry: &mut R, dest: &Path) -> std::io::Result<()> {
-    if let Some(parent) = dest.parent() { fs::create_dir_all(parent)?; }
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent)?;
+    }
     let mut out = fs::File::create(dest)?;
     std::io::copy(entry, &mut out)?;
     Ok(())
@@ -711,17 +879,32 @@ struct ImportLog {
 
 impl ImportLog {
     fn open(mode: &str, project_name: &str) -> Self {
-        let dir = Config::dir().unwrap_or_else(|| PathBuf::from(".")).join("logs");
+        let dir = Config::dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("logs");
         let _ = fs::create_dir_all(&dir);
-        let safe_name: String = project_name.chars()
-            .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        let safe_name: String = project_name
+            .chars()
+            .map(|c| {
+                if c.is_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
             .collect();
         let ts = chrono::Local::now().format("%Y%m%d-%H%M%S");
         let path = dir.join(format!("import-{mode}-{safe_name}-{ts}.log"));
         let writer = fs::File::create(&path).ok().map(BufWriter::new);
         let mut me = Self { path, writer };
-        me.line(&format!("TinyBooth Sound Studio import log — v{}", env!("CARGO_PKG_VERSION")));
-        me.line(&format!("started   = {}", chrono::Local::now().to_rfc3339()));
+        me.line(&format!(
+            "TinyBooth Sound Studio import log — v{}",
+            env!("CARGO_PKG_VERSION")
+        ));
+        me.line(&format!(
+            "started   = {}",
+            chrono::Local::now().to_rfc3339()
+        ));
         me.line(&format!("mode      = {mode}"));
         me
     }
@@ -750,5 +933,76 @@ impl Drop for ImportLog {
 /// it can show the exact run.
 #[allow(dead_code)]
 pub fn log_dir() -> PathBuf {
-    Config::dir().unwrap_or_else(|| PathBuf::from(".")).join("logs")
+    Config::dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("logs")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn match_role_table() {
+        // Vocals — backing variants take priority over plain vocals.
+        assert_eq!(match_role("vocals.wav"), StemRole::Vocals);
+        assert_eq!(match_role("Vocals.wav"), StemRole::Vocals);
+        assert_eq!(match_role("lead_vocal.wav"), StemRole::Vocals);
+        assert_eq!(match_role("backing_vocals.wav"), StemRole::BackingVocals);
+        assert_eq!(match_role("background_vocal.wav"), StemRole::BackingVocals);
+
+        // Drums / bass.
+        assert_eq!(match_role("drums.wav"), StemRole::Drums);
+        assert_eq!(match_role("DRUMS_2.wav"), StemRole::Drums);
+        assert_eq!(match_role("bass.wav"), StemRole::Bass);
+        assert_eq!(match_role("Bass-3.wav"), StemRole::Bass);
+
+        // Guitars — qualified takes priority over plain.
+        assert_eq!(match_role("electric_guitar.wav"), StemRole::ElectricGuitar);
+        assert_eq!(match_role("Electric Guitar.wav"), StemRole::ElectricGuitar);
+        assert_eq!(match_role("acoustic_guitar.wav"), StemRole::AcousticGuitar);
+        assert_eq!(match_role("guitar.wav"), StemRole::ElectricGuitar);
+
+        // Keys / synth / pads.
+        assert_eq!(match_role("piano.wav"), StemRole::Keys);
+        assert_eq!(match_role("keys.wav"), StemRole::Keys);
+        assert_eq!(match_role("synth.wav"), StemRole::Synth);
+        assert_eq!(match_role("lead.wav"), StemRole::Synth);
+        assert_eq!(match_role("pads.wav"), StemRole::Pads);
+        assert_eq!(match_role("chords.wav"), StemRole::Pads);
+
+        // Strings / brass / percussion.
+        assert_eq!(match_role("strings.wav"), StemRole::Strings);
+        assert_eq!(match_role("brass.wav"), StemRole::Brass);
+        assert_eq!(match_role("woodwind.wav"), StemRole::Brass);
+        assert_eq!(match_role("percussion.wav"), StemRole::Percussion);
+        assert_eq!(match_role("perc.wav"), StemRole::Percussion);
+
+        // FX / Other / Instrumental / Master.
+        assert_eq!(match_role("fx.wav"), StemRole::FxOther);
+        assert_eq!(match_role("other.wav"), StemRole::FxOther);
+        assert_eq!(match_role("instrumental.wav"), StemRole::Instrumental);
+        assert_eq!(match_role("master.wav"), StemRole::Master);
+        assert_eq!(match_role("final_mix.wav"), StemRole::Master);
+
+        // Anything we don't recognise.
+        assert_eq!(match_role("hello.wav"), StemRole::Unknown);
+        assert_eq!(match_role("track-001.wav"), StemRole::Unknown);
+    }
+
+    #[test]
+    fn tempo_locked_detection() {
+        // Contract: callers pass already-lowercased names. The matcher
+        // sees only lowercase strings.
+        assert!(is_tempo_locked("vocals_tempo_locked.wav"));
+        assert!(is_tempo_locked("drums_tempo-lock.wav"));
+        assert!(is_tempo_locked("any tempo locked file.wav"));
+
+        // Plain stems shouldn't trigger.
+        assert!(!is_tempo_locked("vocals.wav"));
+        assert!(!is_tempo_locked("drums.wav"));
+        // Has only one of the words → no.
+        assert!(!is_tempo_locked("tempo.wav"));
+        assert!(!is_tempo_locked("locked.wav"));
+    }
 }

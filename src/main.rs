@@ -34,7 +34,11 @@ fn load_icon() -> egui::IconData {
         Ok(img) => {
             let rgba = img.to_rgba8();
             let (width, height) = rgba.dimensions();
-            egui::IconData { rgba: rgba.into_raw(), width, height }
+            egui::IconData {
+                rgba: rgba.into_raw(),
+                width,
+                height,
+            }
         }
         Err(_) => egui::IconData::default(),
     }

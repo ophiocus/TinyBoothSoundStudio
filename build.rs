@@ -6,7 +6,13 @@ fn main() {
         .args(["describe", "--tags", "--match", "v*", "--abbrev=0"])
         .output()
         .ok()
-        .and_then(|o| if o.status.success() { String::from_utf8(o.stdout).ok() } else { None })
+        .and_then(|o| {
+            if o.status.success() {
+                String::from_utf8(o.stdout).ok()
+            } else {
+                None
+            }
+        })
         .map(|s| s.trim().trim_start_matches('v').to_string())
         .unwrap_or_else(|| cargo_version.to_string());
 

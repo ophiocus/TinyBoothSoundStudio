@@ -37,13 +37,17 @@ pub fn list_input_devices() -> Vec<DeviceInfo> {
         .and_then(|d| d.name().ok())
         .unwrap_or_default();
     let mut out = Vec::new();
-    let Ok(devices) = host.input_devices() else { return out };
+    let Ok(devices) = host.input_devices() else {
+        return out;
+    };
     for dev in devices {
         let name = match dev.name() {
             Ok(n) => n,
             Err(_) => continue,
         };
-        let Ok(cfg) = dev.default_input_config() else { continue };
+        let Ok(cfg) = dev.default_input_config() else {
+            continue;
+        };
         out.push(DeviceInfo {
             name,
             channels: cfg.channels(),
@@ -81,7 +85,9 @@ impl VizState {
         })
     }
 
-    pub fn is_stereo(&self) -> bool { self.stereo.load(Ordering::Relaxed) }
+    pub fn is_stereo(&self) -> bool {
+        self.stereo.load(Ordering::Relaxed)
+    }
 
     pub fn peak_left(&self) -> f32 {
         self.peak_l_x1000.load(Ordering::Relaxed) as f32 / 1000.0
@@ -126,7 +132,9 @@ impl VizState {
 
 fn push_into(q: &Mutex<VecDeque<f32>>, s: f32) {
     let mut q = q.lock();
-    if q.len() == VIZ_BUFFER_CAP { q.pop_front(); }
+    if q.len() == VIZ_BUFFER_CAP {
+        q.pop_front();
+    }
     q.push_back(s);
 }
 
@@ -142,7 +150,11 @@ fn update_peak(atomic: &AtomicU32, frame: f32) {
     let curr = atomic.load(Ordering::Relaxed);
     let new = (absf * 1000.0) as u32;
     // Fast attack, slow release.
-    let next = if new > curr { new } else { curr.saturating_sub(4) };
+    let next = if new > curr {
+        new
+    } else {
+        curr.saturating_sub(4)
+    };
     atomic.store(next, Ordering::Relaxed);
 }
 
@@ -187,19 +199,27 @@ pub enum SourceMode {
 }
 
 impl SourceMode {
-    pub fn is_stereo(self) -> bool { matches!(self, Self::Stereo) }
+    pub fn is_stereo(self) -> bool {
+        matches!(self, Self::Stereo)
+    }
 }
 
 /// Start recording from the named input device with the chosen `SourceMode`.
 /// The `profile` is frozen into a realtime filter chain that runs on the
 /// audio thread — `FilterChain` for mono modes, `FilterChainStereo` for
 /// stereo (with envelope-linked gate and compressor).
+///
+/// `error_tx` is a clone of the app's audio-error channel. cpal's err_fn
+/// closure pushes any stream-level error through it; the UI thread drains
+/// and surfaces the message in the status bar (no `eprintln!` from a
+/// real-time-ish thread — survival-guide §3.3).
 pub fn start_recording(
     device_name: &str,
     mode: SourceMode,
     wav_path: &Path,
     viz: Arc<VizState>,
     profile: crate::dsp::Profile,
+    error_tx: std::sync::mpsc::Sender<String>,
 ) -> Result<RecordingSession> {
     let host = cpal::default_host();
     let dev = host
@@ -246,14 +266,45 @@ pub fn start_recording(
 
     viz.reset(mode.is_stereo(), sample_rate);
 
-    let err_fn = |e| eprintln!("cpal stream error: {e}");
+    // err_fn closes over a Sender so the UI thread surfaces the error
+    // in the status bar instead of locking stderr from the audio thread.
+    let err_fn = move |e: cpal::StreamError| {
+        let _ = error_tx.send(format!("input stream error: {e}"));
+    };
 
     let stream = if mode.is_stereo() {
         let chain = crate::dsp::FilterChainStereo::new(profile, sample_rate);
         match sample_format {
-            SampleFormat::F32 => build_stream_stereo::<f32>(&dev, &config, channels_in, writer.clone(), frames.clone(), viz.clone(), chain, err_fn)?,
-            SampleFormat::I16 => build_stream_stereo::<i16>(&dev, &config, channels_in, writer.clone(), frames.clone(), viz.clone(), chain, err_fn)?,
-            SampleFormat::U16 => build_stream_stereo::<u16>(&dev, &config, channels_in, writer.clone(), frames.clone(), viz.clone(), chain, err_fn)?,
+            SampleFormat::F32 => build_stream_stereo::<f32>(
+                &dev,
+                &config,
+                channels_in,
+                writer.clone(),
+                frames.clone(),
+                viz.clone(),
+                chain,
+                err_fn,
+            )?,
+            SampleFormat::I16 => build_stream_stereo::<i16>(
+                &dev,
+                &config,
+                channels_in,
+                writer.clone(),
+                frames.clone(),
+                viz.clone(),
+                chain,
+                err_fn,
+            )?,
+            SampleFormat::U16 => build_stream_stereo::<u16>(
+                &dev,
+                &config,
+                channels_in,
+                writer.clone(),
+                frames.clone(),
+                viz.clone(),
+                chain,
+                err_fn,
+            )?,
             other => return Err(anyhow!("unsupported sample format {other:?}")),
         }
     } else {
@@ -264,9 +315,39 @@ pub fn start_recording(
         };
         let chain = crate::dsp::FilterChain::new(profile, sample_rate);
         match sample_format {
-            SampleFormat::F32 => build_stream_mono::<f32>(&dev, &config, channels_in, channel, writer.clone(), frames.clone(), viz.clone(), chain, err_fn)?,
-            SampleFormat::I16 => build_stream_mono::<i16>(&dev, &config, channels_in, channel, writer.clone(), frames.clone(), viz.clone(), chain, err_fn)?,
-            SampleFormat::U16 => build_stream_mono::<u16>(&dev, &config, channels_in, channel, writer.clone(), frames.clone(), viz.clone(), chain, err_fn)?,
+            SampleFormat::F32 => build_stream_mono::<f32>(
+                &dev,
+                &config,
+                channels_in,
+                channel,
+                writer.clone(),
+                frames.clone(),
+                viz.clone(),
+                chain,
+                err_fn,
+            )?,
+            SampleFormat::I16 => build_stream_mono::<i16>(
+                &dev,
+                &config,
+                channels_in,
+                channel,
+                writer.clone(),
+                frames.clone(),
+                viz.clone(),
+                chain,
+                err_fn,
+            )?,
+            SampleFormat::U16 => build_stream_mono::<u16>(
+                &dev,
+                &config,
+                channels_in,
+                channel,
+                writer.clone(),
+                frames.clone(),
+                viz.clone(),
+                chain,
+                err_fn,
+            )?,
             other => return Err(anyhow!("unsupported sample format {other:?}")),
         }
     };
@@ -282,6 +363,7 @@ pub fn start_recording(
 }
 
 /// Mono hot path — unchanged from the pre-stereo implementation.
+#[allow(clippy::too_many_arguments)]
 fn build_stream_mono<T>(
     dev: &cpal::Device,
     config: &StreamConfig,
@@ -302,7 +384,9 @@ where
         move |data: &[T], _| {
             let frame_count = data.len() / ch.max(1);
             let mut writer_lock = writer.lock();
-            let Some(w) = writer_lock.as_mut() else { return };
+            let Some(w) = writer_lock.as_mut() else {
+                return;
+            };
             for i in 0..frame_count {
                 let frame_start = i * ch;
                 let mono_in = match channel {
@@ -334,6 +418,7 @@ where
 /// Stereo hot path. Reads channels 0 and 1 from the interleaved buffer,
 /// runs the stereo filter chain, writes interleaved L R L R to the WAV,
 /// and feeds the visualiser a mono (L+R)/2 mix.
+#[allow(clippy::too_many_arguments)]
 fn build_stream_stereo<T>(
     dev: &cpal::Device,
     config: &StreamConfig,
@@ -353,7 +438,9 @@ where
         move |data: &[T], _| {
             let frame_count = data.len() / ch.max(1);
             let mut writer_lock = writer.lock();
-            let Some(w) = writer_lock.as_mut() else { return };
+            let Some(w) = writer_lock.as_mut() else {
+                return;
+            };
             for i in 0..frame_count {
                 let frame_start = i * ch;
                 let l_in = data[frame_start].to_f32();
@@ -378,11 +465,17 @@ pub trait ToF32 {
     fn to_f32(self) -> f32;
 }
 impl ToF32 for f32 {
-    fn to_f32(self) -> f32 { self }
+    fn to_f32(self) -> f32 {
+        self
+    }
 }
 impl ToF32 for i16 {
-    fn to_f32(self) -> f32 { self as f32 / i16::MAX as f32 }
+    fn to_f32(self) -> f32 {
+        self as f32 / i16::MAX as f32
+    }
 }
 impl ToF32 for u16 {
-    fn to_f32(self) -> f32 { (self as f32 - i16::MAX as f32) / i16::MAX as f32 }
+    fn to_f32(self) -> f32 {
+        (self as f32 - i16::MAX as f32) / i16::MAX as f32
+    }
 }

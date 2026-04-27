@@ -22,7 +22,9 @@ pub struct Config {
     pub recent_projects: Vec<PathBuf>,
 }
 
-fn default_profile_name() -> String { "Guitar".into() }
+fn default_profile_name() -> String {
+    "Guitar".into()
+}
 
 impl Default for Config {
     fn default() -> Self {
@@ -46,7 +48,9 @@ impl Config {
     }
 
     pub fn load() -> Self {
-        let Some(p) = Self::path() else { return Self::default() };
+        let Some(p) = Self::path() else {
+            return Self::default();
+        };
         std::fs::read_to_string(&p)
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok())

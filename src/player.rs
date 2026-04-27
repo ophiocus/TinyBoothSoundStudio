@@ -175,7 +175,8 @@ impl PlayerState {
         f32::from_bits(self.master_gain_db_bits.load(Ordering::Relaxed))
     }
     pub fn set_master_gain_db(&self, db: f32) {
-        self.master_gain_db_bits.store(db.to_bits(), Ordering::Relaxed);
+        self.master_gain_db_bits
+            .store(db.to_bits(), Ordering::Relaxed);
     }
     #[allow(dead_code)] // symmetric with set_master_automation, kept for the Phase-3 lane editor
     pub fn master_automation(&self) -> Option<AutomationLane> {
@@ -183,7 +184,8 @@ impl PlayerState {
     }
     pub fn set_master_automation(&self, lane: Option<AutomationLane>) {
         *self.master_automation_lane.lock() = lane;
-        self.master_automation_generation.fetch_add(1, Ordering::Release);
+        self.master_automation_generation
+            .fetch_add(1, Ordering::Release);
     }
     pub fn master_peak_left(&self) -> f32 {
         self.master_peak_l_x1000.load(Ordering::Relaxed) as f32 / 1000.0
@@ -198,7 +200,8 @@ impl PlayerState {
 
     #[allow(dead_code)] // Used by Phase-3 click-to-seek on the Mix tab.
     pub fn seek_frames(&self, frames: u64) {
-        self.position_frames.store(frames.min(self.longest_frames), Ordering::Release);
+        self.position_frames
+            .store(frames.min(self.longest_frames), Ordering::Release);
     }
 }
 
@@ -212,7 +215,11 @@ impl Player {
     /// Build a player for the given project. Pre-loads every track's WAV
     /// into memory (i16). Validates that all tracks share a sample rate
     /// — mismatched rates error out (resampling is not yet supported).
-    pub fn new(project: &Project) -> Result<Self> {
+    ///
+    /// `error_tx` is a clone of the app's audio-error channel; cpal's
+    /// output-stream err_fn pushes through it so the UI surfaces the
+    /// failure instead of locking stderr from the audio thread.
+    pub fn new(project: &Project, error_tx: std::sync::mpsc::Sender<String>) -> Result<Self> {
         if project.tracks.is_empty() {
             return Err(anyhow!("project has no tracks"));
         }
@@ -229,7 +236,9 @@ impl Player {
                 return Err(anyhow!(
                     "track '{}' has {} Hz but project plays at {} Hz — \
                      resampling is not yet supported (Phase 3)",
-                    t.name, tp.sample_rate, sample_rate
+                    t.name,
+                    tp.sample_rate,
+                    sample_rate
                 ));
             }
             longest_frames = longest_frames.max(tp.frame_count);
@@ -251,10 +260,13 @@ impl Player {
             global_bypass: AtomicBool::new(project.corrections_disabled),
         });
 
-        let stream = build_output_stream(state.clone())?;
+        let stream = build_output_stream(state.clone(), error_tx)?;
         stream.play().context("starting cpal output stream")?;
 
-        Ok(Self { state, _stream: stream })
+        Ok(Self {
+            state,
+            _stream: stream,
+        })
     }
 
     pub fn play(&self) {
@@ -263,7 +275,9 @@ impl Player {
         }
         self.state.set_play_state(PlayState::Playing);
     }
-    pub fn pause(&self) { self.state.set_play_state(PlayState::Paused); }
+    pub fn pause(&self) {
+        self.state.set_play_state(PlayState::Paused);
+    }
     pub fn stop(&self) {
         self.state.set_play_state(PlayState::Stopped);
         self.state.position_frames.store(0, Ordering::Release);
@@ -288,18 +302,18 @@ fn load_track(project: &Project, t: &Track) -> Result<TrackPlay> {
             if spec.bits_per_sample == 16 {
                 reader.samples::<i16>().filter_map(|r| r.ok()).collect()
             } else {
-                reader.samples::<i32>()
+                reader
+                    .samples::<i32>()
                     .filter_map(|r| r.ok())
                     .map(|s| s.clamp(i16::MIN as i32, i16::MAX as i32) as i16)
                     .collect()
             }
         }
-        hound::SampleFormat::Float => {
-            reader.samples::<f32>()
-                .filter_map(|r| r.ok())
-                .map(|s| (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16)
-                .collect()
-        }
+        hound::SampleFormat::Float => reader
+            .samples::<f32>()
+            .filter_map(|r| r.ok())
+            .map(|s| (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16)
+            .collect(),
     };
 
     let peaks = compute_peaks(&samples, channels as usize, PEAKS_BIN_SIZE);
@@ -329,9 +343,11 @@ fn load_track(project: &Project, t: &Track) -> Result<TrackPlay> {
 /// One value per bin — the visualiser doesn't render L/R lanes
 /// separately, just the envelope.
 fn compute_peaks(samples: &[i16], channels: usize, bin: usize) -> Vec<f32> {
-    if samples.is_empty() || bin == 0 { return Vec::new(); }
+    if samples.is_empty() || bin == 0 {
+        return Vec::new();
+    }
     let frames = samples.len() / channels.max(1);
-    let bins = (frames + bin - 1) / bin;
+    let bins = frames.div_ceil(bin);
     let mut out = Vec::with_capacity(bins);
     let denom = i16::MAX as f32;
     for b in 0..bins {
@@ -342,7 +358,9 @@ fn compute_peaks(samples: &[i16], channels: usize, bin: usize) -> Vec<f32> {
             for c in 0..channels {
                 let s = samples[f * channels + c] as f32 / denom;
                 let a = s.abs();
-                if a > peak { peak = a; }
+                if a > peak {
+                    peak = a;
+                }
             }
         }
         out.push(peak);
@@ -350,7 +368,10 @@ fn compute_peaks(samples: &[i16], channels: usize, bin: usize) -> Vec<f32> {
     out
 }
 
-fn build_output_stream(state: Arc<PlayerState>) -> Result<Stream> {
+fn build_output_stream(
+    state: Arc<PlayerState>,
+    error_tx: std::sync::mpsc::Sender<String>,
+) -> Result<Stream> {
     let host = cpal::default_host();
     let dev = host
         .default_output_device()
@@ -374,10 +395,15 @@ fn build_output_stream(state: Arc<PlayerState>) -> Result<Stream> {
         });
     let config: StreamConfig = match supported {
         Some(s) => s.into(),
-        None => dev.default_output_config().context("default output config")?.into(),
+        None => dev
+            .default_output_config()
+            .context("default output config")?
+            .into(),
     };
 
-    let err_fn = |e| eprintln!("cpal output stream error: {e}");
+    let err_fn = move |e: cpal::StreamError| {
+        let _ = error_tx.send(format!("output stream error: {e}"));
+    };
 
     // ── Closure-owned audio-thread state. Allocated once at stream
     //    creation; the callback NEVER allocates (cf. TBSS-FR-0004
@@ -440,9 +466,9 @@ fn build_output_stream(state: Arc<PlayerState>) -> Result<Stream> {
             // ── Per-buffer cache (one atomic-load fan-out per track) ──
             for (i, t) in state.tracks.iter().enumerate() {
                 let muted = t.mute.load(Ordering::Relaxed);
-                let solo  = t.solo.load(Ordering::Relaxed);
+                let solo = t.solo.load(Ordering::Relaxed);
                 let bypass = global_bypass || t.bypass_correction.load(Ordering::Relaxed);
-                let armed  = t.recording_armed.load(Ordering::Relaxed);
+                let armed = t.recording_armed.load(Ordering::Relaxed);
                 let gain_db = t.gain_db();
                 buf_cache[i] = TrackBufCache {
                     skip: muted || (any_solo && !solo),
@@ -459,7 +485,9 @@ fn build_output_stream(state: Arc<PlayerState>) -> Result<Stream> {
             let master_has_auto = !master_sampler.is_empty();
 
             // Reset per-track peak running maxes for this buffer.
-            for p in track_peaks.iter_mut() { *p = 0.0; }
+            for p in track_peaks.iter_mut() {
+                *p = 0.0;
+            }
             let mut peak_l = 0.0f32;
             let mut peak_r = 0.0f32;
 
@@ -471,13 +499,19 @@ fn build_output_stream(state: Arc<PlayerState>) -> Result<Stream> {
                     let t_secs = pos as f32 / sample_rate_f;
                     for (i, t) in state.tracks.iter().enumerate() {
                         let c = &buf_cache[i];
-                        if c.skip { continue; }
-                        if pos >= t.frame_count { continue; }
+                        if c.skip {
+                            continue;
+                        }
+                        if pos >= t.frame_count {
+                            continue;
+                        }
                         let (l_raw, r_raw) = read_frame(t, pos);
                         let (l, r) = if !c.bypass && c.has_chain {
                             // SAFETY: has_chain == true ⇒ chains[i] is Some.
                             chains[i].as_mut().unwrap().process(l_raw, r_raw)
-                        } else { (l_raw, r_raw) };
+                        } else {
+                            (l_raw, r_raw)
+                        };
                         // Static gain dominates: pre-computed in buf_cache.
                         // Only re-derive when automation is active and not
                         // overridden by bypass / arm.
@@ -492,7 +526,9 @@ fn build_output_stream(state: Arc<PlayerState>) -> Result<Stream> {
                         l_sum += post_l;
                         r_sum += post_r;
                         let peak = post_l.abs().max(post_r.abs());
-                        if peak > track_peaks[i] { track_peaks[i] = peak; }
+                        if peak > track_peaks[i] {
+                            track_peaks[i] = peak;
+                        }
                     }
                     pos += 1;
                 }
@@ -501,7 +537,8 @@ fn build_output_stream(state: Arc<PlayerState>) -> Result<Stream> {
                 // pre-computed linear gain; only the automation branch
                 // does a per-frame db_to_lin.
                 let master_g = if master_has_auto && !master_armed {
-                    let db = master_sampler.sample(pos as f32 / sample_rate_f)
+                    let db = master_sampler
+                        .sample(pos as f32 / sample_rate_f)
                         .unwrap_or(master_static_db);
                     db_to_lin(db)
                 } else {
@@ -510,10 +547,14 @@ fn build_output_stream(state: Arc<PlayerState>) -> Result<Stream> {
                 let out_l = (l_sum * master_g).clamp(-1.0, 1.0);
                 let out_r = (r_sum * master_g).clamp(-1.0, 1.0);
 
-                if out_l.abs() > peak_l { peak_l = out_l.abs(); }
-                if out_r.abs() > peak_r { peak_r = out_r.abs(); }
+                if out_l.abs() > peak_l {
+                    peak_l = out_l.abs();
+                }
+                if out_r.abs() > peak_r {
+                    peak_r = out_r.abs();
+                }
 
-                out[f * 2]     = out_l;
+                out[f * 2] = out_l;
                 out[f * 2 + 1] = out_r;
             }
 
@@ -522,20 +563,32 @@ fn build_output_stream(state: Arc<PlayerState>) -> Result<Stream> {
             for (i, p) in track_peaks.iter().enumerate() {
                 let new = (p.min(1.0) * 1000.0) as u32;
                 let cur = state.tracks[i].peak_x1000.load(Ordering::Relaxed);
-                let next = if new > cur { new } else { cur.saturating_sub(8) };
+                let next = if new > cur {
+                    new
+                } else {
+                    cur.saturating_sub(8)
+                };
                 state.tracks[i].peak_x1000.store(next, Ordering::Relaxed);
             }
             {
                 let new_l = (peak_l.min(1.0) * 1000.0) as u32;
                 let cur_l = state.master_peak_l_x1000.load(Ordering::Relaxed);
                 state.master_peak_l_x1000.store(
-                    if new_l > cur_l { new_l } else { cur_l.saturating_sub(8) },
+                    if new_l > cur_l {
+                        new_l
+                    } else {
+                        cur_l.saturating_sub(8)
+                    },
                     Ordering::Relaxed,
                 );
                 let new_r = (peak_r.min(1.0) * 1000.0) as u32;
                 let cur_r = state.master_peak_r_x1000.load(Ordering::Relaxed);
                 state.master_peak_r_x1000.store(
-                    if new_r > cur_r { new_r } else { cur_r.saturating_sub(8) },
+                    if new_r > cur_r {
+                        new_r
+                    } else {
+                        cur_r.saturating_sub(8)
+                    },
                     Ordering::Relaxed,
                 );
             }
@@ -585,14 +638,20 @@ fn read_frame(t: &TrackPlay, pos: u64) -> (f32, f32) {
     let denom = i16::MAX as f32;
     if t.channels >= 2 {
         let i = (pos as usize) * 2;
-        if i + 1 >= t.samples.len() { return (0.0, 0.0); }
+        if i + 1 >= t.samples.len() {
+            return (0.0, 0.0);
+        }
         (t.samples[i] as f32 / denom, t.samples[i + 1] as f32 / denom)
     } else {
         let i = pos as usize;
-        if i >= t.samples.len() { return (0.0, 0.0); }
+        if i >= t.samples.len() {
+            return (0.0, 0.0);
+        }
         let s = t.samples[i] as f32 / denom;
         (s, s)
     }
 }
 
-fn db_to_lin(db: f32) -> f32 { 10f32.powf(db / 20.0) }
+fn db_to_lin(db: f32) -> f32 {
+    10f32.powf(db / 20.0)
+}

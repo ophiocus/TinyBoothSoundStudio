@@ -42,14 +42,19 @@ pub fn read_wav_session(path: &Path) -> Option<SunoSession> {
     // the end / the data chunk (after which scanning is pointless).
     loop {
         let mut chunk_hdr = [0u8; 8];
-        if f.read_exact(&mut chunk_hdr).is_err() { return None; }
+        if f.read_exact(&mut chunk_hdr).is_err() {
+            return None;
+        }
         let chunk_id = &chunk_hdr[0..4];
-        let chunk_sz = u32::from_le_bytes([chunk_hdr[4], chunk_hdr[5], chunk_hdr[6], chunk_hdr[7]]) as u64;
+        let chunk_sz =
+            u32::from_le_bytes([chunk_hdr[4], chunk_hdr[5], chunk_hdr[6], chunk_hdr[7]]) as u64;
         let padded = chunk_sz + (chunk_sz & 1);
 
         if chunk_id == b"LIST" {
             let mut list_type = [0u8; 4];
-            if f.read_exact(&mut list_type).is_err() { return None; }
+            if f.read_exact(&mut list_type).is_err() {
+                return None;
+            }
             if &list_type == b"INFO" {
                 if let Some(s) = scan_info(&mut f, chunk_sz - 4) {
                     return Some(s);
@@ -74,7 +79,9 @@ fn scan_info<R: Read + Seek>(f: &mut R, info_body_size: u64) -> Option<SunoSessi
     let mut consumed = 0u64;
     while consumed + 8 <= info_body_size {
         let mut sub_hdr = [0u8; 8];
-        if f.read_exact(&mut sub_hdr).is_err() { return None; }
+        if f.read_exact(&mut sub_hdr).is_err() {
+            return None;
+        }
         let sub_id = &sub_hdr[0..4];
         let sub_sz = u32::from_le_bytes([sub_hdr[4], sub_hdr[5], sub_hdr[6], sub_hdr[7]]) as u64;
         let padded = sub_sz + (sub_sz & 1);
@@ -82,7 +89,9 @@ fn scan_info<R: Read + Seek>(f: &mut R, info_body_size: u64) -> Option<SunoSessi
 
         if sub_id == b"ICMT" {
             let mut payload = vec![0u8; sub_sz as usize];
-            if f.read_exact(&mut payload).is_err() { return None; }
+            if f.read_exact(&mut payload).is_err() {
+                return None;
+            }
             // Burn the alignment pad if any.
             if padded > sub_sz {
                 let _ = f.seek(SeekFrom::Current(1));
@@ -98,7 +107,8 @@ fn scan_info<R: Read + Seek>(f: &mut R, info_body_size: u64) -> Option<SunoSessi
 
 fn strip_trailing_nul(bytes: &[u8]) -> String {
     let s = String::from_utf8_lossy(bytes);
-    s.trim_end_matches(|c: char| c == '\0' || c.is_whitespace()).to_string()
+    s.trim_end_matches(|c: char| c == '\0' || c.is_whitespace())
+        .to_string()
 }
 
 fn parse_icmt(text: &str) -> Option<SunoSession> {
@@ -110,11 +120,15 @@ fn parse_icmt(text: &str) -> Option<SunoSession> {
     let mut provenance = String::new();
     for raw in text.split(';') {
         let part = raw.trim();
-        if part.is_empty() { continue; }
+        if part.is_empty() {
+            continue;
+        }
         if let Some(rest) = part.strip_prefix("created=") {
             iso = Some(rest.trim().to_string());
         } else {
-            if !provenance.is_empty() { provenance.push_str("; "); }
+            if !provenance.is_empty() {
+                provenance.push_str("; ");
+            }
             provenance.push_str(part);
         }
     }
@@ -123,6 +137,65 @@ fn parse_icmt(text: &str) -> Option<SunoSession> {
     Some(SunoSession {
         epoch: dt.timestamp(),
         iso_timestamp: iso,
-        provenance: if provenance.is_empty() { "made with suno studio".into() } else { provenance },
+        provenance: if provenance.is_empty() {
+            "made with suno studio".into()
+        } else {
+            provenance
+        },
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn canonical_suno_format() {
+        let s = parse_icmt("made with suno studio; created=2026-04-25T05:31:37Z").unwrap();
+        assert_eq!(s.iso_timestamp, "2026-04-25T05:31:37Z");
+        assert_eq!(s.provenance, "made with suno studio");
+        // 2026-04-25T05:31:37Z = 1777095097 Unix seconds.
+        assert_eq!(s.epoch, 1_777_095_097);
+    }
+
+    #[test]
+    fn whitespace_variants_tolerated() {
+        let s = parse_icmt("  made with suno studio  ;  created=2026-04-25T05:31:37Z  ").unwrap();
+        assert_eq!(s.iso_timestamp, "2026-04-25T05:31:37Z");
+        assert_eq!(s.provenance, "made with suno studio");
+    }
+
+    #[test]
+    fn created_only_falls_back_to_default_provenance() {
+        let s = parse_icmt("created=2026-01-01T00:00:00Z").unwrap();
+        assert_eq!(s.provenance, "made with suno studio");
+    }
+
+    #[test]
+    fn no_created_returns_none() {
+        assert!(parse_icmt("made with suno studio").is_none());
+        assert!(parse_icmt("").is_none());
+    }
+
+    #[test]
+    fn malformed_iso_returns_none() {
+        assert!(parse_icmt("created=not-a-date").is_none());
+        assert!(parse_icmt("created=2026-13-99T99:99:99Z").is_none());
+    }
+
+    #[test]
+    fn multiple_provenance_segments_preserved() {
+        let s = parse_icmt("made with suno studio; v5.0; created=2026-04-25T05:31:37Z").unwrap();
+        assert!(s.provenance.contains("made with suno studio"));
+        assert!(s.provenance.contains("v5.0"));
+    }
+
+    #[test]
+    fn epoch_round_trip() {
+        // Pick a known Unix-second value, format it back, ensure same.
+        let iso = "2000-01-01T00:00:00+00:00";
+        let s = parse_icmt(&format!("created={iso}")).unwrap();
+        // 2000-01-01T00:00:00Z = 946684800 Unix seconds.
+        assert_eq!(s.epoch, 946_684_800);
+    }
 }

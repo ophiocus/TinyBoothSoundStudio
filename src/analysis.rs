@@ -67,3 +67,75 @@ pub fn peak_bins(samples: &[f32], bins: usize) -> Vec<f32> {
         })
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn peak_bins_empty() {
+        assert!(peak_bins(&[], 8).is_empty());
+        assert!(peak_bins(&[1.0, -1.0], 0).is_empty());
+    }
+
+    #[test]
+    fn peak_bins_short_input_passes_through_abs() {
+        let r = peak_bins(&[0.5, -0.7, 0.2], 8);
+        // Fewer samples than bins → just |s| per sample.
+        assert_eq!(r.len(), 3);
+        assert!((r[0] - 0.5).abs() < 1e-6);
+        assert!((r[1] - 0.7).abs() < 1e-6);
+        assert!((r[2] - 0.2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn peak_bins_takes_abs_max_per_bin() {
+        // 8 samples, 4 bins → 2 samples per bin, abs-max per pair.
+        let s = vec![0.1, -0.9, 0.2, 0.3, -0.4, -0.6, 0.0, 0.7];
+        let r = peak_bins(&s, 4);
+        assert_eq!(r.len(), 4);
+        assert!((r[0] - 0.9).abs() < 1e-6);
+        assert!((r[1] - 0.3).abs() < 1e-6);
+        assert!((r[2] - 0.6).abs() < 1e-6);
+        assert!((r[3] - 0.7).abs() < 1e-6);
+    }
+
+    #[test]
+    fn spectrum_short_input_is_empty() {
+        assert!(spectrum(&[0.0; 8]).is_empty());
+        assert!(spectrum(&[0.0; 32]).is_empty());
+    }
+
+    #[test]
+    fn spectrum_silence_is_minimal() {
+        let r = spectrum(&[0.0; 1024]);
+        // Floor mapping: dB ~ -120 → ((-120 + 80)/80) clamped to 0.
+        for v in &r {
+            assert!(*v < 0.05, "silence should map near 0; got {v}");
+        }
+    }
+
+    #[test]
+    fn spectrum_pure_tone_peaks_in_band() {
+        // 480 Hz sine, 1024 samples at 48 kHz.
+        let sr = 48_000.0;
+        let f = 480.0;
+        let samples: Vec<f32> = (0..1024)
+            .map(|n| (2.0 * std::f32::consts::PI * f * n as f32 / sr).sin() * 0.5)
+            .collect();
+        let r = spectrum(&samples);
+        assert!(!r.is_empty());
+        let peak_idx = r
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .map(|(i, _)| i)
+            .unwrap();
+        // FFT size = 1024, bin width = sr / 1024 ≈ 46.875 Hz.
+        // 480 Hz lands roughly at bin index 480 / 46.875 ≈ 10.24.
+        assert!(
+            (8..=13).contains(&peak_idx),
+            "expected the peak near bin 10 for 480 Hz; found {peak_idx}"
+        );
+    }
+}

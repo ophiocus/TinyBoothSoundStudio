@@ -1,10 +1,10 @@
 use crate::audio::{self, DeviceInfo, RecordingSession, SourceMode, VizState};
-use crate::suno_import::{ImportKind, PendingImport};
 use crate::config::Config;
 use crate::dsp::{self, Profile};
 use crate::export::{self, ExportFormat};
 use crate::git_update::{UpdateAvailable, UpdateState};
 use crate::project::{Project, Track};
+use crate::suno_import::{ImportKind, PendingImport};
 use crate::ui;
 use eframe::egui;
 use std::path::{Path, PathBuf};
@@ -12,7 +12,12 @@ use std::sync::mpsc;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Tab { Record, Project, Mix, Export }
+pub enum Tab {
+    Record,
+    Project,
+    Mix,
+    Export,
+}
 
 pub struct TinyBoothApp {
     pub config: Config,
@@ -77,6 +82,13 @@ pub struct TinyBoothApp {
     pub update_state: UpdateState,
     pub update_error: Option<String>,
     pub update_rx: Option<mpsc::Receiver<Option<UpdateAvailable>>>,
+
+    // Audio-thread error channel. cpal's err_fn closures get a Sender;
+    // every frame the UI thread drains the Receiver and surfaces the
+    // most recent message into the status bar. Survival-guide §3.3:
+    // never `eprintln!` from the audio thread.
+    pub audio_err_tx: mpsc::Sender<String>,
+    pub audio_err_rx: mpsc::Receiver<String>,
 }
 
 impl TinyBoothApp {
@@ -95,6 +107,10 @@ impl TinyBoothApp {
             let _ = tx.send(crate::git_update::check_latest_release());
         });
 
+        // Audio-thread error channel. Sender clones go to every cpal
+        // err_fn closure; the UI thread drains the receiver each frame.
+        let (audio_err_tx, audio_err_rx) = mpsc::channel::<String>();
+
         // Enumerate input devices once at startup; user can refresh later.
         let devices = audio::list_input_devices();
         let selected_device = devices.first().map(|d| d.name.clone());
@@ -103,7 +119,10 @@ impl TinyBoothApp {
         let default_root = Config::dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join("sessions")
-            .join(format!("session-{}", chrono::Utc::now().format("%Y%m%d-%H%M%S")));
+            .join(format!(
+                "session-{}",
+                chrono::Utc::now().format("%Y%m%d-%H%M%S")
+            ));
 
         // Try to auto-restore the last project. Fall back to a fresh
         // scratch session if the path is missing, the file's gone, or
@@ -175,6 +194,8 @@ impl TinyBoothApp {
             update_state: UpdateState::Checking,
             update_error: None,
             update_rx: Some(rx),
+            audio_err_tx,
+            audio_err_rx,
         }
     }
 
@@ -183,7 +204,9 @@ impl TinyBoothApp {
     }
 
     pub fn set_active_profile(&mut self, idx: usize) {
-        if idx >= self.profiles.len() { return; }
+        if idx >= self.profiles.len() {
+            return;
+        }
         self.active_profile_idx = idx;
         self.config.active_profile = self.profiles[idx].name.clone();
         self.config.save();
@@ -226,6 +249,7 @@ impl TinyBoothApp {
             &abs,
             self.viz.clone(),
             profile.clone(),
+            self.audio_err_tx.clone(),
         )?;
         let sample_rate = session.sample_rate;
         self.session = Some(session);
@@ -303,7 +327,9 @@ impl TinyBoothApp {
         else {
             return;
         };
-        let name = src.file_name().map(|n| n.to_string_lossy().to_string())
+        let name = src
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "Suno session".into());
         let parent = src.parent().unwrap_or_else(|| Path::new("."));
         let project_root = parent.join(format!("{name} (TinyBooth)"));
@@ -331,7 +357,9 @@ impl TinyBoothApp {
         else {
             return;
         };
-        let name = src.file_stem().map(|n| n.to_string_lossy().to_string())
+        let name = src
+            .file_stem()
+            .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "Suno session".into());
         let parent = src.parent().unwrap_or_else(|| Path::new("."));
         let project_root = parent.join(format!("{name} (TinyBooth)"));
@@ -361,7 +389,12 @@ impl TinyBoothApp {
     pub fn enable_all_corrections(&mut self) {
         let (seed, source_label) = if let Some(p) = self.project.default_correction.clone() {
             (Some(p), "project default")
-        } else if let Some(p) = self.profiles.iter().find(|p| p.name == "Suno-Clean").cloned() {
+        } else if let Some(p) = self
+            .profiles
+            .iter()
+            .find(|p| p.name == "Suno-Clean")
+            .cloned()
+        {
             (Some(p), "Suno-Clean (feature default)")
         } else {
             (self.profiles.first().cloned(), "first available preset")
@@ -404,10 +437,18 @@ impl TinyBoothApp {
     /// mid-playback — the audio callback reads `global_bypass` once
     /// per buffer and ORs it with each track's per-track bypass.
     pub fn toggle_global_bypass(&mut self) -> bool {
-        let Some(player) = self.player.as_ref() else { return false };
-        let cur = player.state.global_bypass.load(std::sync::atomic::Ordering::Relaxed);
+        let Some(player) = self.player.as_ref() else {
+            return false;
+        };
+        let cur = player
+            .state
+            .global_bypass
+            .load(std::sync::atomic::Ordering::Relaxed);
         let new_state = !cur;
-        player.state.global_bypass.store(new_state, std::sync::atomic::Ordering::Relaxed);
+        player
+            .state
+            .global_bypass
+            .store(new_state, std::sync::atomic::Ordering::Relaxed);
         self.status = Some(if new_state {
             "Global bypass ON — playback is now the raw source on every track.".into()
         } else {
@@ -431,7 +472,8 @@ impl TinyBoothApp {
         }
         self.project_dirty = true;
         self.status = Some(if self.project.corrections_disabled {
-            "Project-wide corrections DISABLED (persisted). Save to keep this on next reload.".into()
+            "Project-wide corrections DISABLED (persisted). Save to keep this on next reload."
+                .into()
         } else {
             "Project-wide corrections ENABLED (persisted).".into()
         });
@@ -445,7 +487,9 @@ impl TinyBoothApp {
     pub fn reset_all_corrections(&mut self) {
         let mut changed = 0;
         for (i, track) in self.project.tracks.iter_mut().enumerate() {
-            if track.correction.is_none() { continue; }
+            if track.correction.is_none() {
+                continue;
+            }
             track.correction = None;
             changed += 1;
             if let Some(player) = self.player.as_ref() {
@@ -456,7 +500,9 @@ impl TinyBoothApp {
         }
         if changed > 0 {
             self.project_dirty = true;
-            self.status = Some(format!("Reset (cleared) corrections on {changed} track(s)."));
+            self.status = Some(format!(
+                "Reset (cleared) corrections on {changed} track(s)."
+            ));
         } else {
             self.status = Some("No tracks had corrections to reset.".into());
         }
@@ -465,18 +511,26 @@ impl TinyBoothApp {
     /// Resolve a pending import (called by the conflict modal).
     /// `replace = true` wipes the existing project and re-imports.
     pub fn resolve_import_conflict(&mut self, replace: bool) {
-        let Some(pending) = self.import_conflict.take() else { return };
-        if !replace { return; } // Cancel — do nothing
+        let Some(pending) = self.import_conflict.take() else {
+            return;
+        };
+        if !replace {
+            return;
+        } // Cancel — do nothing
         if let Err(e) = crate::suno_import::wipe_project_root(&pending.project_root) {
             self.status = Some(format!("Could not wipe existing project: {e}"));
             return;
         }
         let outcome = match pending.kind {
             ImportKind::Folder => crate::suno_import::import_folder(
-                &pending.source, &pending.project_root, &pending.project_name,
+                &pending.source,
+                &pending.project_root,
+                &pending.project_name,
             ),
             ImportKind::Zip => crate::suno_import::import_zip(
-                &pending.source, &pending.project_root, &pending.project_name,
+                &pending.source,
+                &pending.project_root,
+                &pending.project_name,
             ),
         };
         self.apply_import_outcome(outcome);
@@ -554,7 +608,8 @@ impl eframe::App for TinyBoothApp {
                 ui.menu_button("File", |ui| {
                     if ui.button("New project…").clicked() {
                         if let Some(dir) = rfd::FileDialog::new().pick_folder() {
-                            let name = dir.file_name()
+                            let name = dir
+                                .file_name()
                                 .map(|n| n.to_string_lossy().to_string())
                                 .unwrap_or_else(|| "Session".into());
                             self.set_project_root(dir, name);
@@ -619,7 +674,10 @@ impl eframe::App for TinyBoothApp {
                     }
                 });
                 ui.menu_button("View", |ui| {
-                    if ui.checkbox(&mut self.config.dark_mode, "Dark mode").changed() {
+                    if ui
+                        .checkbox(&mut self.config.dark_mode, "Dark mode")
+                        .changed()
+                    {
                         ctx.set_visuals(if self.config.dark_mode {
                             egui::Visuals::dark()
                         } else {
@@ -661,9 +719,15 @@ impl eframe::App for TinyBoothApp {
             });
         });
 
+        // Drain any audio-thread errors into the status bar.
+        while let Ok(msg) = self.audio_err_rx.try_recv() {
+            self.status = Some(format!("audio: {msg}"));
+        }
+
+        let mut should_close_for_update = false;
         egui::TopBottomPanel::bottom("bottom_bar").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                crate::git_update::render(
+                should_close_for_update = crate::git_update::render(
                     ui,
                     &mut self.update_state,
                     &mut self.update_error,
@@ -675,6 +739,20 @@ impl eframe::App for TinyBoothApp {
                 }
             });
         });
+        if should_close_for_update {
+            // Stop any in-flight recording first so the WAV writer
+            // finalises its header before Drop. Save is implicit via
+            // stop_take which writes the manifest.
+            if self.session.is_some() {
+                self.stop_take();
+            }
+            self.config.save();
+            // eframe 0.28: ask the viewport to close — the runtime
+            // tears down GLOW + winit, runs Drop on `Self`, exits the
+            // event loop. Strictly cleaner than process::exit().
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
 
         egui::CentralPanel::default().show(ctx, |ui| match self.tab {
             Tab::Record => ui::record::show(self, ui),
@@ -724,4 +802,3 @@ impl eframe::App for TinyBoothApp {
         }
     }
 }
-

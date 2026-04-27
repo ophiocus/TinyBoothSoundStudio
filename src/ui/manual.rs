@@ -30,7 +30,11 @@ fn body(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
             ui.add_space(6.0);
 
             for cat in [Category::Welcome, Category::Reference, Category::Appendix] {
-                ui.label(egui::RichText::new(cat.label()).strong().color(egui::Color32::from_rgb(230, 200, 80)));
+                ui.label(
+                    egui::RichText::new(cat.label())
+                        .strong()
+                        .color(egui::Color32::from_rgb(230, 200, 80)),
+                );
                 ui.add_space(2.0);
                 for p in PAGES.iter().filter(|p| p.category == cat) {
                     let selected = app.manual_slug == p.slug;

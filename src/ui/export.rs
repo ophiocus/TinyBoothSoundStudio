@@ -25,10 +25,7 @@ pub fn show(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
                         } else {
                             format!("{} (ffmpeg missing)", f.label())
                         };
-                        if ui
-                            .selectable_label(app.export_format == f, txt)
-                            .clicked()
-                        {
+                        if ui.selectable_label(app.export_format == f, txt).clicked() {
                             app.export_format = f;
                         }
                     });
@@ -45,7 +42,10 @@ pub fn show(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
 
     // ── Bitrate slider for lossy codecs ─────────────────────────────
     match app.export_format {
-        ExportFormat::Mp3 | ExportFormat::OggVorbis | ExportFormat::OggOpus | ExportFormat::M4aAac => {
+        ExportFormat::Mp3
+        | ExportFormat::OggVorbis
+        | ExportFormat::OggOpus
+        | ExportFormat::M4aAac => {
             ui.horizontal(|ui| {
                 ui.label("Bitrate:");
                 ui.add(egui::Slider::new(&mut app.export_bitrate, 64..=320).suffix(" kbps"));
@@ -68,7 +68,8 @@ pub fn show(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
         )
         .clicked()
     {
-        let default_name = format!("{}.{}",
+        let default_name = format!(
+            "{}.{}",
             sanitise_filename(&app.project.name),
             app.export_format.extension(),
         );
@@ -85,9 +86,7 @@ pub fn show(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
             };
             match export::export(&app.project, &opts) {
                 Ok(()) => {
-                    app.export_msg = Some(format!(
-                        "Exported: {}", opts.out_path.display()
-                    ));
+                    app.export_msg = Some(format!("Exported: {}", opts.out_path.display()));
                     app.status = app.export_msg.clone();
                 }
                 Err(e) => {
@@ -108,8 +107,16 @@ pub fn show(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
 fn sanitise_filename(s: &str) -> String {
     let mut out: String = s
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
-    if out.is_empty() { out.push_str("export"); }
+    if out.is_empty() {
+        out.push_str("export");
+    }
     out
 }

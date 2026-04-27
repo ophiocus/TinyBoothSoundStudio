@@ -29,7 +29,11 @@ pub fn show(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
                 }
             });
         });
-        if ui.button("Admin…").on_hover_text("Edit profile parameters").clicked() {
+        if ui
+            .button("Admin…")
+            .on_hover_text("Edit profile parameters")
+            .clicked()
+        {
             app.show_admin = true;
             app.admin_edit_idx = Some(app.active_profile_idx);
         }
@@ -57,7 +61,10 @@ pub fn show(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
                     if ui
                         .selectable_label(
                             app.selected_device.as_deref() == Some(&dev.name),
-                            format!("{}  ({} ch, {} Hz)", dev.name, dev.channels, dev.sample_rate),
+                            format!(
+                                "{}  ({} ch, {} Hz)",
+                                dev.name, dev.channels, dev.sample_rate
+                            ),
                         )
                         .clicked()
                     {
@@ -92,7 +99,11 @@ pub fn show(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
     ui.horizontal_wrapped(|ui| {
         use crate::audio::SourceMode;
         ui.label("Source:");
-        ui.radio_value(&mut app.selected_mode, SourceMode::Mixdown, "All (mixdown → mono)");
+        ui.radio_value(
+            &mut app.selected_mode,
+            SourceMode::Mixdown,
+            "All (mixdown → mono)",
+        );
         for c in 0..channel_count {
             ui.radio_value(
                 &mut app.selected_mode,
@@ -125,31 +136,41 @@ pub fn show(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
         if !recording {
             let enabled = app.selected_device.is_some();
             if ui
-                .add_enabled(enabled, egui::Button::new("⏺  Record").min_size(egui::vec2(120.0, 32.0)))
+                .add_enabled(
+                    enabled,
+                    egui::Button::new("⏺  Record").min_size(egui::vec2(120.0, 32.0)),
+                )
                 .clicked()
             {
                 if let Err(e) = app.start_new_take() {
                     app.status = Some(format!("record error: {e}"));
                 }
             }
-        } else {
-            if ui
-                .add(egui::Button::new("⏹  Stop").min_size(egui::vec2(120.0, 32.0)))
-                .clicked()
-            {
-                app.stop_take();
-            }
+        } else if ui
+            .add(egui::Button::new("⏹  Stop").min_size(egui::vec2(120.0, 32.0)))
+            .clicked()
+        {
+            app.stop_take();
         }
         if let Some(sess) = app.session.as_ref() {
             ui.label(format!("REC  {:.1}s", sess.duration_secs()));
-            ui.label(format!("file: {}", sess.wav_path.file_name().unwrap_or_default().to_string_lossy()));
+            ui.label(format!(
+                "file: {}",
+                sess.wav_path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+            ));
         }
     });
 
     ui.add_space(8.0);
 
     // ── Visualisation ───────────────────────────────────────────────
-    let sample_rate = app.viz.sample_rate.load(std::sync::atomic::Ordering::Relaxed) as usize;
+    let sample_rate = app
+        .viz
+        .sample_rate
+        .load(std::sync::atomic::Ordering::Relaxed) as usize;
     let window = sample_rate * 2; // 2 seconds
     let left = app.viz.snapshot_left(window);
     let stereo = app.viz.is_stereo();
@@ -164,7 +185,11 @@ pub fn show(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
         ui.add_space(6.0);
         ui.label("Spectrum (L+R sum)");
         // Sum L+R for the spectrum — overlapping stereo spectra are visually noisy.
-        let sum: Vec<f32> = left.iter().zip(right.iter()).map(|(l, r)| 0.5 * (l + r)).collect();
+        let sum: Vec<f32> = left
+            .iter()
+            .zip(right.iter())
+            .map(|(l, r)| 0.5 * (l + r))
+            .collect();
         viz::draw_spectrum(ui, &sum, 140.0);
         ui.add_space(6.0);
         let pl = app.viz.peak_left();

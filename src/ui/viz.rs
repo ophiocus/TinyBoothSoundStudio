@@ -62,10 +62,7 @@ pub fn draw_spectrum(ui: &mut egui::Ui, samples: &[f32], height: f32) {
         let h = avg * rect.height();
         let x = rect.min.x + (c as f32) * (rect.width() / cols as f32);
         let col_w = rect.width() / cols as f32 - 1.0;
-        let r = Rect::from_min_size(
-            Pos2::new(x, rect.max.y - h),
-            egui::vec2(col_w.max(1.0), h),
-        );
+        let r = Rect::from_min_size(Pos2::new(x, rect.max.y - h), egui::vec2(col_w.max(1.0), h));
         let hue = (c as f32 / cols as f32 * 0.6 + 0.4).fract();
         let color = egui::ecolor::Hsva::new(hue, 0.7, 0.9, 1.0);
         painter.rect_filled(r, 1.0, color);

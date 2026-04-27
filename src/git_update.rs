@@ -3,7 +3,14 @@
 //! Checks the latest release of `APP_GH_REPO`, compares 4-part semver against
 //! `APP_VERSION` (set by build.rs from git tag), and, if newer, downloads the
 //! first `.msi` asset and launches it elevated through PowerShell.
+//!
+//! On successful install-spawn, signals back to the UI thread (via the
+//! return value of [`render`]) so `app.rs` can call
+//! [`eframe::Frame::close`] for a clean shutdown — Drops run, WAV writers
+//! flush, configs save. Pre-v0.3.6 this used `process::exit(0)` directly,
+//! which corrupted any in-flight WAV the user had open while updating.
 
+use anyhow::{Context, Result};
 use eframe::egui;
 use std::path::PathBuf;
 use std::sync::mpsc;
@@ -18,7 +25,7 @@ pub enum UpdateState {
     Idle,
     Checking,
     Available(UpdateAvailable),
-    Downloading(mpsc::Receiver<Result<PathBuf, String>>),
+    Downloading(mpsc::Receiver<Result<PathBuf>>),
 }
 
 fn is_newer(latest: &str, current: &str) -> bool {
@@ -40,38 +47,46 @@ pub fn check_latest_release() -> Option<UpdateAvailable> {
         .timeout(std::time::Duration::from_secs(10))
         .build()
         .ok()?;
-    let url = format!("https://api.github.com/repos/{}/releases/latest", crate::APP_GH_REPO);
+    let url = format!(
+        "https://api.github.com/repos/{}/releases/latest",
+        crate::APP_GH_REPO
+    );
     let resp: serde_json::Value = client.get(url).send().ok()?.json().ok()?;
-    let tag = resp["tag_name"].as_str()?.trim_start_matches('v').to_string();
+    let tag = resp["tag_name"]
+        .as_str()?
+        .trim_start_matches('v')
+        .to_string();
     if !is_newer(&tag, env!("APP_VERSION")) {
         return None;
     }
     let dl = resp["assets"]
         .as_array()?
         .iter()
-        .find(|a| a["name"].as_str().unwrap_or("").ends_with(".msi"))?
-        ["browser_download_url"]
+        .find(|a| a["name"].as_str().unwrap_or("").ends_with(".msi"))?["browser_download_url"]
         .as_str()?
         .to_string();
-    Some(UpdateAvailable { version: tag, url: dl })
+    Some(UpdateAvailable {
+        version: tag,
+        url: dl,
+    })
 }
 
-fn download_and_install(url: &str, version: &str) -> Result<PathBuf, String> {
+fn download_and_install(url: &str, version: &str) -> Result<PathBuf> {
     let ua = format!("{}/{}", crate::APP_NAME, env!("APP_VERSION"));
     let client = reqwest::blocking::Client::builder()
         .user_agent(ua)
         .timeout(std::time::Duration::from_secs(180))
         .build()
-        .map_err(|e| format!("HTTP client: {e}"))?;
+        .context("building HTTP client")?;
     let bytes = client
         .get(url)
         .send()
         .and_then(|r| r.error_for_status())
         .and_then(|r| r.bytes())
-        .map_err(|e| format!("Download: {e}"))?;
+        .context("downloading MSI")?;
 
     let path = std::env::temp_dir().join(format!("{}-{version}.msi", crate::APP_NAME));
-    std::fs::write(&path, &bytes).map_err(|e| format!("Write MSI: {e}"))?;
+    std::fs::write(&path, &bytes).with_context(|| format!("writing MSI to {}", path.display()))?;
 
     let msi = path.to_string_lossy();
     std::process::Command::new("powershell")
@@ -83,17 +98,23 @@ fn download_and_install(url: &str, version: &str) -> Result<PathBuf, String> {
             ),
         ])
         .spawn()
-        .map_err(|e| format!("Launch installer: {e}"))?;
+        .context("launching elevated msiexec via PowerShell")?;
 
     Ok(path)
 }
 
+/// Drive the version-label widget. Returns `true` exactly once, in the
+/// frame where an installer launch has succeeded — the caller should
+/// respond by closing the eframe window so Drop impls run cleanly.
+#[must_use = "the bool indicates the app should close so Drop impls (WAV finalize, Config save) run; ignoring it leaves the user with a stale window after the installer launches"]
 pub fn render(
     ui: &mut egui::Ui,
     state: &mut UpdateState,
     error: &mut Option<String>,
     rx: &mut Option<mpsc::Receiver<Option<UpdateAvailable>>>,
-) {
+) -> bool {
+    let mut should_close = false;
+
     // Drain background check result.
     if let Some(r) = rx.as_ref() {
         if let Ok(result) = r.try_recv() {
@@ -104,13 +125,17 @@ pub fn render(
             *rx = None;
         }
     }
-    // Drain download result.
+    // Drain download result. On Ok, signal close so the caller runs a
+    // clean eframe shutdown (Drops, flush, save). On Err, surface the
+    // anyhow chain and return to Idle so the user can retry.
     if let UpdateState::Downloading(r) = state {
         if let Ok(res) = r.try_recv() {
             match res {
-                Ok(_) => std::process::exit(0),
+                Ok(_) => {
+                    should_close = true;
+                }
                 Err(e) => {
-                    *error = Some(e);
+                    *error = Some(format!("Update failed: {e:#}"));
                     *state = UpdateState::Idle;
                 }
             }
@@ -152,5 +177,48 @@ pub fn render(
         UpdateState::Downloading(_) => {
             ui.label("downloading…");
         }
+    }
+
+    should_close
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_newer;
+
+    #[test]
+    fn three_part_basic() {
+        assert!(is_newer("0.1.1", "0.1.0"));
+        assert!(is_newer("0.2.0", "0.1.99"));
+        assert!(is_newer("1.0.0", "0.99.99"));
+        assert!(!is_newer("0.1.0", "0.1.0"));
+        assert!(!is_newer("0.1.0", "0.1.1"));
+    }
+
+    #[test]
+    fn four_part_subtag() {
+        // Missing components default to 0; "0.1.0" parses as (0,1,0,0).
+        assert!(is_newer("0.1.0.1", "0.1.0"));
+        assert!(is_newer("0.1.0.10", "0.1.0.9"));
+        assert!(!is_newer("0.1.0.0", "0.1.0"));
+    }
+
+    #[test]
+    fn malformed_components_default_to_zero() {
+        assert!(!is_newer("garbage", "0.0.1"));
+        assert!(is_newer("0.0.1", "garbage"));
+    }
+
+    #[test]
+    fn empty_strings() {
+        assert!(!is_newer("", ""));
+        assert!(!is_newer("", "0.0.1"));
+        assert!(is_newer("0.0.1", ""));
+    }
+
+    #[test]
+    fn major_dominates_minor() {
+        assert!(is_newer("2.0.0", "1.99.99"));
+        assert!(!is_newer("1.99.99", "2.0.0"));
     }
 }

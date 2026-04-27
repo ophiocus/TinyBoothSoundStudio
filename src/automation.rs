@@ -37,9 +37,13 @@ pub struct AutomationLane {
 
 impl AutomationLane {
     #[allow(dead_code)] // public API kept for Phase-3 (lane editor / programmatic builds)
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
-    pub fn is_empty(&self) -> bool { self.points.is_empty() }
+    pub fn is_empty(&self) -> bool {
+        self.points.is_empty()
+    }
 
     #[allow(dead_code)] // exposed for the lane editor in Phase-3 polish
     pub fn duration_secs(&self) -> f32 {
@@ -51,12 +55,17 @@ impl AutomationLane {
     /// `true` if the point was kept.
     pub fn record_point(&mut self, t: f32, gain_db: f32, delta_db: f32) -> bool {
         if let Some(last) = self.points.last() {
-            if t <= last.time_secs { return false; }
+            if t <= last.time_secs {
+                return false;
+            }
             if (gain_db - last.gain_db).abs() < delta_db && t - last.time_secs < 0.5 {
                 return false;
             }
         }
-        self.points.push(AutomationPoint { time_secs: t, gain_db });
+        self.points.push(AutomationPoint {
+            time_secs: t,
+            gain_db,
+        });
         true
     }
 }
@@ -64,6 +73,7 @@ impl AutomationLane {
 /// Audio-thread-readable spline sampler. Cheap to clone (it's a thin
 /// wrapper around an `Arc<Spline>`); built on the UI thread when the
 /// lane changes and shipped to the player via an atomic swap.
+#[derive(Default)]
 pub struct SplineSampler {
     inner: Option<Spline<f32, f32>>,
     /// Constant fallback when there's nothing to interpolate.
@@ -73,20 +83,37 @@ pub struct SplineSampler {
 impl SplineSampler {
     pub fn build(lane: &AutomationLane) -> Self {
         match lane.points.len() {
-            0 => Self { inner: None, flat: None },
-            1 => Self { inner: None, flat: Some(lane.points[0].gain_db) },
+            0 => Self {
+                inner: None,
+                flat: None,
+            },
+            1 => Self {
+                inner: None,
+                flat: Some(lane.points[0].gain_db),
+            },
             _ => {
                 // Pad endpoints so Catmull-Rom always has 4 keys to work
                 // with, regardless of where in the lane we sample.
                 let first = lane.points.first().copied().unwrap();
                 let last = lane.points.last().copied().unwrap();
                 let mut keys: Vec<Key<f32, f32>> = Vec::with_capacity(lane.points.len() + 2);
-                keys.push(Key::new(first.time_secs - 1.0, first.gain_db, Interpolation::CatmullRom));
+                keys.push(Key::new(
+                    first.time_secs - 1.0,
+                    first.gain_db,
+                    Interpolation::CatmullRom,
+                ));
                 for p in &lane.points {
                     keys.push(Key::new(p.time_secs, p.gain_db, Interpolation::CatmullRom));
                 }
-                keys.push(Key::new(last.time_secs + 1.0, last.gain_db, Interpolation::CatmullRom));
-                Self { inner: Some(Spline::from_vec(keys)), flat: None }
+                keys.push(Key::new(
+                    last.time_secs + 1.0,
+                    last.gain_db,
+                    Interpolation::CatmullRom,
+                ));
+                Self {
+                    inner: Some(Spline::from_vec(keys)),
+                    flat: None,
+                }
             }
         }
     }
@@ -94,7 +121,9 @@ impl SplineSampler {
     /// Interpolated gain at `t` (seconds). `None` means "no automation
     /// here — fall back to the static `track.gain_db`".
     pub fn sample(&self, t: f32) -> Option<f32> {
-        if let Some(g) = self.flat { return Some(g); }
+        if let Some(g) = self.flat {
+            return Some(g);
+        }
         self.inner.as_ref()?.sample(t)
     }
 
@@ -105,10 +134,6 @@ impl SplineSampler {
     pub fn is_empty(&self) -> bool {
         self.inner.is_none() && self.flat.is_none()
     }
-}
-
-impl Default for SplineSampler {
-    fn default() -> Self { Self { inner: None, flat: None } }
 }
 
 /// UI-thread recorder state. Lives on `app` while a recording is in
@@ -135,5 +160,79 @@ impl Recorder {
     pub fn clear(&mut self) {
         self.track_scratch.clear();
         self.master_scratch = AutomationLane::default();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lane(points: &[(f32, f32)]) -> AutomationLane {
+        AutomationLane {
+            points: points
+                .iter()
+                .map(|&(t, g)| AutomationPoint {
+                    time_secs: t,
+                    gain_db: g,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn empty_lane_samples_to_none() {
+        let s = SplineSampler::build(&AutomationLane::default());
+        assert!(s.is_empty());
+        assert_eq!(s.sample(0.0), None);
+        assert_eq!(s.sample(99.0), None);
+    }
+
+    #[test]
+    fn single_point_lane_is_constant() {
+        let s = SplineSampler::build(&lane(&[(2.5, -3.0)]));
+        assert!(!s.is_empty());
+        // Returns the single value at any t.
+        assert_eq!(s.sample(0.0), Some(-3.0));
+        assert_eq!(s.sample(2.5), Some(-3.0));
+        assert_eq!(s.sample(99.0), Some(-3.0));
+    }
+
+    #[test]
+    fn two_point_lane_interpolates_smoothly() {
+        let s = SplineSampler::build(&lane(&[(0.0, 0.0), (1.0, -6.0)]));
+        let mid = s.sample(0.5).expect("interior point should sample");
+        // Catmull-Rom on (0,0) → (1,-6) with mirrored endpoints should
+        // give roughly linear behaviour through the interior — at most
+        // a small overshoot.
+        assert!(mid < 0.0, "midpoint should head toward -6 dB");
+        assert!(mid > -6.0, "midpoint shouldn't overshoot the endpoint");
+    }
+
+    #[test]
+    fn record_point_decimates() {
+        let mut l = AutomationLane::default();
+        // First point always kept.
+        assert!(l.record_point(0.0, -3.0, 0.05));
+        // Same time → rejected.
+        assert!(!l.record_point(0.0, -3.5, 0.05));
+        // Same gain (within delta) AND short interval → rejected.
+        assert!(!l.record_point(0.01, -2.99, 0.05));
+        // Big gain change → kept.
+        assert!(l.record_point(0.02, -1.0, 0.05));
+        // Long interval keeps the point even if gain is similar.
+        assert!(l.record_point(1.0, -1.01, 0.05));
+
+        assert_eq!(l.points.len(), 3);
+        assert_eq!(l.points[0].time_secs, 0.0);
+        assert_eq!(l.points[1].time_secs, 0.02);
+        assert_eq!(l.points[2].time_secs, 1.0);
+    }
+
+    #[test]
+    fn record_point_strict_time_increase() {
+        let mut l = AutomationLane::default();
+        l.record_point(1.0, 0.0, 0.05);
+        // Time goes backward — must reject.
+        assert!(!l.record_point(0.5, 0.0, 0.05));
     }
 }
