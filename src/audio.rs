@@ -55,7 +55,7 @@ pub fn list_input_devices() -> Vec<DeviceInfo> {
         });
     }
     // Default device first for convenience.
-    out.sort_by(|a, b| (a.name != default_name).cmp(&(b.name != default_name)));
+    out.sort_by_key(|d| d.name != default_name);
     out
 }
 
