@@ -1,4 +1,5 @@
 use crate::audio::{self, DeviceInfo, RecordingSession, SourceMode, VizState};
+use crate::suno_import::{ImportKind, PendingImport};
 use crate::config::Config;
 use crate::dsp::{self, Profile};
 use crate::export::{self, ExportFormat};
@@ -58,6 +59,11 @@ pub struct TinyBoothApp {
 
     /// Modal dialog shown after every import attempt — success or fail.
     pub import_dialog: Option<crate::suno_import::ImportOutcome>,
+
+    /// Pending Suno import waiting for user resolution because the
+    /// target project root already contains a project with a matching
+    /// session epoch. The conflict modal shows while this is `Some`.
+    pub import_conflict: Option<PendingImport>,
 
     /// Mixer/automation recorder. Captures fader gestures while a strip's
     /// arm toggle is on and the player is in Playing state. Flushed into
@@ -163,6 +169,7 @@ impl TinyBoothApp {
             player_error: None,
             editing_correction_for: None,
             import_dialog: None,
+            import_conflict: None,
             recorder: crate::automation::Recorder::default(),
             mix_console_fraction: 0.42,
             update_state: UpdateState::Checking,
@@ -300,6 +307,17 @@ impl TinyBoothApp {
             .unwrap_or_else(|| "Suno session".into());
         let parent = src.parent().unwrap_or_else(|| Path::new("."));
         let project_root = parent.join(format!("{name} (TinyBooth)"));
+        let probe = crate::suno_import::probe_folder(&src, &project_root);
+        if probe.is_duplicate() {
+            self.import_conflict = Some(PendingImport {
+                kind: ImportKind::Folder,
+                source: src,
+                project_root,
+                project_name: name,
+                probe,
+            });
+            return;
+        }
         let outcome = crate::suno_import::import_folder(&src, &project_root, &name);
         self.apply_import_outcome(outcome);
     }
@@ -317,7 +335,38 @@ impl TinyBoothApp {
             .unwrap_or_else(|| "Suno session".into());
         let parent = src.parent().unwrap_or_else(|| Path::new("."));
         let project_root = parent.join(format!("{name} (TinyBooth)"));
+        let probe = crate::suno_import::probe_zip(&src, &project_root);
+        if probe.is_duplicate() {
+            self.import_conflict = Some(PendingImport {
+                kind: ImportKind::Zip,
+                source: src,
+                project_root,
+                project_name: name,
+                probe,
+            });
+            return;
+        }
         let outcome = crate::suno_import::import_zip(&src, &project_root, &name);
+        self.apply_import_outcome(outcome);
+    }
+
+    /// Resolve a pending import (called by the conflict modal).
+    /// `replace = true` wipes the existing project and re-imports.
+    pub fn resolve_import_conflict(&mut self, replace: bool) {
+        let Some(pending) = self.import_conflict.take() else { return };
+        if !replace { return; } // Cancel — do nothing
+        if let Err(e) = crate::suno_import::wipe_project_root(&pending.project_root) {
+            self.status = Some(format!("Could not wipe existing project: {e}"));
+            return;
+        }
+        let outcome = match pending.kind {
+            ImportKind::Folder => crate::suno_import::import_folder(
+                &pending.source, &pending.project_root, &pending.project_name,
+            ),
+            ImportKind::Zip => crate::suno_import::import_zip(
+                &pending.source, &pending.project_root, &pending.project_name,
+            ),
+        };
         self.apply_import_outcome(outcome);
     }
 
@@ -549,6 +598,11 @@ impl eframe::App for TinyBoothApp {
         // success or fail. Can't be missed.
         if self.import_dialog.is_some() {
             ui::import_dialog::show(self, ctx);
+        }
+
+        // Duplicate-import conflict modal.
+        if self.import_conflict.is_some() {
+            ui::import_conflict::show(self, ctx);
         }
     }
 

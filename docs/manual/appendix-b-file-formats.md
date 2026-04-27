@@ -41,11 +41,23 @@ The project manifest. Located at the root of every TinyBooth project folder.
 | `duration_secs` | float | Captured length. |
 | `profile` | object or null | Snapshot of the recording-tone profile. |
 | `stereo` | bool | True iff the underlying WAV has 2 channels. |
-| `source` | object | Tagged enum: `{kind: "Recorded"}` or `{kind: "SunoStem", role, original_filename}`. |
+| `source` | object | Tagged enum: `{kind: "Recorded"}` or `{kind: "SunoStem", role, original_filename, session_epoch, session_ordinal, provenance}`. |
+| `gain_automation` | object or null | Recorded fader-gesture lane (Catmull-Rom replay). `{points: [{time_secs, gain_db}, …]}`. |
+| `correction` | object or null | Per-track DSP correction profile (same shape as a recording-tone profile). |
+
+### Suno session metadata (added v0.3.1)
+
+When a track originates from a Suno stem bundle, its `source` carries the session metadata harvested from the WAV's `LIST/INFO/ICMT` RIFF chunk:
+
+- **`session_epoch`** — Unix epoch seconds (i64). Identical across every stem in one Suno render; distinct between re-renders. Sortable directly for "newest first" / "oldest first" views.
+- **`session_ordinal`** — project-relative monotonically-increasing import counter (u32). Every track from one import event shares the ordinal; the project's `next_suno_ordinal` field is bumped on each successful import. Use this when you want to order *imports* into the project rather than Suno *renders*.
+- **`provenance`** — free-form string from the same ICMT chunk (typically "made with suno studio").
+
+The project itself gains a `next_suno_ordinal: u32` field (default `1`) to source the next ordinal.
 
 ### Backward compatibility
 
-All fields added since v0.1 (`stereo`, `profile`, `source`) are marked `#[serde(default)]`. Older manifests load cleanly with sensible defaults.
+All fields added since v0.1 (`stereo`, `profile`, `source`, `gain_automation`, `correction`, plus the v0.3.1 Suno session fields and `next_suno_ordinal`, plus the v0.2 `master_gain_db` and `master_gain_automation`) are marked `#[serde(default)]`. Older manifests load cleanly with sensible defaults.
 
 ## `profiles.json` (JSON)
 

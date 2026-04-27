@@ -49,6 +49,22 @@ You're now in a normal TinyBooth project. The Project tab source column shows ea
 
 Future work — the planned **Clean** tab — will dispatch role-aware processing on these stems (e.g. de-esser only on vocals, drum bus glue only on percussion). For now, the import is a structural unlock; the per-role processing is documented under TBSS-FR-0001 in the source repo.
 
+## Session metadata (epoch + ordinal)
+
+Suno stamps every stem WAV with a `LIST/INFO/ICMT` RIFF comment that reads like `made with suno studio; created=2026-04-25T05:31:37Z`. The ingester reads this on every kept stem and stores:
+
+- **`session_epoch`** (Unix integer seconds) — identical across all stems of one Suno render, distinct between re-renders. JSON-clean, sortable directly.
+- **`session_ordinal`** — a project-relative import counter (1, 2, 3, …). Bumped on every successful import; all tracks from one import event share the ordinal.
+- **`provenance`** — the free-form prefix from the same ICMT chunk.
+
+These appear in the **Project tab** as `Suno · Vocals (#1)`, `Suno · Drums (#1)` etc. — hover the source column for the full epoch / ISO / provenance triple.
+
+## Duplicate-import detection
+
+Re-importing a bundle whose `session_epoch` already exists in the target project's manifest triggers a confirmation modal: **Replace existing project** or **Cancel**. Replace wipes the old `tracks/` and manifest, re-imports fresh, and assigns a new `session_ordinal`. Cancel leaves everything as it was. (Pre-v0.3.1 the re-import quietly accumulated `-002` / `-003` collision-renamed copies — this is the explicit fix.)
+
+If you want to keep the old project alongside the new import, **rename the existing project folder before re-importing**. The detector looks at the proposed target root only; a different folder name produces no conflict.
+
 ## Limitations
 
 - No online stem fetch. Suno has no official API; community wrappers break when Suno rotates auth, so TinyBooth deliberately doesn't ship one. Manual zip-drop is the supported path.

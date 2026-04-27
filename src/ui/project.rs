@@ -63,22 +63,40 @@ pub fn show(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
                 {
                     app.project_dirty = true;
                 }
-                let src = match &t.source {
-                    crate::project::TrackSource::SunoStem { role, .. } => {
-                        format!("Suno · {}", role.label())
+                let (src, hover) = match &t.source {
+                    crate::project::TrackSource::SunoStem { role, original_filename, session_epoch, session_ordinal, provenance } => {
+                        let mut h = format!("Suno stem — {}\nfilename: {}", role.label(), original_filename);
+                        if let Some(ord) = session_ordinal {
+                            h.push_str(&format!("\nsession ordinal: {ord}"));
+                        }
+                        if let Some(epoch) = session_epoch {
+                            let iso = chrono::DateTime::<chrono::Utc>::from_timestamp(*epoch, 0)
+                                .map(|d| d.to_rfc3339())
+                                .unwrap_or_else(|| epoch.to_string());
+                            h.push_str(&format!("\nsession epoch: {epoch}\niso: {iso}"));
+                        }
+                        if let Some(p) = provenance.as_ref() {
+                            h.push_str(&format!("\nprovenance: {p}"));
+                        }
+                        let label = match session_ordinal {
+                            Some(o) => format!("Suno · {} (#{o})", role.label()),
+                            None => format!("Suno · {}", role.label()),
+                        };
+                        (label, h)
                     }
                     crate::project::TrackSource::Recorded => {
-                        if t.stereo {
+                        let label = if t.stereo {
                             "stereo".to_string()
                         } else {
                             match t.channel_source {
                                 Some(c) => format!("Ch {}", c + 1),
                                 None => "mix".to_string(),
                             }
-                        }
+                        };
+                        (label, "Recorded by TinyBooth".into())
                     }
                 };
-                ui.label(src);
+                ui.label(src).on_hover_text(hover);
                 ui.label(format!("{} Hz", t.sample_rate));
                 if ui
                     .add(egui::Slider::new(&mut t.gain_db, -24.0..=12.0).suffix(" dB"))

@@ -12,6 +12,7 @@ mod manual;
 mod player;
 mod project;
 mod suno_import;
+mod suno_meta;
 mod ui;
 
 use eframe::egui;

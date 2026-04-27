@@ -20,6 +20,7 @@ pub const MANIFEST_NAME: &str = "project.tinybooth";
 pub const TRACKS_DIR: &str = "tracks";
 
 fn default_master_gain_db() -> f32 { 0.0 }
+fn default_next_suno_ordinal() -> u32 { 1 }
 
 /// What kind of source a track came from. Drives downstream UX (e.g. the
 /// Clean tab can dispatch role-aware processing on Suno stems while
@@ -33,6 +34,22 @@ pub enum TrackSource {
     SunoStem {
         role: StemRole,
         original_filename: String,
+        /// Unix epoch seconds, parsed from the WAV's `LIST/INFO/ICMT`
+        /// `created=<ISO>` field. Identical across every stem in one
+        /// Suno render; distinct between re-renders. Sortable directly
+        /// for "newest / oldest" ordering. Added v0.3.1.
+        #[serde(default)]
+        session_epoch: Option<i64>,
+        /// Project-relative monotonically-increasing import index.
+        /// All tracks from the same import event share an ordinal.
+        /// Allows `ORDER BY session_ordinal` to surface most-recently-
+        /// imported sessions first regardless of clock skew. Added v0.3.1.
+        #[serde(default)]
+        session_ordinal: Option<u32>,
+        /// Free-form provenance string from the WAV (e.g. "made with
+        /// suno studio"). Stored for the record. Added v0.3.1.
+        #[serde(default)]
+        provenance: Option<String>,
     },
 }
 
@@ -146,6 +163,12 @@ pub struct Project {
     #[serde(default)]
     pub master_gain_automation: Option<AutomationLane>,
 
+    /// Monotonic counter for Suno-import ordinals. Bumped at each
+    /// successful import; stamped onto every stem the import produced
+    /// (via `TrackSource::SunoStem::session_ordinal`). Added v0.3.1.
+    #[serde(default = "default_next_suno_ordinal")]
+    pub next_suno_ordinal: u32,
+
     /// Filled in at load time; not serialised.
     #[serde(skip)]
     pub root: PathBuf,
@@ -160,6 +183,7 @@ impl Project {
             tracks: Vec::new(),
             master_gain_db: 0.0,
             master_gain_automation: None,
+            next_suno_ordinal: 1,
             root,
         }
     }

@@ -21,7 +21,8 @@ use std::io::{BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
 use crate::config::Config;
-use crate::project::{Project, StemRole, Track, TrackSource, TRACKS_DIR};
+use crate::project::{Project, StemRole, Track, TrackSource, MANIFEST_NAME, TRACKS_DIR};
+use crate::suno_meta::{read_wav_session, SunoSession};
 
 /// Outcome of an import attempt. Always carries a populated `summary`
 /// (shown to the user in the modal) and a `log_path` (where every
@@ -53,6 +54,7 @@ struct Detected {
     sample_rate: u32,
     channels: u16,
     duration_secs: f32,
+    session: Option<SunoSession>,
 }
 
 // ───────────────────── public API ─────────────────────
@@ -145,9 +147,13 @@ pub fn import_folder(source_folder: &Path, project_root: &Path, project_name: &s
         }
         match read_wav_meta(&dest) {
             Ok(info) => {
+                let session = read_wav_session(&dest);
+                let session_str = session.as_ref()
+                    .map(|s| format!(" suno_epoch={} iso={}", s.epoch, s.iso_timestamp))
+                    .unwrap_or_default();
                 log.line(&format!(
-                    "KEEP: {original} -> {track_filename}  role={:?}  rate={}  ch={}  dur={:.2}s",
-                    role, info.sample_rate, info.channels, info.duration_secs,
+                    "KEEP: {original} -> {track_filename}  role={:?}  rate={}  ch={}  dur={:.2}s{}",
+                    role, info.sample_rate, info.channels, info.duration_secs, session_str,
                 ));
                 counts.kept += 1;
                 detected.push(Detected {
@@ -157,6 +163,7 @@ pub fn import_folder(source_folder: &Path, project_root: &Path, project_name: &s
                     sample_rate: info.sample_rate,
                     channels: info.channels,
                     duration_secs: info.duration_secs,
+                    session,
                 });
             }
             Err(e) => {
@@ -274,9 +281,13 @@ pub fn import_zip(zip_path: &Path, project_root: &Path, project_name: &str) -> I
         }
         match read_wav_meta(&dest) {
             Ok(info) => {
+                let session = read_wav_session(&dest);
+                let session_str = session.as_ref()
+                    .map(|s| format!(" suno_epoch={} iso={}", s.epoch, s.iso_timestamp))
+                    .unwrap_or_default();
                 log.line(&format!(
-                    "KEEP: {raw_name} -> {track_filename}  role={:?}  rate={}  ch={}  dur={:.2}s",
-                    role, info.sample_rate, info.channels, info.duration_secs,
+                    "KEEP: {raw_name} -> {track_filename}  role={:?}  rate={}  ch={}  dur={:.2}s{}",
+                    role, info.sample_rate, info.channels, info.duration_secs, session_str,
                 ));
                 counts.kept += 1;
                 detected.push(Detected {
@@ -286,6 +297,7 @@ pub fn import_zip(zip_path: &Path, project_root: &Path, project_name: &str) -> I
                     sample_rate: info.sample_rate,
                     channels: info.channels,
                     duration_secs: info.duration_secs,
+                    session,
                 });
             }
             Err(e) => {
@@ -297,6 +309,170 @@ pub fn import_zip(zip_path: &Path, project_root: &Path, project_name: &str) -> I
     }
 
     finalize(log, source, project_root, project_name, counts, detected)
+}
+
+// ────────────────────── pending-import state ──────────────────────
+
+/// Folder vs. zip kind. The conflict-resolution path needs to remember
+/// which import function to re-invoke after the user says Replace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImportKind { Folder, Zip }
+
+/// An import that has been deferred because the target project root
+/// already contains a manifest with a matching Suno session epoch.
+/// Held on `app.import_conflict` while the modal is up.
+#[derive(Debug, Clone)]
+pub struct PendingImport {
+    pub kind: ImportKind,
+    pub source: std::path::PathBuf,
+    pub project_root: std::path::PathBuf,
+    pub project_name: String,
+    pub probe: PreImportProbe,
+}
+
+// ────────────────────── duplicate-detection probe ──────────────────────
+
+/// Outcome of pre-import inspection: the new bundle's session epoch
+/// (if any) plus whether an existing project at the proposed root
+/// already contains that same session.
+#[derive(Debug, Clone)]
+pub struct PreImportProbe {
+    pub new_session_epoch: Option<i64>,
+    pub new_session_iso: Option<String>,
+    pub existing_session_epoch: Option<i64>,
+    pub existing_project_name: Option<String>,
+    pub existing_track_count: usize,
+    pub existing_session_ordinal: Option<u32>,
+}
+
+impl PreImportProbe {
+    pub fn is_duplicate(&self) -> bool {
+        match (self.new_session_epoch, self.existing_session_epoch) {
+            (Some(n), Some(e)) => n == e,
+            _ => false,
+        }
+    }
+}
+
+/// Inspect a folder of stems (no extraction yet): find the first
+/// eligible WAV, read its session epoch, then check whether a project
+/// already exists at `project_root` with matching epoch.
+pub fn probe_folder(source: &Path, project_root: &Path) -> PreImportProbe {
+    let new = first_session_in_folder(source);
+    let existing = existing_session_at_root(project_root);
+    finalize_probe(new, existing)
+}
+
+/// Same probe for a zip archive — reads the first eligible WAV's bytes
+/// to a temp file (we need a Seek-able stream for the RIFF walker).
+pub fn probe_zip(source: &Path, project_root: &Path) -> PreImportProbe {
+    let new = first_session_in_zip(source);
+    let existing = existing_session_at_root(project_root);
+    finalize_probe(new, existing)
+}
+
+fn finalize_probe(
+    new: Option<SunoSession>,
+    existing: Option<(SunoSession, String, usize, Option<u32>)>,
+) -> PreImportProbe {
+    PreImportProbe {
+        new_session_epoch: new.as_ref().map(|s| s.epoch),
+        new_session_iso: new.map(|s| s.iso_timestamp),
+        existing_session_epoch: existing.as_ref().map(|(s, _, _, _)| s.epoch),
+        existing_project_name: existing.as_ref().map(|(_, n, _, _)| n.clone()),
+        existing_track_count: existing.as_ref().map(|(_, _, c, _)| *c).unwrap_or(0),
+        existing_session_ordinal: existing.and_then(|(_, _, _, o)| o),
+    }
+}
+
+fn first_session_in_folder(folder: &Path) -> Option<SunoSession> {
+    let entries = fs::read_dir(folder).ok()?;
+    for e in entries.flatten() {
+        let p = e.path();
+        if !p.is_file() { continue; }
+        let lower = p.file_name()?.to_str()?.to_ascii_lowercase();
+        if !lower.ends_with(".wav") || is_tempo_locked(&lower) { continue; }
+        if let Some(s) = read_wav_session(&p) {
+            return Some(s);
+        }
+    }
+    None
+}
+
+fn first_session_in_zip(zip_path: &Path) -> Option<SunoSession> {
+    let f = fs::File::open(zip_path).ok()?;
+    let mut archive = zip::ZipArchive::new(f).ok()?;
+    let tmp = std::env::temp_dir().join(format!("tinybooth-probe-{}.wav", std::process::id()));
+    for i in 0..archive.len() {
+        let mut entry = match archive.by_index(i) { Ok(e) => e, Err(_) => continue };
+        if entry.is_dir() { continue; }
+        let name = match entry.enclosed_name() { Some(p) => p.to_path_buf(), None => continue };
+        let lower = match name.file_name().and_then(|n| n.to_str()) {
+            Some(s) => s.to_ascii_lowercase(),
+            None => continue,
+        };
+        if !lower.ends_with(".wav") || is_tempo_locked(&lower) { continue; }
+        // Extract just enough to read the header chunks. RIFF metadata
+        // sits at the front; copying the whole file would be wasteful
+        // but copying a known prefix is fragile across encoders, so we
+        // just take the whole thing — these files are 30–50 MB and the
+        // probe runs once per import.
+        if copy_zip_entry(&mut entry, &tmp).is_err() { continue; }
+        let session = read_wav_session(&tmp);
+        let _ = fs::remove_file(&tmp);
+        if session.is_some() { return session; }
+    }
+    None
+}
+
+/// Read an existing project's manifest (if any) and return the most
+/// common Suno session epoch among its tracks alongside the project
+/// name and track count. Returns None if no manifest, no Suno tracks,
+/// or any read error.
+fn existing_session_at_root(project_root: &Path) -> Option<(SunoSession, String, usize, Option<u32>)> {
+    let manifest = project_root.join(MANIFEST_NAME);
+    if !manifest.exists() { return None; }
+    let s = fs::read_to_string(&manifest).ok()?;
+    let proj: Project = serde_json::from_str(&s).ok()?;
+
+    // Pick the first track with a session_epoch — every Suno-imported
+    // track shares the epoch within one render, so the first hit is
+    // representative.
+    let mut chosen: Option<(i64, Option<u32>)> = None;
+    for t in &proj.tracks {
+        if let TrackSource::SunoStem { session_epoch: Some(e), session_ordinal, .. } = &t.source {
+            chosen = Some((*e, *session_ordinal));
+            break;
+        }
+    }
+    let (epoch, ordinal) = chosen?;
+
+    // Build a SunoSession with placeholder iso/provenance — we only
+    // really need the epoch for comparison.
+    let iso = chrono::DateTime::<chrono::Utc>::from_timestamp(epoch, 0)
+        .map(|d| d.to_rfc3339())
+        .unwrap_or_default();
+    Some((
+        SunoSession { epoch, iso_timestamp: iso, provenance: String::new() },
+        proj.name,
+        proj.tracks.len(),
+        ordinal,
+    ))
+}
+
+/// Wipe everything under `<project_root>/tracks/` and the manifest.
+/// Caller invokes this when the user picks "Replace" in the duplicate-
+/// import modal.
+pub fn wipe_project_root(project_root: &Path) -> std::io::Result<()> {
+    let tracks = project_root.join(TRACKS_DIR);
+    if tracks.is_dir() {
+        fs::remove_dir_all(&tracks)?;
+    }
+    let manifest = project_root.join(MANIFEST_NAME);
+    if manifest.is_file() {
+        let _ = fs::remove_file(&manifest);
+    }
+    Ok(())
 }
 
 // ──────────────────────────── helpers ────────────────────────────
@@ -360,10 +536,25 @@ fn finalize(
         }
     };
 
+    // Pull the Suno session info off the first track that has it
+    // (every Suno track in this import shares the session).
+    let session_line = project.tracks.iter().find_map(|t| {
+        if let TrackSource::SunoStem { session_epoch, session_ordinal, .. } = &t.source {
+            session_epoch.map(|e| {
+                let iso = chrono::DateTime::<chrono::Utc>::from_timestamp(e, 0)
+                    .map(|d| d.to_rfc3339())
+                    .unwrap_or_else(|| e.to_string());
+                let ord = session_ordinal.map(|o| format!(" (import #{o})")).unwrap_or_default();
+                format!("\n\nSuno session: epoch {e}  ({iso}){ord}")
+            })
+        } else { None }
+    }).unwrap_or_default();
+
     let summary = format!(
-        "Imported {} stem(s) into:\n  {}\n\nLog:\n  {}",
+        "Imported {} stem(s) into:\n  {}{}\n\nLog:\n  {}",
         project.tracks.len(),
         project.manifest_path().display(),
+        session_line,
         log.path.display(),
     );
     log.line(&format!("OUTCOME: success — {} tracks", project.tracks.len()));
@@ -379,6 +570,10 @@ fn finalize(
 }
 
 fn build_project(project_root: &Path, name: &str, detected: Vec<Detected>) -> anyhow::Result<Project> {
+    // If a project.tinybooth already exists at this root we ALWAYS create
+    // a fresh project here (the duplicate-detection path runs before us
+    // and has already cleared the old contents on Replace). Old manifest
+    // is overwritten.
     let mut project = Project {
         version: 1,
         name: name.to_string(),
@@ -386,11 +581,19 @@ fn build_project(project_root: &Path, name: &str, detected: Vec<Detected>) -> an
         tracks: Vec::with_capacity(detected.len()),
         master_gain_db: 0.0,
         master_gain_automation: None,
+        next_suno_ordinal: 1,
         root: project_root.to_path_buf(),
     };
+    let ordinal = project.next_suno_ordinal;
+    project.next_suno_ordinal = ordinal.saturating_add(1);
+
     for (i, d) in detected.into_iter().enumerate() {
         let id = format!("track-{:03}", i + 1);
         let display_name = d.role.label().to_string();
+        let (session_epoch, provenance) = match d.session.as_ref() {
+            Some(s) => (Some(s.epoch), Some(s.provenance.clone())),
+            None => (None, None),
+        };
         project.tracks.push(Track {
             id,
             name: display_name,
@@ -405,6 +608,9 @@ fn build_project(project_root: &Path, name: &str, detected: Vec<Detected>) -> an
             source: TrackSource::SunoStem {
                 role: d.role,
                 original_filename: d.original_filename,
+                session_epoch,
+                session_ordinal: Some(ordinal),
+                provenance,
             },
             correction: None,
             gain_automation: None,
