@@ -6,7 +6,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); thi
 
 ## [Unreleased]
 
-## [0.3.8] — 2026-04-27
+## [0.3.9] — 2026-04-27
+
+### Fixed
+- CI install regression: pinning `dtolnay/rust-toolchain@1.95.0` (v0.3.7) doesn't ship `rustfmt` / `clippy` by default — versioned tags require an explicit `components:` block. v0.3.8's CI failed at `cargo fmt --check` with `'cargo-fmt.exe' is not installed`. Same content as v0.3.8 (which never produced an MSI) plus a two-line workflow change.
+
+## [0.3.8] — 2026-04-27 *(no MSI; CI failed installing rustfmt)*
 
 ### Added
 - `CHANGELOG.md` — this file. Hand-curated; release notes from the GitHub release page remain auto-generated from commit messages.

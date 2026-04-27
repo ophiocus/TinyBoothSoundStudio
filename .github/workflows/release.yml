@@ -16,8 +16,11 @@ jobs:
 
       # Pin to a specific stable so local-vs-CI clippy drift surfaces
       # at PR time, not at tag-push time. Bump intentionally; don't
-      # silently inherit `@stable`.
+      # silently inherit `@stable`. Versioned tags don't ship rustfmt
+      # or clippy by default — request them explicitly.
       - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
 
