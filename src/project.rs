@@ -169,6 +169,22 @@ pub struct Project {
     #[serde(default = "default_next_suno_ordinal")]
     pub next_suno_ordinal: u32,
 
+    /// Persisted desire: when true, every track's correction chain is
+    /// bypassed at playback and export, but the chain *config stays*.
+    /// Toggle off to bring corrections back without losing tweaks.
+    /// Survives reload. Added v0.3.4.
+    #[serde(default)]
+    pub corrections_disabled: bool,
+
+    /// Project-level default correction profile. Used by "Enable all"
+    /// as the seed when a track has no chain yet — cascade is:
+    ///   1. existing track.correction (kept as-is if Some)
+    ///   2. this project default (if Some)
+    ///   3. feature default (Suno-Clean from builtin_profiles)
+    /// Edit by hand in the manifest until a UI lands. Added v0.3.4.
+    #[serde(default)]
+    pub default_correction: Option<crate::dsp::Profile>,
+
     /// Filled in at load time; not serialised.
     #[serde(skip)]
     pub root: PathBuf,
@@ -184,6 +200,8 @@ impl Project {
             master_gain_db: 0.0,
             master_gain_automation: None,
             next_suno_ordinal: 1,
+            corrections_disabled: false,
+            default_correction: None,
             root,
         }
     }

@@ -68,6 +68,45 @@ This is the same pipeline that's audible during Mix-tab playback, so the rendere
 - The audio callback runs at ~256-frame buffers (typically). Each callback locks no more than once per track and only when its correction profile generation has changed since the last build.
 - Repaint runs at ~30 fps while playing so the playhead animates smoothly. When stopped or paused, the UI rests.
 
+## Bulk correction controls (transport bar)
+
+Four buttons to the right of the time/rate cluster apply correction state at the **whole-project** scope. Each has a distinct intent and a different persistence story.
+
+| Button | Action | Mutates project? | Persisted? | Destructive? |
+|---|---|---|---|---|
+| **`+ Enable all corrections`** | Fills any track without a chain via the cascade below. | Yes (track.correction) | Yes (after Save) | No |
+| **`⊘ Disable (saves)`** | Sets `Project.corrections_disabled = true`. Player bypasses every chain at playback and export. Chain configs stay put. | Yes (project flag) | Yes (after Save) | No |
+| **`⟲ Reset all`** | Strips every track's chain (`correction = None`). | Yes (track.correction) | Yes (after Save) | **Yes — tweaks are lost.** |
+| **`A/B ☐ live` / `A/B ▣ bypassed`** | Flips the player's `global_bypass` atomic. Ephemeral. | No | No (lost on reload) | No |
+
+### Enable cascade
+
+When you click **Enable all corrections**, every track without a chain gets seeded in this priority:
+
+1. **From project** — if `track.correction` is already `Some`, it's left as-is.
+2. **From project defaults** — `Project.default_correction` if set (manifest field; UI editor not landed yet).
+3. **From feature default** — Suno-Clean from the built-in profiles.
+
+So a track you've manually customised never gets overwritten by the bulk action; an empty track picks up the project's preferred default if you've configured one; otherwise it falls back to the bundled Suno-Clean.
+
+### Disable vs Reset
+
+The single most common confusion in earlier versions: **Disable is reversible, Reset isn't.**
+
+- **Disable** flips a project flag. Hit it again, the chains come back, every tweak preserved.
+- **Reset** clears the chain configs themselves. Hit Enable again, you get the cascade's default — but anything you'd tuned is gone.
+
+If you want to A/B compare with vs without your chain, use **Disable** (or the ephemeral A/B button right next to it). Reset is for "I want to start over from scratch."
+
+### A/B vs Disable
+
+Both achieve "I hear the raw source instead of the corrected one." The difference:
+
+- **A/B** is in the audio thread atomic only — flip and listen, flip back. Reload comes back with whatever the project's persisted Disable was.
+- **Disable** also flips the audio thread atomic, *and* writes `corrections_disabled = true` to the manifest. Reload comes back disabled.
+
+Use A/B for "let me check this section right now"; use Disable for "I want this project to render raw until I decide otherwise."
+
 ## Console deck
 
 Below the multitrack lanes, a hardware-style console occupies the lower portion of the Mix tab. Each track gets a vertical fader strip; the master strip sits on the far right. Drag the horizontal divider between lanes and console to resize.

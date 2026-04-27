@@ -120,20 +120,24 @@ fn transport_bar(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
     let n_with_corr = app.project.tracks.iter().filter(|t| t.correction.is_some()).count();
     let n_without_corr = n_tracks.saturating_sub(n_with_corr);
 
-    // Global bypass derived from per-track flags. Tristate visualised:
-    // all bypassed = button "active"; otherwise inactive (even if some
-    // tracks happen to be bypassed individually).
+    // Ephemeral global bypass — atomic on PlayerState, set by either
+    // the A/B button (transient) or the persisted Disable toggle.
     let global_bypass_on = match app.player.as_ref() {
-        Some(p) if !p.state.tracks.is_empty() => p.state.tracks.iter()
-            .all(|t| t.bypass_correction.load(std::sync::atomic::Ordering::Relaxed)),
-        _ => false,
+        Some(p) => p.state.global_bypass.load(std::sync::atomic::Ordering::Relaxed),
+        None => false,
     };
+    // Persisted project flag — separate from the atomic so the user can
+    // toggle live A/B without dirtying the project, and toggle the
+    // persisted flag without leaving the project in a "live A/B" state
+    // on reload.
+    let corrections_disabled = app.project.corrections_disabled;
 
     let mut click_play = false;
     let mut click_pause = false;
     let mut click_stop = false;
     let mut click_enable_all = false;
-    let mut click_disable_all = false;
+    let mut click_disable_persisted = false;
+    let mut click_reset_all = false;
     let mut click_toggle_bypass = false;
 
     ui.horizontal(|ui| {
@@ -175,27 +179,42 @@ fn transport_bar(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
                 click_enable_all = true;
             }
         });
-        ui.add_enabled_ui(n_with_corr > 0, |ui| {
-            let label = if n_with_corr == n_tracks {
-                "− Disable all".to_string()
+        // Persisted Disable — flips Project.corrections_disabled and
+        // syncs the player's global_bypass. Survives reload.
+        ui.add_enabled_ui(n_tracks > 0, |ui| {
+            let label = if corrections_disabled {
+                "⊘ Disabled (saved)"
             } else {
-                format!("− Disable {n_with_corr}/{n_tracks}")
+                "⊘ Disable (saves)"
             };
-            if ui.add(egui::Button::new(label).min_size(egui::vec2(120.0, 28.0)))
-                .on_hover_text("Strip every correction chain. Destructive — re-enabling re-seeds Suno-Clean and any tweaks are lost.")
+            if ui.add(egui::SelectableLabel::new(corrections_disabled, label))
+                .on_hover_text("Persisted project-wide bypass. Saves to the manifest — corrections stay off across reloads. Toggle again to re-enable. Non-destructive: chain config is preserved.")
                 .clicked()
             {
-                click_disable_all = true;
+                click_disable_persisted = true;
+            }
+        });
+        ui.add_enabled_ui(n_with_corr > 0, |ui| {
+            let label = if n_with_corr == n_tracks {
+                "⟲ Reset all".to_string()
+            } else {
+                format!("⟲ Reset {n_with_corr}/{n_tracks}")
+            };
+            if ui.add(egui::Button::new(label).min_size(egui::vec2(110.0, 28.0)))
+                .on_hover_text("Destructive — strips every correction chain. Tweaks lost. Re-enable to re-seed from the cascade (project default → feature default).")
+                .clicked()
+            {
+                click_reset_all = true;
             }
         });
         ui.separator();
-        // Non-destructive global A/B — flips bypass_correction on every
-        // track. Picks up mid-playback because the audio callback reads
-        // the bypass atomic per-sample.
-        ui.add_enabled_ui(n_with_corr > 0, |ui| {
-            let label = if global_bypass_on { "A/B  ▣  all bypassed" } else { "A/B  ☐  all live" };
+        // Ephemeral A/B — flips global_bypass without touching the
+        // project flag. Useful for live listening; reload restores the
+        // persisted state.
+        ui.add_enabled_ui(n_with_corr > 0 || corrections_disabled, |ui| {
+            let label = if global_bypass_on { "A/B  ▣  bypassed" } else { "A/B  ☐  live" };
             if ui.add(egui::SelectableLabel::new(global_bypass_on, label))
-                .on_hover_text("Toggle a global bypass on every track's correction chain. Non-destructive — flip again to bring corrections back. Picks up mid-playback.")
+                .on_hover_text("Ephemeral global A/B — flips the audio thread's bypass without touching the project flag. Doesn't dirty the project; reload restores whatever the persisted Disable was.")
                 .clicked()
             {
                 click_toggle_bypass = true;
@@ -206,9 +225,10 @@ fn transport_bar(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
     if click_play  { if let Some(p) = app.player.as_ref() { p.play(); } }
     if click_pause { if let Some(p) = app.player.as_ref() { p.pause(); } }
     if click_stop  { stop_and_commit_automation(app); }
-    if click_enable_all  { app.enable_all_corrections(); }
-    if click_disable_all { app.disable_all_corrections(); }
-    if click_toggle_bypass { app.toggle_global_bypass(); }
+    if click_enable_all       { app.enable_all_corrections(); }
+    if click_disable_persisted { app.toggle_corrections_disabled(); }
+    if click_reset_all        { app.reset_all_corrections(); }
+    if click_toggle_bypass    { app.toggle_global_bypass(); }
 }
 
 // ───────────────────── multitrack lane view ─────────────────────

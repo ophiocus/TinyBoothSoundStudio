@@ -582,6 +582,8 @@ fn build_project(project_root: &Path, name: &str, detected: Vec<Detected>) -> an
         master_gain_db: 0.0,
         master_gain_automation: None,
         next_suno_ordinal: 1,
+        corrections_disabled: false,
+        default_correction: None,
         root: project_root.to_path_buf(),
     };
     let ordinal = project.next_suno_ordinal;

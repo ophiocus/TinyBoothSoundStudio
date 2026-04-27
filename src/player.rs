@@ -148,6 +148,13 @@ pub struct PlayerState {
     /// strip's stereo level meter.
     pub master_peak_l_x1000: AtomicU32,
     pub master_peak_r_x1000: AtomicU32,
+
+    /// Project-wide bypass. ORed with each track's per-track
+    /// bypass_correction in the audio callback — when this is true,
+    /// every chain is skipped regardless of per-track state. Set from
+    /// `Project.corrections_disabled` at load and from either the
+    /// persisted-disable button or the ephemeral A/B button. Added v0.3.4.
+    pub global_bypass: AtomicBool,
 }
 
 impl PlayerState {
@@ -241,6 +248,7 @@ impl Player {
             master_automation_generation: AtomicU64::new(1),
             master_peak_l_x1000: AtomicU32::new(0),
             master_peak_r_x1000: AtomicU32::new(0),
+            global_bypass: AtomicBool::new(project.corrections_disabled),
         });
 
         let stream = build_output_stream(state.clone())?;
@@ -421,6 +429,7 @@ fn build_output_stream(state: Arc<PlayerState>) -> Result<Stream> {
             let mut pos = state.position_frames.load(Ordering::Acquire);
             let any_solo = state.any_solo();
             let master_armed = state.master_recording_armed.load(Ordering::Relaxed);
+            let global_bypass = state.global_bypass.load(Ordering::Relaxed);
 
             // Per-callback peak running maxes.
             let mut peak_l = 0.0f32;
@@ -437,7 +446,7 @@ fn build_output_stream(state: Arc<PlayerState>) -> Result<Stream> {
                         if t.mute.load(Ordering::Relaxed) { continue; }
                         if any_solo && !t.solo.load(Ordering::Relaxed) { continue; }
                         if pos >= t.frame_count { continue; }
-                        let bypass = t.bypass_correction.load(Ordering::Relaxed);
+                        let bypass = global_bypass || t.bypass_correction.load(Ordering::Relaxed);
                         let armed = t.recording_armed.load(Ordering::Relaxed);
                         let (l_raw, r_raw) = read_frame(t, pos);
                         let (l, r) = if !bypass {

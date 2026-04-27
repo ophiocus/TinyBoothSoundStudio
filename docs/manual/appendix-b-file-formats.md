@@ -55,9 +55,21 @@ When a track originates from a Suno stem bundle, its `source` carries the sessio
 
 The project itself gains a `next_suno_ordinal: u32` field (default `1`) to source the next ordinal.
 
+### Project-level correction state (added v0.3.4)
+
+Two new fields on the `Project` itself (alongside the existing `master_gain_db`, `master_gain_automation`, `next_suno_ordinal`):
+
+- **`corrections_disabled`** — `bool`, default `false`. When true, every track's correction chain is bypassed at playback and at export. Non-destructive: chain configs stay put. The Mix-tab **Disable** button toggles this.
+- **`default_correction`** — `Option<Profile>`, default `None`. Project-level seed used by **Enable all** when a track has no chain yet. Cascade order:
+  1. existing `track.correction` (kept if `Some`)
+  2. this `Project.default_correction` (if `Some`)
+  3. feature default — Suno-Clean from `builtin_profiles()`
+  
+  No GUI editor yet; edit the JSON directly until one lands.
+
 ### Backward compatibility
 
-All fields added since v0.1 (`stereo`, `profile`, `source`, `gain_automation`, `correction`, plus the v0.3.1 Suno session fields and `next_suno_ordinal`, plus the v0.2 `master_gain_db` and `master_gain_automation`) are marked `#[serde(default)]`. Older manifests load cleanly with sensible defaults.
+All fields added since v0.1 (`stereo`, `profile`, `source`, `gain_automation`, `correction`, plus the v0.3.1 Suno session fields and `next_suno_ordinal`, plus the v0.2 `master_gain_db` and `master_gain_automation`, plus the v0.3.4 `corrections_disabled` and `default_correction`) are marked `#[serde(default)]`. Older manifests load cleanly with sensible defaults.
 
 ## `profiles.json` (JSON)
 

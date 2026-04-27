@@ -97,6 +97,14 @@ impl SplineSampler {
         if let Some(g) = self.flat { return Some(g); }
         self.inner.as_ref()?.sample(t)
     }
+
+    /// True when the sampler will never return `Some` regardless of
+    /// time. The audio callback uses this to skip the per-frame
+    /// `sample()` call (cheap on its own, but lets us avoid a branch
+    /// and a `db_to_lin` call when there's no automation at all).
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_none() && self.flat.is_none()
+    }
 }
 
 impl Default for SplineSampler {

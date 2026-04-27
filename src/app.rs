@@ -350,17 +350,27 @@ impl TinyBoothApp {
         self.apply_import_outcome(outcome);
     }
 
-    /// Apply the Suno-Clean preset to every track that doesn't already
-    /// carry a correction chain. Bulk action — saves the user from
-    /// clicking `+ Correction` on every stem of a 9-stem project.
+    /// Apply a default correction chain to every track that doesn't
+    /// already carry one. Cascade for the seed profile:
+    ///
+    ///   1. **From project** — keeps any `track.correction` already set.
+    ///   2. **From project defaults** — `Project.default_correction`.
+    ///   3. **From feature default** — Suno-Clean in `builtin_profiles()`.
+    ///
+    /// Tracks already carrying a chain are left untouched.
     pub fn enable_all_corrections(&mut self) {
-        let seed = self.profiles.iter().find(|p| p.name == "Suno-Clean")
-            .or_else(|| self.profiles.first())
-            .cloned();
+        let (seed, source_label) = if let Some(p) = self.project.default_correction.clone() {
+            (Some(p), "project default")
+        } else if let Some(p) = self.profiles.iter().find(|p| p.name == "Suno-Clean").cloned() {
+            (Some(p), "Suno-Clean (feature default)")
+        } else {
+            (self.profiles.first().cloned(), "first available preset")
+        };
         let Some(seed) = seed else {
             self.status = Some("No profiles available to seed corrections.".into());
             return;
         };
+
         let mut changed = 0;
         let mut already = 0;
         for (i, track) in self.project.tracks.iter_mut().enumerate() {
@@ -378,45 +388,61 @@ impl TinyBoothApp {
         }
         if changed > 0 {
             self.project_dirty = true;
-            let preset = &seed.name;
             self.status = Some(if already > 0 {
-                format!("Enabled '{preset}' on {changed} track(s) — {already} already had corrections.")
+                format!("Enabled corrections from {source_label} on {changed} track(s) — {already} already had chains.")
             } else {
-                format!("Enabled '{preset}' on all {changed} track(s).")
+                format!("Enabled corrections from {source_label} on all {changed} track(s).")
             });
         } else {
             self.status = Some(format!("All {already} track(s) already have corrections."));
         }
     }
 
-    /// Set every track's `bypass_correction` flag — non-destructive
-    /// project-level A/B. Picks up mid-playback (the audio callback
-    /// reads `bypass_correction` per-sample). Returns the new state
-    /// (true = all bypassed = "raw source"; false = corrections live).
-    /// Logic: if every track is currently bypassed, the toggle flips
-    /// to "live"; otherwise it flips to "all bypassed" — same shape as
-    /// a single A/B toggle but at project scope.
+    /// Ephemeral A/B — flips the player's `global_bypass` atomic
+    /// without touching `Project.corrections_disabled`. Lost on reload
+    /// (the persisted flag wins on the next `Player::new`). Picks up
+    /// mid-playback — the audio callback reads `global_bypass` once
+    /// per buffer and ORs it with each track's per-track bypass.
     pub fn toggle_global_bypass(&mut self) -> bool {
         let Some(player) = self.player.as_ref() else { return false };
-        if player.state.tracks.is_empty() { return false; }
-        let all_bypassed = player.state.tracks.iter()
-            .all(|t| t.bypass_correction.load(std::sync::atomic::Ordering::Relaxed));
-        let new_state = !all_bypassed;
-        for t in &player.state.tracks {
-            t.bypass_correction.store(new_state, std::sync::atomic::Ordering::Relaxed);
-        }
+        let cur = player.state.global_bypass.load(std::sync::atomic::Ordering::Relaxed);
+        let new_state = !cur;
+        player.state.global_bypass.store(new_state, std::sync::atomic::Ordering::Relaxed);
         self.status = Some(if new_state {
-            "Global bypass ON — playback is now the raw source for every track.".into()
+            "Global bypass ON — playback is now the raw source on every track.".into()
         } else {
-            "Global bypass OFF — all correction chains live again.".into()
+            "Global bypass OFF — corrections live again.".into()
         });
         new_state
     }
 
-    /// Strip every track's correction chain. Counterpart to
-    /// `enable_all_corrections` for full project-level A/B comparison
-    /// or starting over from scratch.
-    pub fn disable_all_corrections(&mut self) {
+    /// Flip the **persisted** project-level disable flag. Saves to the
+    /// manifest on next File → Save; the player picks up the change
+    /// instantly via `PlayerState.global_bypass`. Survives project
+    /// reload — the manifest carries the flag and `Player::new`
+    /// initialises the atomic from it.
+    pub fn toggle_corrections_disabled(&mut self) {
+        self.project.corrections_disabled = !self.project.corrections_disabled;
+        if let Some(player) = self.player.as_ref() {
+            player.state.global_bypass.store(
+                self.project.corrections_disabled,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+        }
+        self.project_dirty = true;
+        self.status = Some(if self.project.corrections_disabled {
+            "Project-wide corrections DISABLED (persisted). Save to keep this on next reload.".into()
+        } else {
+            "Project-wide corrections ENABLED (persisted).".into()
+        });
+    }
+
+    /// Strip every track's correction chain. **Destructive** — chain
+    /// configs are gone after this; re-enabling re-seeds from the
+    /// cascade. Used when the user wants a clean slate.
+    /// (Renamed from `disable_all_corrections` in v0.3.4 — the previous
+    /// name now belongs to `toggle_corrections_disabled`.)
+    pub fn reset_all_corrections(&mut self) {
         let mut changed = 0;
         for (i, track) in self.project.tracks.iter_mut().enumerate() {
             if track.correction.is_none() { continue; }
@@ -430,9 +456,9 @@ impl TinyBoothApp {
         }
         if changed > 0 {
             self.project_dirty = true;
-            self.status = Some(format!("Disabled corrections on {changed} track(s)."));
+            self.status = Some(format!("Reset (cleared) corrections on {changed} track(s)."));
         } else {
-            self.status = Some("No tracks had corrections to disable.".into());
+            self.status = Some("No tracks had corrections to reset.".into());
         }
     }
 
