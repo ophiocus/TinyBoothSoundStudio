@@ -225,25 +225,44 @@ def report(orig: dict, corrected: dict) -> str:
     else:
         verdict.append(f"- ⚠ Loudness drifted by {corrected['lufs'] - orig['lufs']:+.2f} LU.")
 
-    if corrected["peak_db"] <= -1.0:
+    # Peak — distinguish "essentially at the limit" from "well over" so
+    # the message doesn't render as the confusing "-0.00 dBFS".
+    peak_c = corrected["peak_db"]
+    if peak_c <= -1.0:
         verdict.append("- ✓ Peak headroom ≥ 1 dBFS — codec-safe.")
-    elif corrected["peak_db"] > 0.0:
-        verdict.append("- ⚠ Sample-peak clipped (≥ 0 dBFS). Check the chain.")
+    elif peak_c > 0.0:
+        verdict.append(f"- ⚠ Sample-peak clipped at {peak_c:+.2f} dBFS — check the chain.")
+    elif peak_c >= -0.05:
+        verdict.append("- ⚠ Peak essentially at 0 dBFS — no headroom; risky for downstream codecs.")
     else:
-        verdict.append(f"- ⚠ Peak {corrected['peak_db']:+.2f} dBFS — under 1 dB headroom.")
+        verdict.append(f"- ⚠ Peak {peak_c:+.2f} dBFS — under 1 dB headroom.")
 
-    cf_drop = orig["crest_db"] - corrected["crest_db"]
-    if cf_drop <= 2.0:
-        verdict.append(f"- ✓ Crest factor drop {cf_drop:.2f} dB — dynamics preserved.")
+    # Crest factor — signed delta, no "drop" word. Negative = baseline
+    # was MORE dynamic (corrected got compressed); positive = corrected
+    # got MORE peaky (dynamics expanded). Both sides have meaning.
+    cf_change = corrected["crest_db"] - orig["crest_db"]
+    if cf_change >= -2.0:
+        verdict.append(f"- ✓ Crest factor change {cf_change:+.2f} dB — dynamics preserved.")
     else:
-        verdict.append(f"- ⚠ Crest factor dropped {cf_drop:.2f} dB — over-compressed?")
+        verdict.append(f"- ⚠ Crest factor {cf_change:+.2f} dB — likely over-compressed.")
 
+    # Per-band intent checks. Suno-Clean wants mud / sibilance / shimmer
+    # to go DOWN; flag both the success case AND the wrong-direction case
+    # (the latter caught the air-shelf-vs-shimmer-cut collision in real
+    # use).
     mud_d  = corrected["bands"]["mud       200–500 Hz"] - orig["bands"]["mud       200–500 Hz"]
     shim_d = corrected["bands"]["shimmer  10–16 kHz"]   - orig["bands"]["shimmer  10–16 kHz"]
+    sib_d  = corrected["bands"]["sibilance   5–8 kHz"]  - orig["bands"]["sibilance   5–8 kHz"]
     if mud_d <= -1.0:
-        verdict.append(f"- ✓ Mud band reduced {mud_d:+.2f} dB.")
+        verdict.append(f"- ✓ Mud band reduced {mud_d:+.2f} dB — Suno-Clean's 300 Hz cut working.")
+    elif mud_d >= 0.5:
+        verdict.append(f"- ⚠ Mud band {mud_d:+.2f} dB — supposed to be reduced; chain may not be applied.")
     if shim_d <= -1.0:
-        verdict.append(f"- ✓ Shimmer band reduced {shim_d:+.2f} dB.")
+        verdict.append(f"- ✓ Shimmer band reduced {shim_d:+.2f} dB — Suno-Clean's 13 kHz cut working.")
+    elif shim_d >= 0.5:
+        verdict.append(f"- ⚠ Shimmer band {shim_d:+.2f} dB — likely the air shelf at 10 kHz bleeding into the cut at 13 kHz; deepen the bell or move the shelf.")
+    if sib_d <= -1.0:
+        verdict.append(f"- ✓ Sibilance band reduced {sib_d:+.2f} dB — de-esser engaging.")
 
     corr_change = abs(corrected["correlation"] - orig["correlation"])
     if corr_change > 0.05:
