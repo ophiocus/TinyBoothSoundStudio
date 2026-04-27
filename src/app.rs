@@ -389,6 +389,30 @@ impl TinyBoothApp {
         }
     }
 
+    /// Set every track's `bypass_correction` flag — non-destructive
+    /// project-level A/B. Picks up mid-playback (the audio callback
+    /// reads `bypass_correction` per-sample). Returns the new state
+    /// (true = all bypassed = "raw source"; false = corrections live).
+    /// Logic: if every track is currently bypassed, the toggle flips
+    /// to "live"; otherwise it flips to "all bypassed" — same shape as
+    /// a single A/B toggle but at project scope.
+    pub fn toggle_global_bypass(&mut self) -> bool {
+        let Some(player) = self.player.as_ref() else { return false };
+        if player.state.tracks.is_empty() { return false; }
+        let all_bypassed = player.state.tracks.iter()
+            .all(|t| t.bypass_correction.load(std::sync::atomic::Ordering::Relaxed));
+        let new_state = !all_bypassed;
+        for t in &player.state.tracks {
+            t.bypass_correction.store(new_state, std::sync::atomic::Ordering::Relaxed);
+        }
+        self.status = Some(if new_state {
+            "Global bypass ON — playback is now the raw source for every track.".into()
+        } else {
+            "Global bypass OFF — all correction chains live again.".into()
+        });
+        new_state
+    }
+
     /// Strip every track's correction chain. Counterpart to
     /// `enable_all_corrections` for full project-level A/B comparison
     /// or starting over from scratch.

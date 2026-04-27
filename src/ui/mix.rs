@@ -120,11 +120,21 @@ fn transport_bar(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
     let n_with_corr = app.project.tracks.iter().filter(|t| t.correction.is_some()).count();
     let n_without_corr = n_tracks.saturating_sub(n_with_corr);
 
+    // Global bypass derived from per-track flags. Tristate visualised:
+    // all bypassed = button "active"; otherwise inactive (even if some
+    // tracks happen to be bypassed individually).
+    let global_bypass_on = match app.player.as_ref() {
+        Some(p) if !p.state.tracks.is_empty() => p.state.tracks.iter()
+            .all(|t| t.bypass_correction.load(std::sync::atomic::Ordering::Relaxed)),
+        _ => false,
+    };
+
     let mut click_play = false;
     let mut click_pause = false;
     let mut click_stop = false;
     let mut click_enable_all = false;
     let mut click_disable_all = false;
+    let mut click_toggle_bypass = false;
 
     ui.horizontal(|ui| {
         ui.heading("Mix");
@@ -172,10 +182,23 @@ fn transport_bar(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
                 format!("− Disable {n_with_corr}/{n_tracks}")
             };
             if ui.add(egui::Button::new(label).min_size(egui::vec2(120.0, 28.0)))
-                .on_hover_text("Strip every correction chain. Project-level A/B — re-enable to restore.")
+                .on_hover_text("Strip every correction chain. Destructive — re-enabling re-seeds Suno-Clean and any tweaks are lost.")
                 .clicked()
             {
                 click_disable_all = true;
+            }
+        });
+        ui.separator();
+        // Non-destructive global A/B — flips bypass_correction on every
+        // track. Picks up mid-playback because the audio callback reads
+        // the bypass atomic per-sample.
+        ui.add_enabled_ui(n_with_corr > 0, |ui| {
+            let label = if global_bypass_on { "A/B  ▣  all bypassed" } else { "A/B  ☐  all live" };
+            if ui.add(egui::SelectableLabel::new(global_bypass_on, label))
+                .on_hover_text("Toggle a global bypass on every track's correction chain. Non-destructive — flip again to bring corrections back. Picks up mid-playback.")
+                .clicked()
+            {
+                click_toggle_bypass = true;
             }
         });
     });
@@ -185,6 +208,7 @@ fn transport_bar(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
     if click_stop  { stop_and_commit_automation(app); }
     if click_enable_all  { app.enable_all_corrections(); }
     if click_disable_all { app.disable_all_corrections(); }
+    if click_toggle_bypass { app.toggle_global_bypass(); }
 }
 
 // ───────────────────── multitrack lane view ─────────────────────
