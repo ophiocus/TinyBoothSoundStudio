@@ -675,6 +675,27 @@ impl eframe::App for TinyBoothApp {
                         });
                         self.config.save_or_log();
                     }
+                    ui.separator();
+                    ui.label("UI scale");
+                    // Slider mutates `config.zoom` directly; we re-apply
+                    // the egui zoom factor and persist on change. Range
+                    // chosen to cover small-laptop (0.75×) through
+                    // accessibility-bumped 4K (2.5×). Step 0.05 keeps the
+                    // slider usable without feeling jittery.
+                    let resp = ui.add(
+                        egui::Slider::new(&mut self.config.zoom, 0.75..=2.5)
+                            .step_by(0.05)
+                            .custom_formatter(|n, _| format!("{:.0}%", n * 100.0)),
+                    );
+                    if resp.changed() {
+                        ctx.set_zoom_factor(self.config.zoom);
+                        self.config.save_or_log();
+                    }
+                    if ui.button("Reset to 100%").clicked() {
+                        self.config.zoom = 1.0;
+                        ctx.set_zoom_factor(1.0);
+                        self.config.save_or_log();
+                    }
                 });
                 ui.menu_button("Admin", |ui| {
                     if ui.button("Recording-tone profiles…").clicked() {

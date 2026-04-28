@@ -6,8 +6,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); thi
 
 ## [Unreleased]
 
+## [0.3.10] — 2026-04-28
+
 ### Added
+- **View → UI scale slider** (0.75×–2.5×, 5% steps, percentage-formatted) so the entire interface — fonts *and* widget metrics — grows proportionally for high-DPI / accessibility / small-laptop scenarios. Persists via `Config.zoom`, applied through egui's `set_zoom_factor` so spacing and button hit-targets scale alongside text rather than text-on-tiny-buttons. Reset-to-100% button next to it.
 - `.github/workflows/ci.yml` — runs the same three quality gates (`cargo fmt --check`, `cargo clippy --release --all-targets -- -D warnings`, `cargo test --release`) on every PR to `main` and every push to `main`, with concurrency-cancel and doc-only path filtering. Closes the gap that let v0.3.6→.7 and v0.3.8→.9 burn version numbers on toolchain-shape problems a PR-time gate would have caught.
+
+### Changed
+- **Mix tab — channel-strip visual pass.** `STRIP_W` 78 → 108 px; track-name font drops `.small()` for an explicit `13.0pt`; dB readout 12.0pt monospace; master strip name 14.0pt. M/S/R buttons grow from 20×18 → 26×22 and the row is `vertical_centered`-wrapped so it sits squarely under the name instead of left-leaning. Slider rail/thumb thickness bumped from the egui ~8 px default to 14 px (scoped per-strip, doesn't leak elsewhere). Frame `inner_margin` 6 → 8 px. Net effect: track names like "Backing Vocals" / "Electric Guitar" / "Synth / Lead" no longer chop mid-word; the dB readout stops wrapping into one-character-per-line stacks; faders read at a glance.
+- Track-name truncation switched from a 9-byte hard slice (`&name[..9]`) to a UTF-8-safe ellipsis helper (`ellipsize(name, 14)`). The byte slice would have panicked on multi-byte chars like accented vowels or emoji in track names; the helper operates on `chars()`.
+
+### Fixed
+- `Config.zoom` now carries `#[serde(default = "default_zoom")]`. Without it, any `config.json` written before the field existed failed to parse, and the silent `.unwrap_or_default()` reset *every* preference (dark mode, recent projects, last project, profile name) on first launch with the new schema. Standard schema-migration discipline; should have been there from day one.
 
 ### Documentation
 - `docs/architecture.md §6.2` rewritten to cover both workflows and a new §6.2.1 on the sync-tax trade-off (why duplicated gates beat reusable-workflow indirection at this scale, and what to keep aligned across `ci.yml` ↔ `release.yml`).

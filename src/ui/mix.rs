@@ -23,10 +23,23 @@ const HEADER_W: f32 = 220.0;
 const LANE_H: f32 = 60.0;
 const ROW_GAP: f32 = 6.0;
 
-const STRIP_W: f32 = 78.0;
+const STRIP_W: f32 = 108.0;
 const STRIP_GAP: f32 = 4.0;
 const FADER_H: f32 = 130.0;
 const METER_W: f32 = 6.0;
+/// Cap on track-name characters before we ellipsise. Tuned so Latin-script
+/// names like "Backing Vocals" / "Electric Guitar" / "Synth / Lead" fit
+/// inside `STRIP_W` without truncation at 1.0× zoom.
+const STRIP_NAME_CHARS: usize = 14;
+/// Slider rail/thumb thickness for the channel-strip faders. The egui
+/// default (~8 px) reads as a thin bar with a tiny thumb at typical UI
+/// scale; 14 px gives the thumb a body you can see at a glance.
+const STRIP_SLIDER_W: f32 = 14.0;
+/// Strip-name font size in pt at 1.0× zoom. Egui's `set_zoom_factor`
+/// scales these proportionally — bump zoom from the View menu.
+const FONT_STRIP_NAME: f32 = 13.0;
+const FONT_STRIP_DB: f32 = 12.0;
+const FONT_MASTER_NAME: f32 = 14.0;
 
 pub fn show(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
     if app.project.tracks.is_empty() {
@@ -486,53 +499,55 @@ fn strip(app: &mut TinyBoothApp, ui: &mut egui::Ui, idx: usize) -> bool {
     let mut just_disarmed = false;
     egui::Frame::group(ui.style())
         .fill(frame_color)
-        .inner_margin(egui::Margin::same(6.0))
+        .inner_margin(egui::Margin::same(8.0))
         .show(ui, |ui| {
             ui.set_width(STRIP_W);
+            // Local style overrides: thicker slider rail/thumb so the
+            // fader handle reads at a glance. Scoped to this strip — the
+            // tab-bar and other sliders elsewhere keep egui defaults.
+            ui.style_mut().spacing.slider_width = STRIP_SLIDER_W;
             ui.vertical_centered(|ui| {
-                let name = if track.name.len() > 9 {
-                    &track.name[..9]
-                } else {
-                    &track.name
-                };
-                ui.label(egui::RichText::new(name).small().strong());
+                let name = ellipsize(&track.name, STRIP_NAME_CHARS);
+                ui.label(egui::RichText::new(name).size(FONT_STRIP_NAME).strong());
             });
-            ui.add_space(2.0);
-            ui.horizontal(|ui| {
-                let mute = track.mute.load(Ordering::Relaxed);
-                if ui
-                    .add_sized([20.0, 18.0], egui::SelectableLabel::new(mute, "M"))
-                    .on_hover_text("Mute")
-                    .clicked()
-                {
-                    track.mute.store(!mute, Ordering::Relaxed);
-                }
-                let solo = track.solo.load(Ordering::Relaxed);
-                if ui
-                    .add_sized([20.0, 18.0], egui::SelectableLabel::new(solo, "S"))
-                    .on_hover_text("Solo")
-                    .clicked()
-                {
-                    track.solo.store(!solo, Ordering::Relaxed);
-                }
-                let armed = track.recording_armed.load(Ordering::Relaxed);
-                if ui
-                    .add_sized([20.0, 18.0], egui::SelectableLabel::new(armed, "R"))
-                    .on_hover_text("Arm — record fader gestures during playback")
-                    .clicked()
-                {
-                    let new_armed = !armed;
-                    track.recording_armed.store(new_armed, Ordering::Relaxed);
-                    if !new_armed {
-                        just_disarmed = true;
+            ui.add_space(3.0);
+            ui.vertical_centered(|ui| {
+                ui.horizontal(|ui| {
+                    let mute = track.mute.load(Ordering::Relaxed);
+                    if ui
+                        .add_sized([26.0, 22.0], egui::SelectableLabel::new(mute, "M"))
+                        .on_hover_text("Mute")
+                        .clicked()
+                    {
+                        track.mute.store(!mute, Ordering::Relaxed);
                     }
-                }
+                    let solo = track.solo.load(Ordering::Relaxed);
+                    if ui
+                        .add_sized([26.0, 22.0], egui::SelectableLabel::new(solo, "S"))
+                        .on_hover_text("Solo")
+                        .clicked()
+                    {
+                        track.solo.store(!solo, Ordering::Relaxed);
+                    }
+                    let armed = track.recording_armed.load(Ordering::Relaxed);
+                    if ui
+                        .add_sized([26.0, 22.0], egui::SelectableLabel::new(armed, "R"))
+                        .on_hover_text("Arm — record fader gestures during playback")
+                        .clicked()
+                    {
+                        let new_armed = !armed;
+                        track.recording_armed.store(new_armed, Ordering::Relaxed);
+                        if !new_armed {
+                            just_disarmed = true;
+                        }
+                    }
+                });
             });
-            ui.add_space(4.0);
+            ui.add_space(6.0);
             ui.horizontal(|ui| {
                 let mut gain = track.gain_db();
                 let resp = ui.add_sized(
-                    [STRIP_W - 24.0, FADER_H],
+                    [STRIP_W - 30.0, FADER_H],
                     egui::Slider::new(&mut gain, -60.0..=6.0)
                         .vertical()
                         .show_value(false),
@@ -542,9 +557,13 @@ fn strip(app: &mut TinyBoothApp, ui: &mut egui::Ui, idx: usize) -> bool {
                 }
                 draw_meter(ui, track.peak(), FADER_H);
             });
-            ui.add_space(2.0);
+            ui.add_space(3.0);
             ui.vertical_centered(|ui| {
-                ui.monospace(format!("{:+.1} dB", track.gain_db()));
+                ui.label(
+                    egui::RichText::new(format!("{:+.1} dB", track.gain_db()))
+                        .size(FONT_STRIP_DB)
+                        .monospace(),
+                );
             });
         });
     let _ = app; // keep argument used for future expansion
@@ -569,43 +588,46 @@ fn master_strip(app: &mut TinyBoothApp, ui: &mut egui::Ui) -> bool {
     let mut new_master_db: Option<f32> = None;
     egui::Frame::group(ui.style())
         .fill(frame_color)
-        .inner_margin(egui::Margin::same(6.0))
+        .inner_margin(egui::Margin::same(8.0))
         .show(ui, |ui| {
             ui.set_width(STRIP_W + 12.0);
+            ui.style_mut().spacing.slider_width = STRIP_SLIDER_W;
             ui.vertical_centered(|ui| {
                 ui.label(
                     egui::RichText::new("MASTER")
-                        .small()
+                        .size(FONT_MASTER_NAME)
                         .strong()
                         .color(Color32::from_rgb(230, 200, 80)),
                 );
             });
-            ui.add_space(2.0);
-            ui.horizontal(|ui| {
-                ui.add_sized([20.0, 18.0], egui::SelectableLabel::new(false, "M"))
-                    .on_hover_text("Mute (no-op on bus)");
-                ui.add_sized([20.0, 18.0], egui::SelectableLabel::new(false, "S"))
-                    .on_hover_text("Solo (no-op on bus)");
-                let armed = state.master_recording_armed.load(Ordering::Relaxed);
-                if ui
-                    .add_sized([20.0, 18.0], egui::SelectableLabel::new(armed, "R"))
-                    .on_hover_text("Arm — record master fader gestures")
-                    .clicked()
-                {
-                    let new_armed = !armed;
-                    state
-                        .master_recording_armed
-                        .store(new_armed, Ordering::Relaxed);
-                    if !new_armed {
-                        just_disarmed = true;
+            ui.add_space(3.0);
+            ui.vertical_centered(|ui| {
+                ui.horizontal(|ui| {
+                    ui.add_sized([26.0, 22.0], egui::SelectableLabel::new(false, "M"))
+                        .on_hover_text("Mute (no-op on bus)");
+                    ui.add_sized([26.0, 22.0], egui::SelectableLabel::new(false, "S"))
+                        .on_hover_text("Solo (no-op on bus)");
+                    let armed = state.master_recording_armed.load(Ordering::Relaxed);
+                    if ui
+                        .add_sized([26.0, 22.0], egui::SelectableLabel::new(armed, "R"))
+                        .on_hover_text("Arm — record master fader gestures")
+                        .clicked()
+                    {
+                        let new_armed = !armed;
+                        state
+                            .master_recording_armed
+                            .store(new_armed, Ordering::Relaxed);
+                        if !new_armed {
+                            just_disarmed = true;
+                        }
                     }
-                }
+                });
             });
-            ui.add_space(4.0);
+            ui.add_space(6.0);
             ui.horizontal(|ui| {
                 let mut gain = state.master_gain_db();
                 let resp = ui.add_sized(
-                    [STRIP_W - 24.0, FADER_H],
+                    [STRIP_W - 30.0, FADER_H],
                     egui::Slider::new(&mut gain, -60.0..=6.0)
                         .vertical()
                         .show_value(false),
@@ -621,9 +643,13 @@ fn master_strip(app: &mut TinyBoothApp, ui: &mut egui::Ui) -> bool {
                     draw_meter(ui, state.master_peak_right(), FADER_H);
                 });
             });
-            ui.add_space(2.0);
+            ui.add_space(3.0);
             ui.vertical_centered(|ui| {
-                ui.monospace(format!("{:+.1} dB", state.master_gain_db()));
+                ui.label(
+                    egui::RichText::new(format!("{:+.1} dB", state.master_gain_db()))
+                        .size(FONT_STRIP_DB)
+                        .monospace(),
+                );
             });
         });
     if let Some(db) = new_master_db {
@@ -650,6 +676,21 @@ fn draw_meter(ui: &mut egui::Ui, peak: f32, height: f32) {
         Color32::from_rgb(100, 220, 150)
     };
     painter.rect_filled(filled, 1.0, color);
+}
+
+/// Truncate `name` to at most `cap` chars, appending `…` if any chars
+/// were dropped. Operates on `chars()` so multi-byte UTF-8 names (accents,
+/// emoji) won't panic the way `&name[..n]` byte-slicing would.
+fn ellipsize(name: &str, cap: usize) -> String {
+    let count = name.chars().count();
+    if count <= cap {
+        name.to_owned()
+    } else {
+        // cap counts the visible glyphs including the ellipsis itself.
+        let keep = cap.saturating_sub(1);
+        let head: String = name.chars().take(keep).collect();
+        format!("{head}…")
+    }
 }
 
 // ───────────────────── automation recorder hooks ─────────────────────

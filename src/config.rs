@@ -7,6 +7,11 @@ const RECENT_CAP: usize = 8;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub dark_mode: bool,
+    /// Egui `set_zoom_factor` multiplier applied at startup. 1.0× is the
+    /// baseline; users adjust via View → UI scale. Without `serde(default)`
+    /// any pre-zoom config.json fails to parse and silently resets every
+    /// other preference too — that's the bug this attribute prevents.
+    #[serde(default = "default_zoom")]
     pub zoom: f32,
     /// Name of the recording-tone profile active at startup.
     #[serde(default = "default_profile_name")]
@@ -25,6 +30,10 @@ pub struct Config {
 
 fn default_profile_name() -> String {
     "Guitar".into()
+}
+
+fn default_zoom() -> f32 {
+    1.0
 }
 
 impl Default for Config {
