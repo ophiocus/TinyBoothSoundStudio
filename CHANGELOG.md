@@ -6,6 +6,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); thi
 
 ## [Unreleased]
 
+### Suno-aware mixer — phase 1 of v0.4.0
+
+- **Per-role Suno-X preset library**. 11 new built-in presets (`Suno-Vocal`, `Suno-BackingVocal`, `Suno-Drums`, `Suno-Bass`, `Suno-ElectricGuitar`, `Suno-AcousticGuitar`, `Suno-Keys`, `Suno-Synth`, `Suno-Pads`, `Suno-Percussion`, `Suno-FxOther`) with chains tuned for each role's typical Suno artefacts. Added auto-seeding at import: each detected stem gets the matching Suno-X preset as its `correction` chain on import, so projects open with usable defaults instead of a flat unprocessed mix. Strings/Brass map to the closest existing chain (Pads / Synth respectively); Master and Unknown intentionally stay unseeded.
+- **Two new processing primitives** on every `Profile`: `dc_remove_enabled` (sub-audible 5 Hz HPF that strips DC drift AI generators sometimes leave in stems) and `nyquist_clean_enabled` + `nyquist_clean_hz` (top-octave LPF, default 18 kHz, that suppresses Suno's characteristic shimmer in the top octave). UI rows for both in the Profile editor (Admin window + per-track Correction window). Signal flow: input gain → DC remove → HPF → EQ → de-esser → gate → comp → makeup → Nyquist clean. Both default off; the Suno-X presets opt in.
+- **Polarity flip per track** (`Ø` button on the Mix-tab channel strip; standard audio-gear glyph for phase invert). Persists via `Track.polarity_inverted: bool`. Implemented zero-cost in the player: the per-buffer cache folds the ±1.0 sign factor into the pre-computed static linear gain, and the automation gain branch picks up the same factor — no extra multiplies in the per-frame hot path.
+- **Profile-library forward-migration**. `dsp::load_or_seed` now appends any built-in preset whose name isn't already on disk, instead of only seeding a fresh file. Existing user-tuned profiles are preserved verbatim; the new Suno-X library is added once, ever, on next launch.
+
 ## [0.3.11] — 2026-04-28
 
 ### Fixed

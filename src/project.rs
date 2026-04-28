@@ -117,6 +117,7 @@ impl Track {
             source: TrackSource::Recorded,
             correction: None,
             gain_automation: None,
+            polarity_inverted: false,
         }
     }
 
@@ -160,6 +161,7 @@ impl Track {
             },
             correction: None,
             gain_automation: None,
+            polarity_inverted: false,
         }
     }
 }
@@ -231,6 +233,16 @@ pub struct Track {
     /// being re-recorded. Added in v0.3; older manifests default to None.
     #[serde(default)]
     pub gain_automation: Option<AutomationLane>,
+
+    /// **Polarity flip** (a.k.a. phase inversion). When true, every
+    /// sample of this track is multiplied by −1 before summing into the
+    /// bus. Useful when a Suno stem arrives anti-phase relative to the
+    /// other stems and disappears on summation. Implemented by folding
+    /// the sign into the player's pre-cached static-gain on every
+    /// buffer, so the hot path costs nothing extra.
+    /// Added v0.4.0; older manifests default to false.
+    #[serde(default)]
+    pub polarity_inverted: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -378,6 +390,7 @@ mod tests {
                     },
                 ],
             }),
+            polarity_inverted: true,
         }
     }
 

@@ -72,6 +72,12 @@ pub struct TrackPlay {
     pub mute: AtomicBool,
     /// When set on any track, every non-solo track is silenced.
     pub solo: AtomicBool,
+    /// Polarity flip — when true, the per-buffer cache folds a -1.0
+    /// factor into the static linear gain, so the inversion costs zero
+    /// extra multiplies in the per-frame hot path. UI mutates via
+    /// [`Self::set_polarity_inverted`]; project save copies it back to
+    /// `Track.polarity_inverted` so it survives reload.
+    pub polarity_inverted: AtomicBool,
     /// When true, the correction chain AND automation are skipped
     /// during playback (raw source for A/B comparison).
     pub bypass_correction: AtomicBool,
@@ -333,6 +339,7 @@ fn load_track(project: &Project, t: &Track) -> Result<TrackPlay> {
         peaks_bin_size: PEAKS_BIN_SIZE,
         gain_db_bits: AtomicU32::new(t.gain_db.to_bits()),
         mute: AtomicBool::new(t.mute),
+        polarity_inverted: AtomicBool::new(t.polarity_inverted),
         bypass_correction: AtomicBool::new(false),
         correction_profile: Mutex::new(t.correction.clone()),
         correction_generation: AtomicU64::new(1), // ≠0 forces audio thread to build chain on first callback
@@ -464,18 +471,27 @@ fn build_output_stream(
             let global_bypass = state.global_bypass.load(Ordering::Relaxed);
 
             // ── Per-buffer cache (one atomic-load fan-out per track) ──
+            // Polarity becomes a ±1.0 sign factor we fold into the
+            // static linear gain *and* the automation gain branch, so
+            // the per-frame hot path costs zero extra multiplies.
             for (i, t) in state.tracks.iter().enumerate() {
                 let muted = t.mute.load(Ordering::Relaxed);
                 let solo = t.solo.load(Ordering::Relaxed);
                 let bypass = global_bypass || t.bypass_correction.load(Ordering::Relaxed);
                 let armed = t.recording_armed.load(Ordering::Relaxed);
                 let gain_db = t.gain_db();
+                let polarity_sign = if t.polarity_inverted.load(Ordering::Relaxed) {
+                    -1.0
+                } else {
+                    1.0
+                };
                 buf_cache[i] = TrackBufCache {
                     skip: muted || (any_solo && !solo),
                     bypass,
                     armed,
                     static_gain_db: gain_db,
-                    static_gain_lin: db_to_lin(gain_db),
+                    static_gain_lin: polarity_sign * db_to_lin(gain_db),
+                    polarity_sign,
                     has_chain: chains[i].is_some(),
                     has_automation: !samplers[i].is_empty(),
                 };
@@ -517,7 +533,9 @@ fn build_output_stream(
                         // overridden by bypass / arm.
                         let g = if c.has_automation && !c.bypass && !c.armed {
                             let auto_db = samplers[i].sample(t_secs).unwrap_or(c.static_gain_db);
-                            db_to_lin(auto_db)
+                            // Static path bakes polarity into static_gain_lin;
+                            // the automation path has to fold it in here too.
+                            c.polarity_sign * db_to_lin(auto_db)
                         } else {
                             c.static_gain_lin
                         };
@@ -624,8 +642,15 @@ struct TrackBufCache {
     /// Pre-cached fader value (dB) for the rare automation-active path.
     static_gain_db: f32,
     /// Pre-cached fader value already converted to linear — used by
-    /// every sample whose gain isn't being driven by automation.
+    /// every sample whose gain isn't being driven by automation. **Has
+    /// `polarity_sign` already folded in**, so the static path needs no
+    /// extra multiply. The automation path still has to fold polarity
+    /// in by hand because it derives gain from a per-frame spline sample.
     static_gain_lin: f32,
+    /// ±1.0 — `−1.0` when the track's polarity flip is on. Stored
+    /// separately from `static_gain_lin` so the automation-active branch
+    /// can also apply it without re-reading the atomic per frame.
+    polarity_sign: f32,
     /// Whether the track has a non-empty correction chain installed.
     has_chain: bool,
     /// Whether the track's automation sampler can produce values.

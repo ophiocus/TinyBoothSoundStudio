@@ -516,7 +516,7 @@ fn strip(app: &mut TinyBoothApp, ui: &mut egui::Ui, idx: usize) -> bool {
                 ui.horizontal(|ui| {
                     let mute = track.mute.load(Ordering::Relaxed);
                     if ui
-                        .add_sized([26.0, 22.0], egui::SelectableLabel::new(mute, "M"))
+                        .add_sized([22.0, 22.0], egui::SelectableLabel::new(mute, "M"))
                         .on_hover_text("Mute")
                         .clicked()
                     {
@@ -524,7 +524,7 @@ fn strip(app: &mut TinyBoothApp, ui: &mut egui::Ui, idx: usize) -> bool {
                     }
                     let solo = track.solo.load(Ordering::Relaxed);
                     if ui
-                        .add_sized([26.0, 22.0], egui::SelectableLabel::new(solo, "S"))
+                        .add_sized([22.0, 22.0], egui::SelectableLabel::new(solo, "S"))
                         .on_hover_text("Solo")
                         .clicked()
                     {
@@ -532,7 +532,7 @@ fn strip(app: &mut TinyBoothApp, ui: &mut egui::Ui, idx: usize) -> bool {
                     }
                     let armed = track.recording_armed.load(Ordering::Relaxed);
                     if ui
-                        .add_sized([26.0, 22.0], egui::SelectableLabel::new(armed, "R"))
+                        .add_sized([22.0, 22.0], egui::SelectableLabel::new(armed, "R"))
                         .on_hover_text("Arm — record fader gestures during playback")
                         .clicked()
                     {
@@ -541,6 +541,30 @@ fn strip(app: &mut TinyBoothApp, ui: &mut egui::Ui, idx: usize) -> bool {
                         if !new_armed {
                             just_disarmed = true;
                         }
+                    }
+                    // Polarity flip — "Ø" is the standard audio-gear glyph
+                    // for phase invert. Selectable so the label highlights
+                    // when active. Follows the same sync pattern as
+                    // `correction`: write to both the player atomic AND
+                    // the project field on click so it survives reload.
+                    let polarity = track.polarity_inverted.load(Ordering::Relaxed);
+                    if ui
+                        .add_sized([22.0, 22.0], egui::SelectableLabel::new(polarity, "Ø"))
+                        .on_hover_text(
+                            "Polarity flip (phase invert) — multiplies samples by −1. \
+                             Use when this stem appears anti-phase relative to others \
+                             (mix gets thin/hollow when soloed against the mixdown).",
+                        )
+                        .clicked()
+                    {
+                        let new_polarity = !polarity;
+                        track
+                            .polarity_inverted
+                            .store(new_polarity, Ordering::Relaxed);
+                        if let Some(t) = app.project.tracks.get_mut(idx) {
+                            t.polarity_inverted = new_polarity;
+                        }
+                        app.project_dirty = true;
                     }
                 });
             });

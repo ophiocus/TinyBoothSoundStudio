@@ -83,6 +83,33 @@ pub fn render(p: &mut Profile, ui: &mut egui::Ui, show_identity: bool) -> bool {
     });
 
     ui.add_space(10.0);
+    ui.strong("Suno cleanup");
+    ui.label(
+        egui::RichText::new(
+            "DC-offset trim (sub-audible 5 Hz HPF) and a top-octave low-pass \
+             that suppresses the AI-shimmer artefacts common in Suno output.",
+        )
+        .italics()
+        .weak(),
+    );
+    changed |= row(ui, "Remove DC offset", |ui| {
+        ui.checkbox(&mut p.dc_remove_enabled, "").changed()
+    });
+    changed |= row(ui, "Nyquist clean", |ui| {
+        ui.checkbox(&mut p.nyquist_clean_enabled, "").changed()
+    });
+    changed |= row(ui, "Nyquist cutoff (Hz)", |ui| {
+        ui.add_enabled(
+            p.nyquist_clean_enabled,
+            egui::DragValue::new(&mut p.nyquist_clean_hz)
+                .speed(50.0)
+                .suffix(" Hz")
+                .range(8_000.0..=20_000.0),
+        )
+        .changed()
+    });
+
+    ui.add_space(10.0);
     ui.strong("Parametric EQ (4 bands)");
     ui.label(
         egui::RichText::new("Bands with kind = Bypass are skipped.")

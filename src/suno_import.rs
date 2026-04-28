@@ -740,8 +740,39 @@ fn build_project(
             provenance,
         ));
     }
+
+    // Seed each Suno stem's `correction` from the per-role preset library
+    // (v0.4.0). Loaded fresh from disk so the on-disk profiles list is the
+    // canonical reference. Tracks whose role doesn't map to a Suno-X
+    // preset (Master, Unknown) keep `correction = None` and the user can
+    // pick something via the Mix tab. The save below persists the seeded
+    // chains so the user gets useful defaults on first project load.
+    seed_corrections_by_role(&mut project, &crate::dsp::load_or_seed());
+
     project.save()?;
     Ok(project)
+}
+
+/// For each `SunoStem` track in the project, look up the Suno-X preset
+/// matching its role and seed it as the track's `correction` chain.
+/// Already-set corrections are preserved (we only fill in `None`s) so a
+/// re-import doesn't clobber the user's hand-tuned chain.
+fn seed_corrections_by_role(project: &mut Project, profiles: &[crate::dsp::Profile]) {
+    for track in &mut project.tracks {
+        if track.correction.is_some() {
+            continue;
+        }
+        let role = match &track.source {
+            TrackSource::SunoStem { role, .. } => *role,
+            _ => continue,
+        };
+        let Some(preset_name) = crate::dsp::role_to_preset_name(role) else {
+            continue;
+        };
+        if let Some(preset) = profiles.iter().find(|p| p.name == preset_name) {
+            track.correction = Some(preset.clone());
+        }
+    }
 }
 
 fn prepare_project_dirs(project_root: &Path) -> std::io::Result<()> {
