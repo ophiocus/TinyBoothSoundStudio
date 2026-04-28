@@ -255,17 +255,43 @@ cargo wix --bin-path WIX_PATH   # 6 MB MSI
 
 ### 6.2 CI (GitHub Actions)
 
-A single workflow at `.github/workflows/release.yml`:
+Two workflows, both pinned to the same Rust toolchain (`1.95.0` at time of writing) with `components: rustfmt, clippy` declared explicitly.
+
+**`.github/workflows/release.yml`** — tag-push → MSI → GitHub Release:
 
 1. **Trigger**: push of any tag matching `v*`.
 2. **Sanity check**: refuse if Cargo.toml's `version` doesn't match the tag (defensive — added after a CNDL0288 collision in v0.1.1).
-3. **Build**: `cargo build --release` on `windows-latest`.
-4. **WiX 3.11 portable** downloaded fresh each run (no runner-local install dependency).
-5. **MSI**: `cargo wix --nocapture` (no `-C dVersion`; cargo-wix derives from Cargo.toml).
-6. **Artifact upload**: MSI + bare exe.
-7. **Release job** on `ubuntu-latest`: downloads artefacts, creates a GitHub Release with auto-generated notes.
+3. **Quality gates** (added v0.3.6): `cargo fmt --check`, `cargo clippy --release --all-targets -- -D warnings`, `cargo test --release`. Same three commands as `ci.yml`, run inline before the build.
+4. **Build**: `cargo build --release` on `windows-latest`.
+5. **WiX 3.11 portable** downloaded fresh each run (no runner-local install dependency).
+6. **MSI**: `cargo wix --nocapture` (no `-C dVersion`; cargo-wix derives from Cargo.toml).
+7. **Artifact upload**: MSI + bare exe.
+8. **Release job** on `ubuntu-latest`: downloads artefacts, creates a GitHub Release with auto-generated notes.
 
 Tag → MSI → Release usually takes ~9 min end-to-end.
+
+**`.github/workflows/ci.yml`** — PR + push-to-main → gates only (added v0.3.10):
+
+Runs the same three gates as release.yml on every PR to `main` and every push to `main`. Catches lint / test / format regressions at edit time rather than at tag-push, after twice in this project's history (v0.3.6→.7, v0.3.8→.9) the ship-time gate burned a version number on a problem a PR-time gate would have caught. Concurrency-grouped per ref so rapid-fire pushes cancel in-flight runs. Skips on doc/asset-only diffs via `paths-ignore`.
+
+#### 6.2.1 The cost of running gates in two places
+
+Splitting gates across `release.yml` and `ci.yml` introduces a deliberate, bounded sync tax. Three things must stay aligned across both files or the second gate's whole point is defeated:
+
+1. **Toolchain version**. Both pin `dtolnay/rust-toolchain@<X.Y.Z>` to the same `<X.Y.Z>`. If they diverge, CI passes on toolchain A while the ship gate runs on B — the original drift problem we wanted to eliminate.
+2. **Toolchain components**. Both declare `components: rustfmt, clippy`. A versioned-tag pin without this is the regression that burned v0.3.8.
+3. **Gate command list**. The three gate commands are spelled out identically in both files. Adding a fourth gate (e.g. `cargo doc --no-deps`) means editing both.
+
+There is **no reusable-workflow indirection** on purpose. A `workflow_call` shared definition would compress the gate list into one place but adds:
+- An extra runner spin-up on every release (~1–2 min) since the gate workflow and the build workflow can no longer share toolchain install + cache;
+- A new "two callers + one callee" topology that still needs maintenance discipline (the toolchain version becomes a `with:` input that has to be passed correctly from each caller).
+
+The discipline cost is roughly the same either way; the runtime cost is not. So the project keeps the duplication and makes drift visible at edit time via cross-referenced `KEEP IN SYNC WITH …` comments at the top of `ci.yml` and on the toolchain step of `release.yml`. Reconsider the trade-off if the gate count grows past five or six commands.
+
+A second-order overhead worth naming:
+
+- **Runner cost**. `windows-latest` is 2× the per-minute cost of `ubuntu-latest`. CI gates would compile and test fine on Linux (only `build.rs`'s `winres` block is Windows-gated); we stay on Windows anyway because gate-on-Linux/ship-on-Windows reintroduces the cross-platform drift class we're trying to eliminate. For a solo project at this PR volume the cost is rounding error.
+- **False positives blocking PRs**. If a future toolchain bump introduces a noisy lint, CI blocks until the lint is fixed or the toolchain pin is rolled back. That's a feature, not overhead — it's exactly why the gate exists — but it does mean toolchain bumps are non-trivial commits.
 
 ### 6.3 Self-update
 

@@ -1,0 +1,111 @@
+# ──────────────────────────────────────────────────────────────────────────
+#  CI — gates only (no build, no MSI, no release artefacts).
+# ──────────────────────────────────────────────────────────────────────────
+#
+#  Why this exists, separately from release.yml:
+#
+#  release.yml runs the same three gates inline before the MSI build, but
+#  only on tag-push. Twice in this project's history that's been too late:
+#
+#    • v0.3.6 → v0.3.7 — a clippy lint that didn't fire on the local
+#      toolchain (1.93) but did on CI's stable (1.95) failed at tag-push.
+#    • v0.3.8 → v0.3.9 — pinning the toolchain to a versioned tag
+#      (`@1.95.0`) silently dropped rustfmt and clippy, because versioned
+#      tags ship only the bare compiler.
+#
+#  Each cost a burned version number. This workflow runs the gates on PR
+#  and push-to-main so drift surfaces at edit time, not at ship time.
+#
+#  ─────────────────────────────────────────────────────────────────────
+#  Maintenance overhead — KEEP IN SYNC WITH release.yml
+#  ─────────────────────────────────────────────────────────────────────
+#
+#  Three things must stay aligned across both workflows or the gate's
+#  whole point is defeated:
+#
+#    1. Toolchain version. Both files pin
+#       `dtolnay/rust-toolchain@<X.Y.Z>` to the same `<X.Y.Z>`. If they
+#       diverge, CI passes on toolchain A while the ship-time gate runs
+#       on B — the original drift problem.
+#
+#    2. Toolchain components. Both must declare
+#       `components: rustfmt, clippy`. A versioned-tag pin without this
+#       is what burned v0.3.8.
+#
+#    3. Gate command list. The same three commands run in both files:
+#         cargo fmt --check
+#         cargo clippy --release --all-targets -- -D warnings
+#         cargo test --release
+#       Adding a fourth gate (e.g. `cargo doc --no-deps`) means editing
+#       both files.
+#
+#  No reusable-workflow indirection on purpose: it would shift the sync
+#  problem from "two gate lists" to "two callers + one callee" and add
+#  ~1-2 min of extra runner spin-up to every release. The duplication is
+#  three commands; the comment is the discipline.
+#
+#  What's intentionally *different* from release.yml:
+#    • Trigger: PR + push-to-main + manual, vs tag-only.
+#    • No `Verify tag matches Cargo.toml version` step (no tag here).
+#    • No build, no MSI, no artefact upload, no release-notes step.
+#    • paths-ignore filters out doc/asset-only changes — none of the
+#      three gates would behave differently for those.
+# ──────────────────────────────────────────────────────────────────────────
+
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'assets/**'
+      - 'tools/**'
+      - '.gitignore'
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'assets/**'
+      - 'tools/**'
+      - '.gitignore'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Cancel in-flight runs of this workflow on the same ref when a newer
+# commit arrives — saves runner minutes on rapid-fire pushes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gates:
+    # windows-latest matches release.yml. Cheaper Linux runners would
+    # work for the gates themselves (application code is platform-portable;
+    # only build.rs has a `cfg(target_os = "windows")` block) but
+    # gate-on-Linux/ship-on-Windows reintroduces exactly the cross-
+    # platform drift class we're trying to eliminate.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # KEEP IN SYNC WITH release.yml: toolchain pin + components.
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      # KEEP IN SYNC WITH release.yml: gate command list.
+      - name: cargo fmt --check
+        run: cargo fmt --check
+
+      - name: cargo clippy
+        run: cargo clippy --release --all-targets -- -D warnings
+
+      - name: cargo test
+        run: cargo test --release

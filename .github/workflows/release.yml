@@ -18,6 +18,10 @@ jobs:
       # at PR time, not at tag-push time. Bump intentionally; don't
       # silently inherit `@stable`. Versioned tags don't ship rustfmt
       # or clippy by default — request them explicitly.
+      #
+      # KEEP IN SYNC WITH .github/workflows/ci.yml — toolchain version,
+      # components, and the three gate commands below must match. See
+      # the comment block at the top of ci.yml for why.
       - uses: dtolnay/rust-toolchain@1.95.0
         with:
           components: rustfmt, clippy
