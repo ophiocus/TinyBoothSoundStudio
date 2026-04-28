@@ -6,6 +6,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); thi
 
 ## [Unreleased]
 
+### Suno-aware mixer — phase 2 of v0.4.0
+
+- **Import-time coherence analysis**. Every Suno bundle whose extracted contents include a mixdown WAV (filename containing `master`, `mix`, or `final` — the existing `StemRole::Master` heuristic) now triggers a coherence pass: sum all stems at unity gain, subtract the mixdown, compute residual RMS relative to mixdown RMS. Below ~−30 dB ⇒ stems compose cleanly; above ~−10 dB ⇒ a stem is missing, mislabelled, length-mismatched, or polarity-flipped.
+- **Per-stem polarity-vs-mixdown check**. Pearson correlation between each stem and the mixdown over its active region. Stems with `r < −0.3` get flagged with an `⚠ ANTI-PHASE` badge in the import log and a "try the Ø button" pointer in the import-result modal. Doesn't auto-flip — that's a user decision — but surfaces the suggestion at exactly the moment the user is reviewing what just imported.
+- **Mixdown stored as project reference, not summed track**. The bundled Suno mixdown WAV no longer becomes a regular `Track` (which would double the audio when the user hits Play). It's kept on disk in the project's `tracks/` folder but referenced via a new `Project.suno_mixdown_path: Option<String>`. Phase 3 will surface this as the auto-loaded reference for loudness-matched A/B from the Mix tab.
+- New module `src/coherence.rs` — streaming f32-mono RMS / Pearson-correlation analysis at a 4 kHz decimation rate (memory bounded regardless of song length). 6 unit tests covering RMS edge cases, identity / inverted / orthogonal correlation, and the verdict-categorisation summary.
+
 ### Suno-aware mixer — phase 1 of v0.4.0
 
 - **Per-role Suno-X preset library**. 11 new built-in presets (`Suno-Vocal`, `Suno-BackingVocal`, `Suno-Drums`, `Suno-Bass`, `Suno-ElectricGuitar`, `Suno-AcousticGuitar`, `Suno-Keys`, `Suno-Synth`, `Suno-Pads`, `Suno-Percussion`, `Suno-FxOther`) with chains tuned for each role's typical Suno artefacts. Added auto-seeding at import: each detected stem gets the matching Suno-X preset as its `correction` chain on import, so projects open with usable defaults instead of a flat unprocessed mix. Strings/Brass map to the closest existing chain (Pads / Synth respectively); Master and Unknown intentionally stay unseeded.

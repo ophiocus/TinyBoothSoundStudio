@@ -286,6 +286,18 @@ pub struct Project {
     #[serde(default)]
     pub default_correction: Option<crate::dsp::Profile>,
 
+    /// Path (relative to the project root) of the Suno mixdown WAV that
+    /// came in the imported bundle. The mixdown is **not** added to
+    /// `tracks` — it would double the audio if it were. Instead it's
+    /// kept aside as a reference: the v0.4.0 import-time coherence
+    /// check sums the stems and compares against this file, and v0.4.0
+    /// phase 3 will surface it as the auto-loaded reference for
+    /// loudness-matched A/B from the Mix tab.
+    /// `None` for non-Suno projects and for Suno bundles that didn't
+    /// include a mixdown. Added v0.4.0.
+    #[serde(default)]
+    pub suno_mixdown_path: Option<String>,
+
     /// Filled in at load time; not serialised.
     #[serde(skip)]
     pub root: PathBuf,
@@ -303,6 +315,7 @@ impl Project {
             next_suno_ordinal: 1,
             corrections_disabled: false,
             default_correction: None,
+            suno_mixdown_path: None,
             root,
         }
     }
@@ -405,6 +418,7 @@ mod tests {
             next_suno_ordinal: 2,
             corrections_disabled: false,
             default_correction: None,
+            suno_mixdown_path: Some(format!("{TRACKS_DIR}/mixdown.wav")),
             root: PathBuf::from("/tmp/test"),
         }
     }

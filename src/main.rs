@@ -4,6 +4,7 @@ mod analysis;
 mod app;
 mod audio;
 mod automation;
+mod coherence;
 mod config;
 mod dsp;
 mod export;

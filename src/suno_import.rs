@@ -627,24 +627,25 @@ fn finalize(
         };
     }
 
-    let project = match build_project(project_root, project_name, detected) {
-        Ok(p) => p,
-        Err(e) => {
-            let summary = format!(
-                "Stems extracted but project save failed:\n  {e}\n\nFull log:\n  {}",
-                log.path.display()
-            );
-            log.line(&format!("FATAL on save: {e}"));
-            log.flush();
-            return ImportOutcome {
-                project: None,
-                log_path: log.path.clone(),
-                summary,
-                success: false,
-                source,
-            };
-        }
-    };
+    let BuildOutcome { project, coherence } =
+        match build_project(project_root, project_name, detected) {
+            Ok(b) => b,
+            Err(e) => {
+                let summary = format!(
+                    "Stems extracted but project save failed:\n  {e}\n\nFull log:\n  {}",
+                    log.path.display()
+                );
+                log.line(&format!("FATAL on save: {e}"));
+                log.flush();
+                return ImportOutcome {
+                    project: None,
+                    log_path: log.path.clone(),
+                    summary,
+                    success: false,
+                    source,
+                };
+            }
+        };
 
     // Pull the Suno session info off the first track that has it
     // (every Suno track in this import shares the session).
@@ -673,11 +674,60 @@ fn finalize(
         })
         .unwrap_or_default();
 
+    // Coherence report (v0.4.0 phase 2). Surface the one-liner verdict
+    // plus any flagged stems both in the import log (always) and the
+    // import-result modal summary (visible to the user).
+    let coherence_block = match coherence.as_ref() {
+        Some(c) => {
+            log.line("");
+            log.line("─── coherence ─────────────────────");
+            log.line(&format!("mixdown RMS    = {:+.1} dBFS", c.mixdown_rms_db));
+            log.line(&format!("residual RMS   = {:+.1} dBFS", c.residual_rms_db));
+            log.line(&format!(
+                "relative       = {:+.1} dB ({})",
+                c.relative_db,
+                c.summary_line()
+            ));
+            for s in &c.stems {
+                let badge = if s.suggests_polarity_flip {
+                    "  ⚠ ANTI-PHASE"
+                } else {
+                    ""
+                };
+                log.line(&format!(
+                    "  {:<22} r = {:+.3}{badge}",
+                    s.display_name, s.correlation
+                ));
+            }
+            let flagged = c.flagged_stems();
+            let mut block = format!("\n\n{}", c.summary_line());
+            if !flagged.is_empty() {
+                block.push_str("\n\nStems that look anti-phase relative to the mixdown:");
+                for s in &flagged {
+                    block.push_str(&format!(
+                        "\n  • {} (correlation {:+.2}) — try the Ø button on the Mix tab.",
+                        s.display_name, s.correlation
+                    ));
+                }
+            }
+            block
+        }
+        None => {
+            if project.suno_mixdown_path.is_some() {
+                log.line("coherence analysis: failed to load mixdown — skipped.");
+            } else {
+                log.line("coherence analysis: bundle had no mixdown reference — skipped.");
+            }
+            String::new()
+        }
+    };
+
     let summary = format!(
-        "Imported {} stem(s) into:\n  {}{}\n\nLog:\n  {}",
+        "Imported {} stem(s) into:\n  {}{}{}\n\nLog:\n  {}",
         project.tracks.len(),
         project.manifest_path().display(),
         session_line,
+        coherence_block,
         log.path.display(),
     );
     log.line(&format!(
@@ -695,11 +745,19 @@ fn finalize(
     }
 }
 
+/// Outcome of `build_project`. Carries the saved project plus the
+/// optional Suno-mixdown coherence report so callers can surface its
+/// summary alongside the kept-stem count in the import-result modal.
+struct BuildOutcome {
+    project: Project,
+    coherence: Option<crate::coherence::CoherenceReport>,
+}
+
 fn build_project(
     project_root: &Path,
     name: &str,
     detected: Vec<Detected>,
-) -> anyhow::Result<Project> {
+) -> anyhow::Result<BuildOutcome> {
     // If a project.tinybooth already exists at this root we ALWAYS create
     // a fresh project here (the duplicate-detection path runs before us
     // and has already cleared the old contents on Replace). Old manifest
@@ -714,12 +772,23 @@ fn build_project(
         next_suno_ordinal: 1,
         corrections_disabled: false,
         default_correction: None,
+        suno_mixdown_path: None,
         root: project_root.to_path_buf(),
     };
     let ordinal = project.next_suno_ordinal;
     project.next_suno_ordinal = ordinal.saturating_add(1);
 
-    for (i, d) in detected.into_iter().enumerate() {
+    // Split detected entries: Master (the bundled mixdown) becomes the
+    // project's reference, every other role goes into `tracks`. The
+    // mixdown WAV stays on disk in `tracks/` (already extracted there)
+    // — we just don't add it as a Track because that would double the
+    // audio when the user hits Play.
+    let (mixdown_detected, stems_detected): (Vec<_>, Vec<_>) = detected
+        .into_iter()
+        .partition(|d| matches!(d.role, StemRole::Master));
+    let mixdown = mixdown_detected.into_iter().next();
+
+    for (i, d) in stems_detected.into_iter().enumerate() {
         let id = format!("track-{:03}", i + 1);
         let display_name = d.role.label().to_string();
         let (session_epoch, provenance) = match d.session.as_ref() {
@@ -741,16 +810,38 @@ fn build_project(
         ));
     }
 
+    if let Some(m) = mixdown.as_ref() {
+        project.suno_mixdown_path = Some(format!("{TRACKS_DIR}/{}", m.track_filename));
+    }
+
     // Seed each Suno stem's `correction` from the per-role preset library
-    // (v0.4.0). Loaded fresh from disk so the on-disk profiles list is the
-    // canonical reference. Tracks whose role doesn't map to a Suno-X
-    // preset (Master, Unknown) keep `correction = None` and the user can
-    // pick something via the Mix tab. The save below persists the seeded
-    // chains so the user gets useful defaults on first project load.
+    // (v0.4.0 phase 1). Loaded fresh from disk so the on-disk profiles
+    // list is the canonical reference.
     seed_corrections_by_role(&mut project, &crate::dsp::load_or_seed());
 
+    // Coherence analysis (v0.4.0 phase 2). Sums all stems and compares
+    // against the bundled mixdown. Skipped silently when no mixdown is
+    // present (some Suno bundles ship without the rendered mix). Errors
+    // out silently too — this is a diagnostic, not a gate.
+    let coherence = match project.suno_mixdown_path.as_ref() {
+        Some(rel) => {
+            let mixdown_abs = project_root.join(rel);
+            let stems: Vec<(String, std::path::PathBuf)> = project
+                .tracks
+                .iter()
+                .map(|t| (t.name.clone(), project_root.join(&t.file)))
+                .collect();
+            let stems_refs: Vec<(String, &Path)> = stems
+                .iter()
+                .map(|(n, p)| (n.clone(), p.as_path()))
+                .collect();
+            crate::coherence::report(&stems_refs, &mixdown_abs).ok()
+        }
+        None => None,
+    };
+
     project.save()?;
-    Ok(project)
+    Ok(BuildOutcome { project, coherence })
 }
 
 /// For each `SunoStem` track in the project, look up the Suno-X preset
