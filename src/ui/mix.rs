@@ -31,10 +31,6 @@ const METER_W: f32 = 6.0;
 /// names like "Backing Vocals" / "Electric Guitar" / "Synth / Lead" fit
 /// inside `STRIP_W` without truncation at 1.0× zoom.
 const STRIP_NAME_CHARS: usize = 14;
-/// Slider rail/thumb thickness for the channel-strip faders. The egui
-/// default (~8 px) reads as a thin bar with a tiny thumb at typical UI
-/// scale; 14 px gives the thumb a body you can see at a glance.
-const STRIP_SLIDER_W: f32 = 14.0;
 /// Strip-name font size in pt at 1.0× zoom. Egui's `set_zoom_factor`
 /// scales these proportionally — bump zoom from the View menu.
 const FONT_STRIP_NAME: f32 = 13.0;
@@ -502,10 +498,15 @@ fn strip(app: &mut TinyBoothApp, ui: &mut egui::Ui, idx: usize) -> bool {
         .inner_margin(egui::Margin::same(8.0))
         .show(ui, |ui| {
             ui.set_width(STRIP_W);
-            // Local style overrides: thicker slider rail/thumb so the
-            // fader handle reads at a glance. Scoped to this strip — the
-            // tab-bar and other sliders elsewhere keep egui defaults.
-            ui.style_mut().spacing.slider_width = STRIP_SLIDER_W;
+            // For a *vertical* slider, `spacing.slider_width` is the
+            // main-axis (rail) length, not the thickness. Pin it to
+            // FADER_H so the rail fills the bounding box `add_sized`
+            // allocates below, instead of egui's default 100 px stub
+            // floating in a 130 px box. Rail thickness comes from the
+            // cross-axis allocation (rect.width() / 4 in egui), which
+            // is already substantial at the current STRIP_W.
+            // Scoped to this strip — sliders elsewhere keep defaults.
+            ui.style_mut().spacing.slider_width = FADER_H;
             ui.vertical_centered(|ui| {
                 let name = ellipsize(&track.name, STRIP_NAME_CHARS);
                 ui.label(egui::RichText::new(name).size(FONT_STRIP_NAME).strong());
@@ -591,7 +592,9 @@ fn master_strip(app: &mut TinyBoothApp, ui: &mut egui::Ui) -> bool {
         .inner_margin(egui::Margin::same(8.0))
         .show(ui, |ui| {
             ui.set_width(STRIP_W + 12.0);
-            ui.style_mut().spacing.slider_width = STRIP_SLIDER_W;
+            // See the matching comment in `strip()`: this is rail length
+            // for vertical sliders, not thickness.
+            ui.style_mut().spacing.slider_width = FADER_H;
             ui.vertical_centered(|ui| {
                 ui.label(
                     egui::RichText::new("MASTER")

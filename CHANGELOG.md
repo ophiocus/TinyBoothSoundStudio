@@ -6,6 +6,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); thi
 
 ## [Unreleased]
 
+## [0.3.11] — 2026-04-28
+
+### Fixed
+- Mix tab fader sliders rendered as 14-px stubs at the top of their 130-px bounding boxes. v0.3.10 set `ui.style_mut().spacing.slider_width = 14.0` thinking that knob controlled rail *thickness*, but for a vertical slider in egui `slider_width` is the main-axis (rail) *length* — so the rail was clamped to 14 px. Set it to `FADER_H` (130) so the rail fills the bounding box `add_sized` allocates. Rail thickness comes from the cross-axis allocation (`rect.width() / 4` in egui's slider rendering), which is already substantial at the wider `STRIP_W` v0.3.10 introduced.
+
 ## [0.3.10] — 2026-04-28
 
 ### Added
