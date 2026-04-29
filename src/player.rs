@@ -155,6 +155,16 @@ pub struct PlayerState {
     pub master_peak_l_x1000: AtomicU32,
     pub master_peak_r_x1000: AtomicU32,
 
+    /// Most-recent momentary LUFS (400 ms window) of the master bus,
+    /// computed by the audio thread per BS.1770-4 K-weighting and
+    /// published to the UI via this atomic. Stored as f32 bits;
+    /// `f32::NAN` until 400 ms of audio has been measured. v0.4.0.
+    pub master_momentary_lufs_bits: AtomicU32,
+    /// Gated integrated LUFS (whole-programme) of the master bus,
+    /// updated periodically by the audio thread. Same encoding /
+    /// NaN-until-ready semantics as the momentary readout. v0.4.0.
+    pub master_integrated_lufs_bits: AtomicU32,
+
     /// Project-wide bypass. ORed with each track's per-track
     /// bypass_correction in the audio callback — when this is true,
     /// every chain is skipped regardless of per-track state. Set from
@@ -198,6 +208,12 @@ impl PlayerState {
     }
     pub fn master_peak_right(&self) -> f32 {
         self.master_peak_r_x1000.load(Ordering::Relaxed) as f32 / 1000.0
+    }
+    pub fn master_momentary_lufs(&self) -> f32 {
+        f32::from_bits(self.master_momentary_lufs_bits.load(Ordering::Relaxed))
+    }
+    pub fn master_integrated_lufs(&self) -> f32 {
+        f32::from_bits(self.master_integrated_lufs_bits.load(Ordering::Relaxed))
     }
     /// Whether any track is currently soloed.
     pub fn any_solo(&self) -> bool {
@@ -263,6 +279,8 @@ impl Player {
             master_automation_generation: AtomicU64::new(1),
             master_peak_l_x1000: AtomicU32::new(0),
             master_peak_r_x1000: AtomicU32::new(0),
+            master_momentary_lufs_bits: AtomicU32::new(f32::NAN.to_bits()),
+            master_integrated_lufs_bits: AtomicU32::new(f32::NAN.to_bits()),
             global_bypass: AtomicBool::new(project.corrections_disabled),
         });
 
@@ -430,6 +448,14 @@ fn build_output_stream(
     let mut buf_cache: Vec<TrackBufCache> = vec![TrackBufCache::default(); n];
     let mut track_peaks: Vec<f32> = vec![0.0; n];
     let sample_rate_f = state.sample_rate as f32;
+    // Master-bus LUFS meter, owned by the audio thread; pushed once
+    // per stereo frame, polled at end-of-callback to publish atomic
+    // readouts to the UI. Reset on Stop so each playback starts fresh.
+    let mut lufs_meter = crate::lufs::LufsMeter::new(state.sample_rate);
+    // Buffer-level latch: if the previous callback saw `Stopped`,
+    // reset the meter on the next `Playing` so a re-press of Play
+    // doesn't accumulate across stops.
+    let mut prev_play_state = state.play_state();
 
     let stream = dev.build_output_stream(
         &config,
@@ -572,6 +598,15 @@ fn build_output_stream(
                     peak_r = out_r.abs();
                 }
 
+                // Feed the K-weighted master into the LUFS meter only
+                // while playback is live — pushing silence between
+                // takes would drag integrated_lufs toward NaN once the
+                // gating kicks in. Cheap (two biquads × stereo = ~10
+                // muls + adds per frame).
+                if play_state == PlayState::Playing {
+                    lufs_meter.push(out_l, out_r);
+                }
+
                 out[f * 2] = out_l;
                 out[f * 2 + 1] = out_r;
             }
@@ -610,6 +645,31 @@ fn build_output_stream(
                     Ordering::Relaxed,
                 );
             }
+
+            // Publish LUFS readouts (cheap — sums + log10s, no allocs).
+            // momentary_lufs/integrated_lufs return NaN until enough
+            // audio has been accumulated; the UI just shows "—".
+            state
+                .master_momentary_lufs_bits
+                .store(lufs_meter.momentary_lufs().to_bits(), Ordering::Relaxed);
+            state
+                .master_integrated_lufs_bits
+                .store(lufs_meter.integrated_lufs().to_bits(), Ordering::Relaxed);
+
+            // Stop / reset transitions: clear the LUFS block history so a
+            // new playback doesn't include the tail of the previous one.
+            // Filter state stays (re-zeroing it would re-introduce a
+            // transient on every Play).
+            if prev_play_state != PlayState::Stopped && play_state == PlayState::Stopped {
+                lufs_meter.reset_blocks();
+                state
+                    .master_momentary_lufs_bits
+                    .store(f32::NAN.to_bits(), Ordering::Relaxed);
+                state
+                    .master_integrated_lufs_bits
+                    .store(f32::NAN.to_bits(), Ordering::Relaxed);
+            }
+            prev_play_state = play_state;
 
             // End-of-track: stop and reset.
             if play_state == PlayState::Playing && pos >= state.longest_frames {

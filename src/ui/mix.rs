@@ -121,18 +121,21 @@ pub fn show(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
 
 fn transport_bar(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
     // Snapshot read-only player state so we can split borrows.
-    let (have_player, playing, pos_str, sample_rate) = if let Some(p) = app.player.as_ref() {
-        let pos = p.state.position_secs();
-        let dur = p.state.duration_secs();
-        (
-            true,
-            p.state.play_state() == PlayState::Playing,
-            format!("{}  /  {}", fmt_time(pos), fmt_time(dur)),
-            p.state.sample_rate,
-        )
-    } else {
-        (false, false, String::new(), 0)
-    };
+    let (have_player, playing, pos_str, sample_rate, momentary_lufs, integrated_lufs) =
+        if let Some(p) = app.player.as_ref() {
+            let pos = p.state.position_secs();
+            let dur = p.state.duration_secs();
+            (
+                true,
+                p.state.play_state() == PlayState::Playing,
+                format!("{}  /  {}", fmt_time(pos), fmt_time(dur)),
+                p.state.sample_rate,
+                p.state.master_momentary_lufs(),
+                p.state.master_integrated_lufs(),
+            )
+        } else {
+            (false, false, String::new(), 0, f32::NAN, f32::NAN)
+        };
 
     // How many tracks already carry a correction chain — drives the
     // bulk-action buttons' enabled state and labels.
@@ -188,6 +191,30 @@ fn transport_bar(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
             ui.monospace(pos_str);
             ui.separator();
             ui.label(format!("{} Hz · stereo bus", sample_rate));
+            ui.separator();
+            // LUFS readout (BS.1770-4). NaN until 400 ms have played.
+            let momentary_str = if momentary_lufs.is_nan() {
+                "—".to_string()
+            } else {
+                format!("{:+.1}", momentary_lufs)
+            };
+            let integrated_str = if integrated_lufs.is_nan() {
+                "—".to_string()
+            } else {
+                format!("{:+.1}", integrated_lufs)
+            };
+            ui.label(
+                egui::RichText::new(format!(
+                    "M {momentary_str}  ·  I {integrated_str}  LUFS"
+                ))
+                .monospace(),
+            )
+            .on_hover_text(
+                "BS.1770-4 loudness of the master bus. \
+                 M = momentary (400 ms window). \
+                 I = gated integrated (whole programme). \
+                 Streaming targets: Spotify −14, Apple Music −16, broadcast −23.",
+            );
             ui.separator();
         }
 

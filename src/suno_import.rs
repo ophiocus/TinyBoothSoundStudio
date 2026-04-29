@@ -674,6 +674,14 @@ fn finalize(
         })
         .unwrap_or_default();
 
+    // Mixdown LUFS readout (v0.4.0 phase 3). Logged + surfaced to the
+    // user so they know what reference loudness they're targeting.
+    if let Some(lufs) = project.suno_mixdown_lufs {
+        log.line(&format!(
+            "mixdown LUFS   = {lufs:+.1} (BS.1770-4 integrated)"
+        ));
+    }
+
     // Coherence report (v0.4.0 phase 2). Surface the one-liner verdict
     // plus any flagged stems both in the import log (always) and the
     // import-result modal summary (visible to the user).
@@ -773,6 +781,7 @@ fn build_project(
         corrections_disabled: false,
         default_correction: None,
         suno_mixdown_path: None,
+        suno_mixdown_lufs: None,
         root: project_root.to_path_buf(),
     };
     let ordinal = project.next_suno_ordinal;
@@ -811,7 +820,14 @@ fn build_project(
     }
 
     if let Some(m) = mixdown.as_ref() {
-        project.suno_mixdown_path = Some(format!("{TRACKS_DIR}/{}", m.track_filename));
+        let rel = format!("{TRACKS_DIR}/{}", m.track_filename);
+        project.suno_mixdown_path = Some(rel.clone());
+        // Compute the mixdown's integrated LUFS once at import. Used by
+        // the Mix-tab reference A/B button to loudness-match the user's
+        // mix against the bundled mixdown. Errors swallow to None — this
+        // is informational, not a gate.
+        let abs = project_root.join(&rel);
+        project.suno_mixdown_lufs = compute_wav_integrated_lufs(&abs).ok();
     }
 
     // Seed each Suno stem's `correction` from the per-role preset library
@@ -928,6 +944,21 @@ pub fn match_role(filename: &str) -> StemRole {
         return StemRole::Master;
     }
     StemRole::Unknown
+}
+
+/// Read a 16-bit PCM WAV from disk and return its integrated LUFS per
+/// BS.1770-4. Used at import time to stamp `Project.suno_mixdown_lufs`
+/// for the matched-loudness reference A/B button. Errors propagate so
+/// the caller can decide whether to log or ignore.
+fn compute_wav_integrated_lufs(path: &Path) -> anyhow::Result<f32> {
+    let mut reader = hound::WavReader::open(path)?;
+    let spec = reader.spec();
+    let samples: Vec<i16> = reader.samples::<i16>().filter_map(|s| s.ok()).collect();
+    let lufs = crate::lufs::integrated_lufs_i16(&samples, spec.channels, spec.sample_rate);
+    if lufs.is_nan() {
+        anyhow::bail!("integrated LUFS came out as NaN (silent or too short)");
+    }
+    Ok(lufs)
 }
 
 struct WavMeta {

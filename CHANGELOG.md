@@ -6,6 +6,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); thi
 
 ## [Unreleased]
 
+### Suno-aware mixer — phase 3a of v0.4.0
+
+- **LUFS metering on the master bus** (BS.1770-4). New `src/lufs.rs` module implementing the K-weighting filter cascade (pre-filter shelf + RLB high-pass), 100 ms-slice mean-square accumulation, and gated integrated loudness with the spec's −70 LUFS absolute gate + −10 LU relative gate. Audio thread feeds the master bus into the meter once per frame; UI reads the published readouts via atomics. New labelled monospace block on the Mix-tab transport bar: "M ±X.X · I ±X.X LUFS" — momentary 400 ms window plus gated integrated whole-programme. Hover tooltip names the streaming targets (Spotify −14, Apple Music −16, broadcast −23). Reads `—` until 400 ms have played; resets on Stop.
+- **Mixdown loudness measured at import**. New `Project.suno_mixdown_lufs: Option<f32>` populated by a one-shot `compute_wav_integrated_lufs` pass over the bundled mixdown at import time. Logged in the import log alongside the coherence block; lays the groundwork for the matched-loudness reference A/B button (phase 3b).
+- 5 new unit tests on the LUFS meter: silence integrates to NaN; a 1 kHz tone at −20 dBFS reads near −20 LUFS (within 1.5 LU); +6 dB amplitude shift produces +6 LU readout (verifies the dB↔LUFS arithmetic); momentary / integrated both return NaN before 400 ms of audio.
+
 ### Suno-aware mixer — phase 2 of v0.4.0
 
 - **Import-time coherence analysis**. Every Suno bundle whose extracted contents include a mixdown WAV (filename containing `master`, `mix`, or `final` — the existing `StemRole::Master` heuristic) now triggers a coherence pass: sum all stems at unity gain, subtract the mixdown, compute residual RMS relative to mixdown RMS. Below ~−30 dB ⇒ stems compose cleanly; above ~−10 dB ⇒ a stem is missing, mislabelled, length-mismatched, or polarity-flipped.

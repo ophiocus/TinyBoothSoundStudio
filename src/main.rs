@@ -9,6 +9,7 @@ mod config;
 mod dsp;
 mod export;
 mod git_update;
+mod lufs;
 mod manual;
 mod player;
 mod project;

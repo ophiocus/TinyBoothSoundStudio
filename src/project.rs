@@ -291,12 +291,21 @@ pub struct Project {
     /// `tracks` — it would double the audio if it were. Instead it's
     /// kept aside as a reference: the v0.4.0 import-time coherence
     /// check sums the stems and compares against this file, and v0.4.0
-    /// phase 3 will surface it as the auto-loaded reference for
+    /// phase 3 surfaces it as the auto-loaded reference for
     /// loudness-matched A/B from the Mix tab.
     /// `None` for non-Suno projects and for Suno bundles that didn't
     /// include a mixdown. Added v0.4.0.
     #[serde(default)]
     pub suno_mixdown_path: Option<String>,
+
+    /// Integrated LUFS (BS.1770-4) of the Suno mixdown, computed once
+    /// at import time. Used as the matched-loudness target for the
+    /// Mix-tab reference A/B button — the mixdown plays at this
+    /// loudness, the user's mix is gain-trimmed to match. `None` when
+    /// no mixdown is present, or when LUFS computation failed.
+    /// Added v0.4.0.
+    #[serde(default)]
+    pub suno_mixdown_lufs: Option<f32>,
 
     /// Filled in at load time; not serialised.
     #[serde(skip)]
@@ -316,6 +325,7 @@ impl Project {
             corrections_disabled: false,
             default_correction: None,
             suno_mixdown_path: None,
+            suno_mixdown_lufs: None,
             root,
         }
     }
@@ -419,6 +429,7 @@ mod tests {
             corrections_disabled: false,
             default_correction: None,
             suno_mixdown_path: Some(format!("{TRACKS_DIR}/mixdown.wav")),
+            suno_mixdown_lufs: Some(-14.3),
             root: PathBuf::from("/tmp/test"),
         }
     }
