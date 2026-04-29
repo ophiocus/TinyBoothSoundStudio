@@ -8,10 +8,15 @@ Channel recorder, visualizer, and TinyBooth project exporter. Native Rust + egui
 
 ## What it does
 
-- **Record** — pick an input device, choose a channel or stereo L/R, hit ⏺. Each take goes to a separate WAV under a TinyBooth project folder, processed through the active recording-tone profile.
-- **Visualize live** — scrolling waveform, FFT spectrum, peak meter.
-- **Project** — rename / mute / gain / trim tracks. JSON manifest + sibling WAVs; the `.tinybooth` file is self-contained and carries the profile snapshot for every take.
-- **Export** — mix to WAV (native) or FLAC / MP3 / Ogg Vorbis / Ogg Opus / M4A-AAC (via ffmpeg, dropped next to the exe or on `PATH`).
+**The fast path: turn a Suno bundle into a finished release.**
+
+1. **Import** — drop a Suno folder or `.zip`. Stems get auto-classified by role, copied into a self-contained `.tinybooth` project (JSON manifest + sibling WAVs), and seeded with role-specific cleanup chains (`Suno-Vocal`, `Suno-Drums`, `Suno-Bass`, `Suno-ElectricGuitar`, `Suno-Synth`, etc. — eleven in total). The bundled mixdown is held aside as the loudness reference rather than summed into the mix.
+2. **Verify** — every import runs a coherence pass: sum the stems at unity, subtract the mixdown, flag any stem that's polarity-flipped or doesn't compose into the bundled mix. Surfaced in the import-result dialog and the rotating per-import log.
+3. **Clean** — per-stem DC-offset trim, top-octave Nyquist cleanup for AI shimmer, one-click polarity flip (`Ø` button on every channel strip), and a fully editable processing chain (HPF / 4-band EQ / de-esser / gate / compressor / makeup) attached to each stem. Sensible defaults out of the box; tuneable from the Mix tab's per-track Correction window.
+4. **Mix** — multitrack lanes with synchronized playhead, per-track fader + recordable Catmull-Rom volume automation, per-track A/B against the unprocessed source, global Disable for a quick before/after of the whole project. Master bus shows live BS.1770-4 LUFS (momentary + integrated), measured against the bundled Suno mixdown's own loudness so you can target streaming (Spotify −14, Apple Music −16, broadcast −23) without guessing.
+5. **Export** — mixdown to WAV native, or FLAC / MP3 / Ogg Vorbis / Ogg Opus / M4A-AAC via `ffmpeg` dropped next to the exe (or on `PATH`).
+
+**The other path: capture your own takes.** Pick an input device, choose channel or stereo L/R, hit ⏺. Live scrolling waveform + FFT spectrum + peak meter while recording. Each take lands in its own WAV under the project folder, processed through the active recording-tone preset (Guitar default; Vocals / Wind / Drums / Raw also shipped). Recorded takes mix alongside Suno stems as if they were just more tracks — layer your own playing over (or in place of) what Suno produced.
 
 ## Recording tones
 
