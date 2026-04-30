@@ -22,6 +22,20 @@ pub fn show(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
                 app.project_dirty = true;
             }
         }
+        // Project-level batch trim. Disabled when there's nothing to
+        // trim (no tracks AND no bundled mixdown).
+        let has_audio = !app.project.tracks.is_empty() || app.project.suno_mixdown_path.is_some();
+        let resp = ui.add_enabled(has_audio, egui::Button::new("✂  Trim project…"));
+        if resp
+            .on_hover_text(
+                "Crop every WAV in this project (stems + bundled Suno mixdown) to a \
+                 shared time range. Destructive — overwrites the WAVs in place. \
+                 Re-import the bundle to undo.",
+            )
+            .clicked()
+        {
+            app.show_trim = true;
+        }
     });
     ui.horizontal_wrapped(|ui| {
         ui.label("Folder:");

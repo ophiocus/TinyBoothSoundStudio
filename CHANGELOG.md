@@ -6,6 +6,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); thi
 
 ## [Unreleased]
 
+### Project-trim panel (v0.4.0)
+
+- **New isolated trim panel** opened from the Project tab via a `✂  Trim project…` button. Single batch operation: pick a `[start_secs, end_secs]` range, hit Apply, and every WAV in the project (stems + the bundled Suno mixdown) is cropped in place atomically (`.tmp` sibling + rename so a crash mid-write leaves either the old or the new file intact). Coherence analysis stays valid post-trim because every file in the project shares the same new frame-0.
+- Concept and waveform-rendering pattern adapted from the sibling `SoundTrimmer` project; integration is intentionally lightweight — no per-track offsets, no manifest-schema changes, no engine surgery. The trim panel is modal-style and doesn't weave into the Mix tab. Per-track trim offsets and drag-handle visual selection are deferred to v0.5.0.
+- `mm:ss.mmm` time entry with live parse feedback and over-end clamping. Small reference waveform thumbnail behind the start / end markers (drawn from the mixdown if present, else the first track). Failure breakdown in the status row when any file fails to trim, so the user can see which file (and why) without digging in the import log.
+- New module `src/trim.rs` (backend) + `src/ui/trim.rs` (panel). 6 new unit tests on the `mm:ss.mmm` parse / format round-trip, including the bare-seconds and `ss.mmm`-only formats and the negative / garbage rejection paths.
+
 ### Suno-aware mixer — phase 3a of v0.4.0
 
 - **LUFS metering on the master bus** (BS.1770-4). New `src/lufs.rs` module implementing the K-weighting filter cascade (pre-filter shelf + RLB high-pass), 100 ms-slice mean-square accumulation, and gated integrated loudness with the spec's −70 LUFS absolute gate + −10 LU relative gate. Audio thread feeds the master bus into the meter once per frame; UI reads the published readouts via atomics. New labelled monospace block on the Mix-tab transport bar: "M ±X.X · I ±X.X LUFS" — momentary 400 ms window plus gated integrated whole-programme. Hover tooltip names the streaming targets (Spotify −14, Apple Music −16, broadcast −23). Reads `—` until 400 ms have played; resets on Stop.

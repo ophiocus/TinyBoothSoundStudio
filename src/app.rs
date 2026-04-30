@@ -62,6 +62,12 @@ pub struct TinyBoothApp {
     /// Index of the track whose Correction editor is open, if any.
     pub editing_correction_for: Option<usize>,
 
+    /// Trim panel — opened from the Project tab, isolated modal.
+    /// Survives Mix-tab switches without losing the user's in-progress
+    /// time-entry state. Added v0.4.0.
+    pub show_trim: bool,
+    pub trim_state: crate::ui::trim::TrimState,
+
     /// Modal dialog shown after every import attempt — success or fail.
     pub import_dialog: Option<crate::suno_import::ImportOutcome>,
 
@@ -187,6 +193,8 @@ impl TinyBoothApp {
             player: None,
             player_error: None,
             editing_correction_for: None,
+            show_trim: false,
+            trim_state: crate::ui::trim::TrimState::default(),
             import_dialog: None,
             import_conflict: None,
             recorder: crate::automation::Recorder::default(),
@@ -793,6 +801,12 @@ impl eframe::App for TinyBoothApp {
         // Per-track Correction editor — also a floating window.
         if self.editing_correction_for.is_some() {
             ui::correction::show(self, ctx);
+        }
+
+        // Project-trim panel — opened via the Project tab's Trim
+        // button. Modal-style window, isolated from Mix.
+        if self.show_trim {
+            ui::trim::show(self, ctx);
         }
 
         // Import-result modal — always shown after an import completes,

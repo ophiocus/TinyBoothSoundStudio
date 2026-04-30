@@ -8,4 +8,5 @@ pub mod mix;
 pub mod profile_editor;
 pub mod project;
 pub mod record;
+pub mod trim;
 pub mod viz;

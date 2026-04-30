@@ -15,6 +15,7 @@ mod player;
 mod project;
 mod suno_import;
 mod suno_meta;
+mod trim;
 mod ui;
 
 use eframe::egui;
