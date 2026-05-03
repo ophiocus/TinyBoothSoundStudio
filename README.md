@@ -34,6 +34,8 @@ Every parameter is editable under **Admin → Recording-tone profiles…** and p
 
 ## Documentation
 
+**Working with Suno stems?** Start at **[`docs/suno-cleaning.md`](docs/suno-cleaning.md)** — the dedicated workflow guide that walks the bundle → cleanup → mix → release path end-to-end, naming the v0.4.0 features (per-role presets, coherence verification, polarity flip, Nyquist cleanup, LUFS metering, project trim) at each step.
+
 The full manual lives at [`docs/manual/`](docs/manual/) — twelve chapters covering every shipped feature, with appendices on troubleshooting and file formats. The same Markdown files are embedded into the binary at compile time, so the in-app **Help → Manual…** window (or **F1** anywhere) shows byte-identical content. Edit a chapter and it updates both surfaces on the next build.
 
 For developers / contributors:
