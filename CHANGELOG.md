@@ -6,7 +6,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); thi
 
 ## [Unreleased]
 
-### Recordings filespace + Record-tab list UX (v0.4.0)
+## [0.4.0] — 2026-04-28 — "Suno-aware mixer"
+
+A focused minor release built around the bundle → cleanup → mix → release path. Eleven per-role correction presets, import-time coherence verification, polarity flip, DC trim, Nyquist cleanup, BS.1770 LUFS metering, project-trim panel, and a dedicated recordings filespace with paged Record-tab list. Reference playback A/B and the multi-take browser are deferred to v0.5.0.
+
+### Recordings filespace + Record-tab list UX
 
 - **Recordings now live in a dedicated, app-owned filespace** at `%APPDATA%\TinyBooth Sound Studio\recordings\`, hosting a single persistent `.tinybooth` project that accumulates takes across sessions. Captures never contaminate the active stem-mixing project (Suno bundle or otherwise) — recordings and stem mixing are separate concerns. New `Config::recordings_root()` helper and `Project::open_or_create_recordings()` constructor.
 - **Record tab redesigned**: the existing recorder header (profile / device / source / name / ⏺-⏹ / live waveform / spectrum / level meters) sits at the top, and a new paged "Recordings" list takes the rest of the tab. Each entry shows name (hover for the on-disk path), duration, mode, and the recording-tone profile; ▶ button sends a take to the main mixer in one click (swaps `app.project` to the recordings project, switches to Mix, solos that take, starts playback); 🗑 deletes the WAV + manifest entry. Pagination at 10 entries per page, newest first.
