@@ -6,10 +6,39 @@ use crate::git_update::{UpdateAvailable, UpdateState};
 use crate::project::{Project, Track};
 use crate::suno_import::{ImportKind, PendingImport};
 use crate::ui;
+use anyhow::Context as _;
 use eframe::egui;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::sync::Arc;
+
+/// In-flight take metadata. Captured at `start_new_take` time so the
+/// Record tab doesn't have to keep a `Project` struct alive for the
+/// recordings filespace during the recording — that filespace is
+/// loaded fresh on `start_new_take` (to mint a unique track id and
+/// determine the rate constraint) and on `stop_take` (to append the
+/// finished take). Single source of truth: the manifest on disk.
+struct PendingTake {
+    /// Recordings-project root the take is being captured into. The
+    /// recording WAV at `target_root/file_rel` is written here.
+    target_root: PathBuf,
+    /// `track-NNN` id minted by the recordings project's
+    /// `new_track_slot`. Becomes the `Track.id` on stop.
+    track_id: String,
+    /// Path relative to `target_root`, forward-slashed. Becomes
+    /// `Track.file`.
+    file_rel: String,
+    /// User-typed track name (or the id, if blank).
+    name: String,
+    mode: SourceMode,
+    /// Recording-time profile snapshot baked into the WAV; preserved
+    /// on `Track.profile` for traceability.
+    profile: Profile,
+    /// Cpal-negotiated rate (matches the recordings project's existing
+    /// rate when there is one — see the rate-enforcement check in
+    /// `audio::start_recording`).
+    sample_rate: u32,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
@@ -32,6 +61,10 @@ pub struct TinyBoothApp {
     pub selected_mode: SourceMode,
     pub viz: Arc<VizState>,
     pub session: Option<RecordingSession>,
+    /// Metadata for the currently-recording take (target filespace,
+    /// minted id, etc.). Set in lockstep with `session`; both `Some`
+    /// during recording, both `None` between takes. See [`PendingTake`].
+    pending_take: Option<PendingTake>,
     pub pending_track_name: String,
 
     // Recording-tone profiles.
@@ -174,6 +207,7 @@ impl TinyBoothApp {
             selected_mode: SourceMode::Mixdown,
             viz: VizState::new(),
             session: None,
+            pending_take: None,
             pending_track_name: String::new(),
             profiles,
             active_profile_idx,
@@ -242,22 +276,31 @@ impl TinyBoothApp {
         let Some(dev) = self.selected_device.clone() else {
             anyhow::bail!("select an input device first");
         };
-        let (id, abs) = self.project.new_track_slot();
+        // Recordings ALWAYS land in the persistent recordings project
+        // at %APPDATA%\TinyBooth Sound Studio\recordings\ — never in
+        // the user's active project (which might be a Suno import or
+        // any other stem-mixing context). This is enforced here, not
+        // by convention: take metadata is registered against the
+        // recordings project on stop_take and the active `app.project`
+        // is never touched by the Record tab.
+        let rec = Project::open_or_create_recordings().context("opening recordings project")?;
+        let (id, abs) = rec.new_track_slot();
         let name = if self.pending_track_name.trim().is_empty() {
             id.clone()
         } else {
             self.pending_track_name.trim().to_string()
         };
-        std::fs::create_dir_all(&self.project.root)?;
+        let target_root = rec.root.clone();
+        std::fs::create_dir_all(target_root.join(crate::project::TRACKS_DIR))?;
         let profile = self.active_profile().clone();
         let mode = self.selected_mode;
-        // If the project already has tracks (typical after a Suno
-        // import), force the recording to capture at the existing
-        // rate so the Mix-tab player doesn't reject the new track.
-        // The player has no resampler yet (TBSS-FR-0002 §6); recording
-        // at a mismatched rate would land a 48 kHz WAV next to 44.1
-        // kHz Suno stems and break Mix on the next visit.
-        let required_sample_rate = self.project.tracks.first().map(|t| t.sample_rate);
+        // Force the recording rate to match the recordings project's
+        // existing rate (the rate of its first track ever captured).
+        // The player has no resampler yet (TBSS-FR-0002 §6); a take
+        // at a mismatched rate would break the Mix tab on the
+        // recordings project. cpal refuses up-front rather than
+        // landing a broken take on disk.
+        let required_sample_rate = rec.tracks.first().map(|t| t.sample_rate);
         let session = audio::start_recording(
             &dev,
             mode,
@@ -268,40 +311,96 @@ impl TinyBoothApp {
             required_sample_rate,
         )?;
         let sample_rate = session.sample_rate;
-        self.session = Some(session);
         let file_rel = abs
-            .strip_prefix(&self.project.root)
+            .strip_prefix(&target_root)
             .map(|p| p.to_string_lossy().replace('\\', "/"))
             .unwrap_or_else(|_| format!("tracks/{id}.wav"));
-        self.project.tracks.push(Track::recorded(
-            id.clone(),
-            name,
+        self.session = Some(session);
+        self.pending_take = Some(PendingTake {
+            target_root,
+            track_id: id,
             file_rel,
-            sample_rate,
+            name,
             mode,
-            0.0,
             profile,
-        ));
-        self.project_dirty = true;
+            sample_rate,
+        });
         self.pending_track_name.clear();
         Ok(())
     }
 
     pub fn stop_take(&mut self) {
-        if let Some(sess) = self.session.take() {
-            let dur = sess.duration_secs();
-            // Update the matching track row (last one we pushed).
-            if let Some(last) = self.project.tracks.last_mut() {
-                last.duration_secs = dur;
+        let Some(sess) = self.session.take() else {
+            return;
+        };
+        let dur = sess.duration_secs();
+        drop(sess);
+        let Some(pt) = self.pending_take.take() else {
+            self.status = Some(
+                "internal error: recording stopped but no pending-take metadata was set.".into(),
+            );
+            return;
+        };
+        // Re-load the recordings project from disk, append the take,
+        // save. Loading fresh (rather than carrying a Project struct
+        // across the recording's lifetime) keeps the recordings
+        // filespace as the single source of truth — no in-memory dual
+        // state to drift.
+        let mut rec = match Project::open_or_create_recordings() {
+            Ok(p) => p,
+            Err(e) => {
+                self.status = Some(format!("could not open recordings project: {e:#}"));
+                return;
             }
-            drop(sess);
-            if let Err(e) = self.project.save() {
-                self.status = Some(format!("save error: {e}"));
-            } else {
-                let manifest = self.project.manifest_path();
-                self.config.record_project(&manifest);
-                self.status = Some(format!("saved {}", manifest.display()));
+        };
+        // Sanity check: the recordings root we recorded under should
+        // match the current recordings root. If the user reset config
+        // dirs mid-recording (extremely unlikely) we'd otherwise lose
+        // the track entry — guard with a clear status.
+        if rec.root != pt.target_root {
+            self.status = Some(format!(
+                "recordings root changed during recording ({} → {}); take saved on disk \
+                 but not registered.",
+                pt.target_root.display(),
+                rec.root.display()
+            ));
+            return;
+        }
+        rec.tracks.push(Track::recorded(
+            pt.track_id,
+            pt.name,
+            pt.file_rel,
+            pt.sample_rate,
+            pt.mode,
+            dur,
+            pt.profile,
+        ));
+        match rec.save() {
+            Ok(()) => {
+                self.status = Some(
+                    "Saved take to Recordings — File → Open Recordings to review / mix.".into(),
+                );
+            }
+            Err(e) => {
+                self.status = Some(format!("recordings save error: {e:#}"));
+            }
+        }
+    }
+
+    /// Open the persistent recordings project as the active project.
+    /// Same shape as `open_project_path` but skips the recents-list
+    /// bookkeeping (recordings aren't a "project the user is working
+    /// on" in the recents sense — they're scratch).
+    pub fn open_recordings_project(&mut self) {
+        match Project::open_or_create_recordings() {
+            Ok(proj) => {
+                self.project = proj;
                 self.project_dirty = false;
+                self.player = None;
+                self.status = Some("Opened Recordings.".into());
+            }
+            Err(e) => {
+                self.status = Some(format!("could not open Recordings: {e:#}"));
             }
         }
     }
@@ -624,6 +723,19 @@ impl eframe::App for TinyBoothApp {
                     }
                     if ui.button("Open project…").clicked() {
                         self.open_project_dialog();
+                        ui.close_menu();
+                    }
+                    if ui
+                        .button("Open Recordings")
+                        .on_hover_text(
+                            "Switch to the persistent recordings filespace — \
+                             the dedicated app-owned location every Record-tab take \
+                             lands in. Always available, fully separate from any \
+                             stem-mixing project.",
+                        )
+                        .clicked()
+                    {
+                        self.open_recordings_project();
                         ui.close_menu();
                     }
                     let mut recent_clicked: Option<PathBuf> = None;

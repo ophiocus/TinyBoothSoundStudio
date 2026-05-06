@@ -212,7 +212,19 @@ pub fn show(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
 
     ui.add_space(8.0);
     ui.horizontal_wrapped(|ui| {
-        ui.label("Each take is saved as a separate WAV under");
-        ui.monospace(app.project.tracks_dir().display().to_string());
+        ui.label("Each take is saved into the persistent recordings filespace at");
+        let recordings_path = crate::config::Config::recordings_root()
+            .map(|p| p.join("tracks").display().to_string())
+            .unwrap_or_else(|| "(no platform config dir)".into());
+        ui.monospace(recordings_path);
     });
+    ui.label(
+        egui::RichText::new(
+            "Recordings stay separate from any stem-mixing project. \
+             Use File → Open Recordings to review or mix them.",
+        )
+        .italics()
+        .weak(),
+    );
+    let _ = app; // keep arg used after the switch away from app.project
 }

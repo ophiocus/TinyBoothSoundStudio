@@ -356,6 +356,28 @@ impl Project {
         Ok(p)
     }
 
+    /// Open the persistent recordings project — the dedicated, app-
+    /// owned filespace where every Record-tab take lands. Lives at
+    /// the path returned by [`crate::config::Config::recordings_root`].
+    /// Created on first call; subsequent calls load the existing
+    /// manifest. Recordings are intentionally segregated from any
+    /// user-opened stem-mixing project so a take never contaminates
+    /// the active project's filespace (TBSS workflow rule —
+    /// recordings and stem mixing are separate concerns).
+    pub fn open_or_create_recordings() -> Result<Self> {
+        let root = crate::config::Config::recordings_root()
+            .ok_or_else(|| anyhow::anyhow!("no platform config dir for recordings"))?;
+        let manifest = root.join(MANIFEST_NAME);
+        if manifest.is_file() {
+            return Self::load(&manifest);
+        }
+        std::fs::create_dir_all(&root)
+            .with_context(|| format!("creating recordings dir {}", root.display()))?;
+        let p = Project::new("Recordings", root);
+        p.save()?;
+        Ok(p)
+    }
+
     /// Mint an unused `track-NNN` id and relative file path.
     pub fn new_track_slot(&self) -> (String, PathBuf) {
         let next = (1..=999)

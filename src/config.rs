@@ -57,6 +57,18 @@ impl Config {
         Self::dir().map(|p| p.join("config.json"))
     }
 
+    /// Permanent app-owned filespace where every Record-tab take lands.
+    /// Lives at `%APPDATA%\TinyBooth Sound Studio\recordings\` and is
+    /// kept fully separate from any user-opened stem-mixing project
+    /// (Suno bundles, etc.) so a recording never contaminates the
+    /// active project's filespace. The folder hosts a single
+    /// persistent `.tinybooth` project that accumulates takes across
+    /// sessions; the user can swap it in as the active project via
+    /// File → Open Recordings to review / mix / export.
+    pub fn recordings_root() -> Option<PathBuf> {
+        Self::dir().map(|p| p.join("recordings"))
+    }
+
     pub fn load() -> Self {
         let Some(p) = Self::path() else {
             return Self::default();
