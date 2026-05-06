@@ -69,6 +69,28 @@ pub fn show(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
         return;
     }
 
+    // Auto-play hand-off from the Record-tab "▶" buttons. The Record
+    // tab swaps `app.project` to the recordings project and sets
+    // these flags; we consume them here once the player has rebuilt
+    // for the new project. Solo-and-play is the natural mode for
+    // "audition this single take through the main mixer".
+    if app.mix_autoplay_pending {
+        if let Some(player) = app.player.as_ref() {
+            if let Some(idx) = app.mix_autoplay_solo_idx.take() {
+                for (i, t) in player.state.tracks.iter().enumerate() {
+                    t.solo.store(i == idx, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+            // Position 0 on the freshly-loaded project.
+            player
+                .state
+                .position_frames
+                .store(0, std::sync::atomic::Ordering::Release);
+            player.state.set_play_state(PlayState::Playing);
+        }
+        app.mix_autoplay_pending = false;
+    }
+
     ui.separator();
 
     // Capture fader values for any armed strips while playing.

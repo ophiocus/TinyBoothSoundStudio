@@ -117,6 +117,18 @@ pub struct TinyBoothApp {
     /// console deck (vs. the multitrack lane area).
     pub mix_console_fraction: f32,
 
+    /// Page index for the Record-tab "Recent recordings" list (10
+    /// entries per page, newest first). Survives tab switches.
+    pub recordings_page: usize,
+    /// When the user hits ▶ on a recording entry, we swap `project`
+    /// to the recordings project and queue this flag so the Mix-tab
+    /// view starts playback automatically on its next render. Cleared
+    /// once acted on. v0.4.0.
+    pub mix_autoplay_pending: bool,
+    /// Optional track index to solo on autoplay — the entry the user
+    /// actually clicked. `None` = autoplay without changing solos.
+    pub mix_autoplay_solo_idx: Option<usize>,
+
     // Self-update plumbing.
     pub update_state: UpdateState,
     pub update_error: Option<String>,
@@ -233,6 +245,9 @@ impl TinyBoothApp {
             import_conflict: None,
             recorder: crate::automation::Recorder::default(),
             mix_console_fraction: 0.42,
+            recordings_page: 0,
+            mix_autoplay_pending: false,
+            mix_autoplay_solo_idx: None,
             update_state: UpdateState::Checking,
             update_error: None,
             update_rx: Some(rx),
@@ -401,6 +416,79 @@ impl TinyBoothApp {
             }
             Err(e) => {
                 self.status = Some(format!("could not open Recordings: {e:#}"));
+            }
+        }
+    }
+
+    /// Send a recording to the main mixer for playback in one click:
+    /// swap `project` to the recordings project, switch to the Mix tab,
+    /// solo the selected take, and queue auto-play for the next Mix
+    /// render. The Mix-tab show() consumes the auto-play flags after
+    /// the player rebuilds itself for the new project.
+    ///
+    /// Called from the Record-tab recordings list ▶ buttons. `idx` is
+    /// the index in the recordings project's `tracks` list (loaded
+    /// fresh by the caller — we re-load here to guard against stale
+    /// indices if the file changed between frames).
+    pub fn play_recording_in_mixer(&mut self, idx: usize) {
+        let rec = match Project::open_or_create_recordings() {
+            Ok(p) => p,
+            Err(e) => {
+                self.status = Some(format!("could not open Recordings: {e:#}"));
+                return;
+            }
+        };
+        if idx >= rec.tracks.len() {
+            self.status = Some("recording entry no longer exists.".into());
+            return;
+        }
+        self.project = rec;
+        self.project_dirty = false;
+        self.player = None;
+        self.tab = Tab::Mix;
+        self.mix_autoplay_pending = true;
+        self.mix_autoplay_solo_idx = Some(idx);
+    }
+
+    /// Delete a recording by index in the recordings project's
+    /// `tracks` list. Removes the WAV from disk and the `Track` row
+    /// from the recordings manifest. Caller should refresh its view
+    /// of the recordings filespace afterward (the Record-tab list
+    /// re-loads on every frame, so just calling this is enough).
+    pub fn delete_recording(&mut self, idx: usize) {
+        let mut rec = match Project::open_or_create_recordings() {
+            Ok(p) => p,
+            Err(e) => {
+                self.status = Some(format!("could not open Recordings: {e:#}"));
+                return;
+            }
+        };
+        if idx >= rec.tracks.len() {
+            self.status = Some("recording entry no longer exists.".into());
+            return;
+        }
+        let removed = rec.tracks.remove(idx);
+        let abs = rec.root.join(&removed.file);
+        let _ = std::fs::remove_file(&abs);
+        match rec.save() {
+            Ok(()) => {
+                self.status = Some(format!("Deleted recording '{}'.", removed.name));
+                // If the user has the recordings project open as the
+                // active one, drop the player so it rebuilds without
+                // the deleted track on the next Mix visit.
+                if Config::recordings_root()
+                    .map(|root| self.project.root == root)
+                    .unwrap_or(false)
+                {
+                    // Reflect on the active project too.
+                    if let Some(pos) = self.project.tracks.iter().position(|t| t.id == removed.id) {
+                        self.project.tracks.remove(pos);
+                    }
+                    self.player = None;
+                }
+            }
+            Err(e) => {
+                self.status = Some(format!("recordings save error: {e:#}"));
             }
         }
     }

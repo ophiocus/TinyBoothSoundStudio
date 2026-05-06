@@ -1,7 +1,13 @@
 use crate::app::TinyBoothApp;
 use crate::audio;
+use crate::project::Project;
 use crate::ui::viz;
 use eframe::egui;
+
+/// Page size for the recordings-list view. Small enough to fit on
+/// reasonable screen heights without scrolling, large enough to
+/// avoid constant page flipping after a few takes.
+const RECORDINGS_PAGE_SIZE: usize = 10;
 
 pub fn show(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
     ui.heading("Record");
@@ -212,19 +218,139 @@ pub fn show(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
 
     ui.add_space(8.0);
     ui.horizontal_wrapped(|ui| {
-        ui.label("Each take is saved into the persistent recordings filespace at");
+        ui.label("Each take saves to");
         let recordings_path = crate::config::Config::recordings_root()
             .map(|p| p.join("tracks").display().to_string())
             .unwrap_or_else(|| "(no platform config dir)".into());
         ui.monospace(recordings_path);
     });
-    ui.label(
-        egui::RichText::new(
-            "Recordings stay separate from any stem-mixing project. \
-             Use File → Open Recordings to review or mix them.",
-        )
-        .italics()
-        .weak(),
-    );
-    let _ = app; // keep arg used after the switch away from app.project
+
+    ui.add_space(10.0);
+    ui.separator();
+    show_recordings_list(app, ui);
+}
+
+/// "Recent recordings" — paged list of every take in the persistent
+/// recordings filespace, newest first. Each entry has play / delete
+/// actions; ▶ swaps the active project to the recordings project,
+/// switches to the Mix tab, solos that take, and starts playback.
+fn show_recordings_list(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
+    // Load fresh from disk on every Record-tab frame. The recordings
+    // manifest is small (JSON only — WAV samples are not loaded by
+    // Project::load), so this costs microseconds and avoids any
+    // cache-staleness bugs around external edits / deletions.
+    let rec = match Project::open_or_create_recordings() {
+        Ok(p) => p,
+        Err(e) => {
+            ui.colored_label(
+                egui::Color32::LIGHT_RED,
+                format!("could not open recordings filespace: {e:#}"),
+            );
+            return;
+        }
+    };
+
+    let total = rec.tracks.len();
+    let total_pages = total.div_ceil(RECORDINGS_PAGE_SIZE).max(1);
+    if app.recordings_page >= total_pages {
+        app.recordings_page = total_pages - 1;
+    }
+
+    // Header row: title + count + page nav.
+    ui.horizontal(|ui| {
+        ui.heading(format!("Recordings ({total})"));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if total_pages > 1 {
+                ui.add_enabled_ui(app.recordings_page + 1 < total_pages, |ui| {
+                    if ui.button("Next ▶").clicked() {
+                        app.recordings_page += 1;
+                    }
+                });
+                ui.label(format!(
+                    "page {} / {}",
+                    app.recordings_page + 1,
+                    total_pages
+                ));
+                ui.add_enabled_ui(app.recordings_page > 0, |ui| {
+                    if ui.button("◀ Prev").clicked() {
+                        app.recordings_page -= 1;
+                    }
+                });
+            }
+        });
+    });
+
+    if total == 0 {
+        ui.label(
+            egui::RichText::new("No recordings yet — hit ⏺ above to capture one.")
+                .italics()
+                .weak(),
+        );
+        return;
+    }
+
+    // Newest first: walk the project's tracks in reverse (track-NNN
+    // ids are minted ascending, so reverse iteration is newest-first).
+    // Pagination: skip and take across the reversed sequence.
+    let entries: Vec<(usize, &crate::project::Track)> =
+        rec.tracks.iter().enumerate().rev().collect();
+    let start = app.recordings_page * RECORDINGS_PAGE_SIZE;
+    let end = (start + RECORDINGS_PAGE_SIZE).min(entries.len());
+    let slice = &entries[start..end];
+
+    let mut click_play_idx: Option<usize> = None;
+    let mut click_delete_idx: Option<usize> = None;
+
+    egui::Grid::new("recordings_list_grid")
+        .num_columns(6)
+        .striped(true)
+        .spacing([10.0, 4.0])
+        .show(ui, |ui| {
+            ui.strong(""); // play
+            ui.strong("Name");
+            ui.strong("Duration");
+            ui.strong("Mode");
+            ui.strong("Profile");
+            ui.strong(""); // delete
+            ui.end_row();
+
+            for (idx, t) in slice {
+                if ui
+                    .button("▶")
+                    .on_hover_text("Play in mixer (switches to Mix tab)")
+                    .clicked()
+                {
+                    click_play_idx = Some(*idx);
+                }
+                ui.label(&t.name).on_hover_text(&t.file);
+                ui.label(format!("{:.1}s", t.duration_secs));
+                let mode = if t.stereo {
+                    "stereo".to_string()
+                } else {
+                    match t.channel_source {
+                        Some(c) => format!("Ch {}", c + 1),
+                        None => "mix".to_string(),
+                    }
+                };
+                ui.label(mode);
+                let prof = t.profile.as_ref().map(|p| p.name.as_str()).unwrap_or("—");
+                ui.label(prof);
+                if ui
+                    .button("🗑")
+                    .on_hover_text("Delete this take (removes the WAV)")
+                    .clicked()
+                {
+                    click_delete_idx = Some(*idx);
+                }
+                ui.end_row();
+            }
+        });
+
+    // Apply clicks AFTER the closure so we don't double-borrow `app`.
+    if let Some(i) = click_play_idx {
+        app.play_recording_in_mixer(i);
+    }
+    if let Some(i) = click_delete_idx {
+        app.delete_recording(i);
+    }
 }
