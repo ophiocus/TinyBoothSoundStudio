@@ -18,41 +18,71 @@ The whole stack is ~6,200 lines of Rust across 25 files, ships as a 12 MB exe + 
 
 ```
 src/
-├── main.rs            58 lines  — eframe entrypoint, viewport icon load, mod declarations
-├── app.rs            727 lines  — TinyBoothApp central state + eframe::App impl + bulk-action methods
+├── main.rs           — eframe entrypoint, viewport icon load, mod declarations
+├── app.rs            — TinyBoothApp central state + eframe::App impl + bulk-action methods + PendingTake
 │
 │   ── Audio path ──
-├── audio.rs          388 lines  — cpal input stream, SourceMode, recording session, viz ring buffer
-├── player.rs         598 lines  — cpal output stream, Player, PlayerState, TrackPlay, TrackBufCache
-├── dsp.rs            639 lines  — Profile, EqBand, FilterChain (mono), FilterChainStereo, builtin presets
-├── automation.rs     139 lines  — AutomationLane, SplineSampler (Catmull-Rom via `splines` crate), Recorder
-├── analysis.rs        69 lines  — FFT spectrum (rustfft), waveform peak decimation
+├── audio.rs          — cpal input stream, SourceMode, recording session, viz ring buffer
+│                       (now accepts `required_sample_rate` so the Record tab can pin the
+│                        capture rate to the recordings project's existing rate)
+├── player.rs         — cpal output stream, Player, PlayerState, TrackPlay, TrackBufCache
+│                       (master-bus LUFS readouts published as atomics for the UI)
+├── dsp.rs            — Profile, EqBand, FilterChain (mono), FilterChainStereo
+│                       Built-in presets: Guitar / Vocals / Wind / Drums / Raw / Suno-Clean
+│                       + 11-preset Suno-X library (Vocal / BackingVocal / Drums / Bass /
+│                       ElectricGuitar / AcousticGuitar / Keys / Synth / Pads / Percussion /
+│                       FxOther). DC-remove and Nyquist-clean are first-class chain stages.
+│                       `role_to_preset_name` for auto-seeding at Suno import.
+├── automation.rs     — AutomationLane, SplineSampler (Catmull-Rom via `splines` crate), Recorder
+├── analysis.rs       — FFT spectrum (rustfft), waveform peak decimation
+├── coherence.rs      — Suno-import coherence: sum-vs-mixdown residual + Pearson per-stem
+│                       polarity check. f32-mono, 4 kHz decimation, memory-bounded.
+├── lufs.rs           — BS.1770-4 K-weighting + integrated loudness with absolute / relative
+│                       gating. `LufsMeter` for streaming the master bus; `integrated_lufs_i16`
+│                       one-shot helper for "what's the LUFS of this WAV" at import.
+├── trim.rs           — Project-level batch trim: crops every WAV to a shared `[start, end]`
+│                       range, atomically (`.tmp` + rename). `reference_waveform` for the
+│                       trim panel's thumbnail; mm:ss.mmm parse / format helpers.
 │
 │   ── Project + I/O ──
-├── project.rs        245 lines  — Project, Track, TrackSource, StemRole schema; load/save manifest
-├── suno_import.rs    754 lines  — Folder + zip ingestion, ImportLog, ImportOutcome, conflict probe
-├── suno_meta.rs      128 lines  — RIFF/INFO/ICMT walker — Suno session epoch + provenance
-├── export.rs         322 lines  — Mixdown (correction-aware), WAV native, ffmpeg subprocess for lossy
+├── project.rs        — Project, Track, TrackSource, StemRole schema; load/save manifest
+│                       `Project::open_or_create_recordings()` for the persistent recordings
+│                       filespace at %APPDATA%\TinyBooth Sound Studio\recordings\.
+├── suno_import.rs    — Folder + zip ingestion, ImportLog, ImportOutcome, conflict probe
+│                       Auto-seeds per-role Suno-X presets onto detected stems; runs the
+│                       coherence + polarity-vs-mixdown checks; computes mixdown LUFS.
+├── suno_meta.rs      — RIFF/INFO/ICMT walker — Suno session epoch + provenance
+├── export.rs         — Mixdown (correction-aware), WAV native, ffmpeg subprocess for lossy
 │
 │   ── App-level glue ──
-├── config.rs          86 lines  — Config (dark mode, zoom, last project, recent projects)
-├── git_update.rs     156 lines  — GitHub releases polling, MSI download, elevated msiexec
-├── manual.rs         125 lines  — Page list with include_str! of every docs/manual/*.md
+├── config.rs         — Config (dark mode, zoom, last project, recent projects)
+│                       `Config::recordings_root()` for the dedicated recordings filespace.
+├── git_update.rs     — GitHub releases polling, MSI download, elevated msiexec
+├── manual.rs         — Page list with include_str! of every docs/manual/*.md
 │
 │   ── UI ──
 └── ui/
-    ├── mod.rs         10 lines  — module declarations only
-    ├── record.rs     193 lines  — Record tab: device picker, source mode, transport, viz
-    ├── project.rs    121 lines  — Project tab: track table with role-tagged source column
-    ├── mix.rs        610 lines  — Mix tab: lanes + console deck + bulk-correction buttons + transport
-    ├── export.rs     115 lines  — Export tab: format picker, bitrate, output dialog
-    ├── admin.rs      227 lines  — Floating profile editor (Recording-tone → DSP)
-    ├── correction.rs 194 lines  — Floating per-track correction editor (Mix tab → button)
-    ├── manual.rs      57 lines  — Floating Help → Manual window (TOC + markdown body)
-    ├── import_dialog.rs   79 lines  — Modal: import-result (success or fail + log links)
-    ├── import_conflict.rs 98 lines  — Modal: duplicate-import resolution (Replace / Cancel)
-    └── viz.rs         90 lines  — Shared waveform / spectrum / peak-meter primitives
+    ├── mod.rs              — module declarations only
+    ├── record.rs           — Record tab: header (device picker, source mode, transport, viz)
+    │                         + paged Recordings list with ▶ play-in-mixer / 🗑 delete actions
+    ├── project.rs          — Project tab: track table with role-tagged source column,
+    │                         "✂ Trim project…" button
+    ├── mix.rs              — Mix tab: lanes + console deck + bulk-correction buttons + transport
+    │                         (LUFS readout, polarity-flip Ø button per strip, autoplay hand-off
+    │                         from Record-tab ▶ buttons)
+    ├── export.rs           — Export tab: format picker, bitrate, output dialog
+    ├── admin.rs            — Floating profile editor (Recording-tone → DSP)
+    ├── correction.rs       — Floating per-track correction editor (Mix tab → button)
+    ├── profile_editor.rs   — Shared body for the Admin + Correction windows (Suno-cleanup
+    │                         section with DC-remove + Nyquist-clean toggles)
+    ├── trim.rs             — Project-trim panel (waveform thumbnail + mm:ss.mmm entries)
+    ├── manual.rs           — Floating Help → Manual window (TOC + markdown body)
+    ├── import_dialog.rs    — Modal: import-result (success or fail + coherence summary + log)
+    ├── import_conflict.rs  — Modal: duplicate-import resolution (Replace / Cancel)
+    └── viz.rs              — Shared waveform / spectrum / peak-meter primitives
 ```
+
+Line counts intentionally omitted — they drift on every commit and are not load-bearing for understanding the architecture. The shape (which modules exist, what each is responsible for) is what matters.
 
 External-facing pieces that aren't `.rs` source:
 
@@ -72,7 +102,7 @@ External-facing pieces that aren't `.rs` source:
 ```
 Mic / Interface
   ↓  cpal::Device → Stream
-audio.rs::start_recording()
+audio.rs::start_recording(required_sample_rate)
   ↓  freezes profile into FilterChain or FilterChainStereo
 Audio thread (cpal callback)
   ↓  per-frame: pick channel(s) → run chain → write WAV
@@ -83,6 +113,10 @@ viz.push_mono / push_stereo(f32)      ← UI thread reads each frame
 ```
 
 Key constraint: the cpal callback runs on a high-priority audio thread. **No allocations.** Locks are taken only for the WAV writer (per-frame, but it's a `parking_lot::Mutex<Option<WavWriter>>` — tiny lock window). Filter chain state is owned by the closure and never crosses thread boundaries.
+
+**The recording lands in a dedicated app-owned filespace, never the active stem-mixing project.** `start_new_take` loads the persistent recordings project from `%APPDATA%\TinyBooth Sound Studio\recordings\` (creating it on first run), mints a unique `track-NNN` id, computes the recording path under that root, starts cpal. The `required_sample_rate` argument keys on the recordings project's existing first-track rate so every take in that filespace shares one rate (the player has no resampler yet, so mixed-rate projects break the Mix tab — better to refuse up-front than land a broken WAV). Take metadata lives on `app.pending_take: Option<PendingTake>` for the duration of the recording; `stop_take` re-loads the recordings project from disk, appends the finished `Track` row, saves. Two disk loads per take (start: mint id + read rate constraint; stop: append + save) — keeps the manifest as the single source of truth, no in-memory dual-project state.
+
+The user's `app.project` (Suno import or anything else) is never touched by the Record tab. To review or mix recordings, **File → Open Recordings** swaps `app.project` to the recordings project; alternatively, the Record-tab "Recordings" list has a ▶ button per entry that does the same swap + Mix-tab switch + solo + autoplay in one click.
 
 ### 3.2 Multitrack playback (Mix tab)
 
