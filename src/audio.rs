@@ -220,6 +220,7 @@ pub fn start_recording(
     viz: Arc<VizState>,
     profile: crate::dsp::Profile,
     error_tx: std::sync::mpsc::Sender<String>,
+    required_sample_rate: Option<u32>,
 ) -> Result<RecordingSession> {
     let host = cpal::default_host();
     let dev = host
@@ -227,9 +228,34 @@ pub fn start_recording(
         .find(|d| d.name().map(|n| n == device_name).unwrap_or(false))
         .ok_or_else(|| anyhow!("input device '{device_name}' not found"))?;
 
-    let supported = dev
-        .default_input_config()
-        .context("reading default input config")?;
+    // When the caller requires a specific rate (because there are
+    // already tracks in the project at that rate, and the player
+    // doesn't yet resample at load time), find a supported input
+    // config whose range covers it. Otherwise fall back to the device
+    // default. Refusing to start here is much friendlier than
+    // recording at the wrong rate and breaking the Mix tab later.
+    let supported = match required_sample_rate {
+        Some(req) => dev
+            .supported_input_configs()
+            .context("listing supported input configs")?
+            .find_map(|c| {
+                if c.min_sample_rate().0 <= req && c.max_sample_rate().0 >= req {
+                    Some(c.with_sample_rate(cpal::SampleRate(req)))
+                } else {
+                    None
+                }
+            })
+            .ok_or_else(|| {
+                anyhow!(
+                    "input device '{device_name}' does not support {req} Hz, \
+                     which this project's existing tracks were captured / imported at. \
+                     Pick a different device or start a fresh project."
+                )
+            })?,
+        None => dev
+            .default_input_config()
+            .context("reading default input config")?,
+    };
     let sample_format = supported.sample_format();
     let config: StreamConfig = supported.clone().into();
     let channels_in = config.channels;

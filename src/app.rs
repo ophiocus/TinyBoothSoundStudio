@@ -251,6 +251,13 @@ impl TinyBoothApp {
         std::fs::create_dir_all(&self.project.root)?;
         let profile = self.active_profile().clone();
         let mode = self.selected_mode;
+        // If the project already has tracks (typical after a Suno
+        // import), force the recording to capture at the existing
+        // rate so the Mix-tab player doesn't reject the new track.
+        // The player has no resampler yet (TBSS-FR-0002 §6); recording
+        // at a mismatched rate would land a 48 kHz WAV next to 44.1
+        // kHz Suno stems and break Mix on the next visit.
+        let required_sample_rate = self.project.tracks.first().map(|t| t.sample_rate);
         let session = audio::start_recording(
             &dev,
             mode,
@@ -258,6 +265,7 @@ impl TinyBoothApp {
             self.viz.clone(),
             profile.clone(),
             self.audio_err_tx.clone(),
+            required_sample_rate,
         )?;
         let sample_rate = session.sample_rate;
         self.session = Some(session);
