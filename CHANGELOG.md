@@ -6,6 +6,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); thi
 
 ## [Unreleased]
 
+## [0.4.1] — 2026-04-28
+
+### Fixed
+- `stop_take` now keeps `app.project` in sync when the recordings project happens to be the active one (via File → Open Recordings). v0.4.0's `stop_take` saved the new take to the recordings manifest on disk but never updated the in-memory `app.project`, so a user who had the recordings project open and recorded a take saw "the take disappeared" until they reopened the project. Mirrors the existing pattern in `delete_recording`. Player is also dropped so it rebuilds with the new track count on the next Mix-tab visit.
+
 ## [0.4.0] — 2026-04-28 — "Suno-aware mixer"
 
 A focused minor release built around the bundle → cleanup → mix → release path. Eleven per-role correction presets, import-time coherence verification, polarity flip, DC trim, Nyquist cleanup, BS.1770 LUFS metering, project-trim panel, and a dedicated recordings filespace with paged Record-tab list. Reference playback A/B and the multi-take browser are deferred to v0.5.0.

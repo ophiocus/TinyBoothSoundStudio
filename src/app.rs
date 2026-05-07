@@ -381,7 +381,7 @@ impl TinyBoothApp {
             ));
             return;
         }
-        rec.tracks.push(Track::recorded(
+        let new_track = Track::recorded(
             pt.track_id,
             pt.name,
             pt.file_rel,
@@ -389,9 +389,24 @@ impl TinyBoothApp {
             pt.mode,
             dur,
             pt.profile,
-        ));
+        );
+        rec.tracks.push(new_track.clone());
         match rec.save() {
             Ok(()) => {
+                // If the user has the recordings project open as the
+                // active project (via File → Open Recordings), keep
+                // `app.project` in sync so the new take appears in
+                // their Project / Mix views without a manual reopen.
+                // Drop the player so it rebuilds with the new track
+                // count on the next Mix-tab visit.
+                if Config::recordings_root()
+                    .map(|root| self.project.root == root)
+                    .unwrap_or(false)
+                {
+                    self.project.tracks.push(new_track);
+                    self.project_dirty = false; // disk already up to date
+                    self.player = None;
+                }
                 self.status = Some(
                     "Saved take to Recordings — File → Open Recordings to review / mix.".into(),
                 );
