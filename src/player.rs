@@ -252,16 +252,27 @@ impl Player {
             return Err(anyhow!("project has no tracks"));
         }
 
-        // Load tracks tolerantly. v0.4.4: any individual track that
-        // fails to load (missing file, corrupt WAV, wrong rate) gets
-        // skipped with a warning routed through `error_tx` (which the
-        // app surfaces in the status bar). The mix tab still loads and
-        // plays whatever's left, instead of one bad row killing the
-        // whole player. Rate-locked: we adopt the FIRST successful
-        // track's rate as the project rate; subsequent tracks at a
-        // different rate are warned + skipped.
+        // Load tracks tolerantly. v0.4.4: per-track failures (missing
+        // file, corrupt WAV) get skipped with a warning routed through
+        // `error_tx`. v0.4.5: the per-track conformance check covers
+        // BOTH rate AND length — Suno stems are co-rendered so they
+        // share a single rate and a single length. A stem whose length
+        // differs from the rest by more than `MAX_LENGTH_JITTER_SECS`
+        // is by definition an alien (a stray recording, a different-
+        // generation take, etc.) and gets the same skip-and-warn
+        // treatment as a rate mismatch. The first successful track
+        // sets the project's reference rate + length; subsequent
+        // tracks must match within tolerance.
+        //
+        // Tolerance: 100 ms. Tight enough to obviously catch orphan
+        // recordings (typically seconds different) without rejecting
+        // legitimate Suno stems that may differ by a few frames due
+        // to codec-level packet alignment.
+        const MAX_LENGTH_JITTER_SECS: f32 = 0.1;
+
         let mut tracks = Vec::with_capacity(project.tracks.len());
         let mut sample_rate = 0u32;
+        let mut reference_frames: u64 = 0;
         let mut longest_frames = 0u64;
         for t in &project.tracks {
             let tp = match load_track(project, t) {
@@ -273,14 +284,36 @@ impl Player {
                 }
             };
             if sample_rate == 0 {
+                // First successful track: it sets both the rate and
+                // the reference length the rest must match.
                 sample_rate = tp.sample_rate;
-            } else if tp.sample_rate != sample_rate {
-                let _ = error_tx.send(format!(
-                    "skipped track '{}': {} Hz doesn't match project rate {} Hz \
-                     (resampling not yet supported)",
-                    t.name, tp.sample_rate, sample_rate
-                ));
-                continue;
+                reference_frames = tp.frame_count;
+            } else {
+                let rate_ok = tp.sample_rate == sample_rate;
+                let stem_secs = tp.frame_count as f32 / tp.sample_rate.max(1) as f32;
+                let proj_secs = reference_frames as f32 / sample_rate.max(1) as f32;
+                let length_ok = (stem_secs - proj_secs).abs() <= MAX_LENGTH_JITTER_SECS;
+                if !rate_ok || !length_ok {
+                    let mut whys: Vec<String> = Vec::new();
+                    if !rate_ok {
+                        whys.push(format!(
+                            "rate {} Hz vs project {} Hz",
+                            tp.sample_rate, sample_rate
+                        ));
+                    }
+                    if !length_ok {
+                        whys.push(format!(
+                            "length {:.2}s vs project {:.2}s",
+                            stem_secs, proj_secs
+                        ));
+                    }
+                    let _ = error_tx.send(format!(
+                        "skipped track '{}': {} (resampling / length-fixup not yet supported)",
+                        t.name,
+                        whys.join("; ")
+                    ));
+                    continue;
+                }
             }
             longest_frames = longest_frames.max(tp.frame_count);
             tracks.push(Arc::new(tp));

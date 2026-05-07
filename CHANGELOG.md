@@ -6,6 +6,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); thi
 
 ## [Unreleased]
 
+## [0.4.5] — 2026-04-28
+
+### Changed
+- **`Player::new`'s per-track conformance check now covers BOTH rate AND length.** Previously a track was skipped only on rate mismatch (and on file-load failure). Suno stems are co-rendered, so they share a single rate *and* a single length — a stem whose length differs from the rest by more than 100 ms is by definition an alien (orphan recording, different-generation take, etc.) and gets the same skip-and-warn treatment as a rate mismatch. The first successful track sets the project's reference rate + reference length; subsequent tracks must match within tolerance. Status-bar warning surfaces both reasons when both fail: `"skipped track 'X': rate Y Hz vs project Z Hz; length F1s vs project F2s"`. Tolerance was chosen to absorb codec-level packet-alignment jitter that legitimate Suno output may exhibit (sub-millisecond) without letting through actual orphans (typically seconds different).
+
 ## [0.4.4] — 2026-04-28
 
 ### Fixed
