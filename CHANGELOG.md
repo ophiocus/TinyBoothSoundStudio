@@ -6,6 +6,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); thi
 
 ## [Unreleased]
 
+## [0.4.8] — 2026-04-28
+
+### Fixed
+- **Cleanse hoisted from Mix-tab to top of `app::update()`.** Previously the cleanse only ran inside `mix.rs::show()`, so a user who landed on the Project tab first saw their orphans untouched until they specifically clicked Mix. The cleanse is now a once-per-frame call at the top of `update()` regardless of active tab — orphans clear out the moment a project is open. Cheap-path cost is one `iter().any()` over `project.tracks` (microseconds with the v0.4.7 perf fix already in place); no observable cost on idle Project / Export / Record tabs.
+- **Missing-source orphans are now dropped from the manifest cleanly.** When a `Recorded` orphan's WAV file no longer exists on disk (user moved it via Explorer, manual delete, etc.), the cleanse used to: try `rename` → fail ENOENT, try `copy` → fail ENOENT, push a "could not move" failure into the report, and **restore the orphan into `project.tracks`**. Result: a forever-failing cleanse, status-bar full of red errors, manifest stuck pointing at a ghost. v0.4.8 detects missing source upfront via `src_abs.exists()`; the orphan gets dropped from the manifest with no migration attempt and the count goes into a new `removed_missing_count` field on `CleanseReport`. Status surfaces as `"Cleanse: removed 1 dangling manifest entry/entries (source WAV missing)"`. Clean, terminal, no retry loop.
+
 ## [0.4.7] — 2026-04-28
 
 ### Fixed

@@ -34,8 +34,18 @@ use crate::project::{Project, TrackSource, TRACKS_DIR};
 pub struct CleanseReport {
     /// Number of `Recorded` orphans successfully migrated out.
     pub moved_count: usize,
+    /// Number of orphan manifest entries dropped because their WAV
+    /// file was already gone from disk. There's nothing to migrate
+    /// for these — the user lost the file externally; we just clear
+    /// the dangling reference from the manifest so it stops breaking
+    /// the player on every load. Distinct from `moved_count` so the
+    /// status line can be honest about what happened.
+    pub removed_missing_count: usize,
     /// Per-orphan failures. Surfaced as a multi-line status so the
-    /// user can see which file refused to move and why.
+    /// user can see which file refused to move and why. Reserved for
+    /// real I/O failures (permission denied, cross-device write
+    /// errors, etc.); missing-source orphans go into
+    /// `removed_missing_count` instead.
     pub failures: Vec<MigrationFailure>,
     /// True when the recordings project's existing rate doesn't match
     /// at least one migrated track. Future Mix on the recordings
@@ -57,17 +67,26 @@ impl CleanseReport {
 
     /// Multi-line summary for the status bar / log.
     pub fn summary(&self) -> String {
-        let mut s = if self.failures.is_empty() {
-            format!(
-                "Cleanse: moved {} stray recording(s) out of this Suno project into Recordings.",
+        let mut parts = Vec::new();
+        if self.moved_count > 0 {
+            parts.push(format!(
+                "moved {} stray recording(s) into Recordings",
                 self.moved_count
-            )
+            ));
+        }
+        if self.removed_missing_count > 0 {
+            parts.push(format!(
+                "removed {} dangling manifest entry/entries (source WAV missing)",
+                self.removed_missing_count
+            ));
+        }
+        if !self.failures.is_empty() {
+            parts.push(format!("{} failed", self.failures.len()));
+        }
+        let mut s = if parts.is_empty() {
+            "Cleanse: no-op.".to_string()
         } else {
-            format!(
-                "Cleanse: moved {}, {} failed.",
-                self.moved_count,
-                self.failures.len()
-            )
+            format!("Cleanse: {}.", parts.join("; "))
         };
         if self.recordings_rate_mismatch {
             s.push_str(
@@ -169,6 +188,20 @@ pub fn cleanse_recordings_in_suno_project(project: &mut Project) -> Result<Clean
         // reporting along the way.
         let display_name = orphan.name.clone();
         let src_abs = project_root.join(&orphan.file);
+
+        // Missing-source check (v0.4.8). If the WAV file was deleted
+        // out from under us — common scenario: the user had a v0.3.x
+        // recording-into-Suno bug that landed a take, then the user
+        // moved or deleted the file via Explorer, leaving a dangling
+        // manifest entry. There's nothing to migrate in that case.
+        // Just drop the orphan from the manifest cleanly so the next
+        // Mix-tab visit doesn't keep retrying-and-failing forever.
+        // The user lost the audio externally; we can't recover it.
+        if !src_abs.exists() {
+            report.removed_missing_count += 1;
+            let _ = display_name; // not needed for the missing-source path
+            continue;
+        }
 
         // Mint a fresh id in the recordings project so we never collide
         // with existing recordings even if `track-001` is in use here.
@@ -293,6 +326,7 @@ mod tests {
     fn rate_mismatch_flag_appears_in_summary() {
         let r = CleanseReport {
             moved_count: 1,
+            removed_missing_count: 0,
             failures: vec![],
             recordings_rate_mismatch: true,
         };
@@ -304,6 +338,7 @@ mod tests {
     fn failure_lines_render_in_summary() {
         let r = CleanseReport {
             moved_count: 0,
+            removed_missing_count: 0,
             failures: vec![MigrationFailure {
                 display_name: "stray vocal".into(),
                 error: "rename across devices not permitted".into(),
@@ -313,6 +348,34 @@ mod tests {
         let s = r.summary();
         assert!(s.contains("stray vocal"));
         assert!(s.contains("rename across devices"));
+    }
+
+    #[test]
+    fn missing_source_count_renders_distinctly_from_moved() {
+        // A pure-cleanup report (no migrations, just dangling-entry
+        // removals) reads cleanly without claiming things were "moved".
+        let r = CleanseReport {
+            moved_count: 0,
+            removed_missing_count: 3,
+            failures: vec![],
+            recordings_rate_mismatch: false,
+        };
+        let s = r.summary();
+        assert!(
+            s.contains("removed 3 dangling"),
+            "expected dangling-entry phrasing, got: {s}"
+        );
+        assert!(
+            !s.contains("moved 0"),
+            "shouldn't report '0 moved' when nothing was moved: {s}"
+        );
+    }
+
+    #[test]
+    fn empty_report_says_no_op() {
+        let r = CleanseReport::default();
+        assert!(r.is_empty());
+        assert_eq!(r.summary(), "Cleanse: no-op.");
     }
 
     #[test]

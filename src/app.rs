@@ -837,6 +837,14 @@ impl TinyBoothApp {
 
 impl eframe::App for TinyBoothApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Cleanse protocol (v0.4.8: hoisted from Mix-tab to top of
+        // update so the Project tab and every other surface gets the
+        // benefit — orphans stop showing up the moment the user
+        // opens a project, regardless of which tab they land on
+        // first). Idempotent + cheap on the no-orphan path: a single
+        // iter().any() over project.tracks before any mutation.
+        self.cleanse_active_project();
+
         // Repaint continuously while recording so the visualizer animates.
         if self.session.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(16));
