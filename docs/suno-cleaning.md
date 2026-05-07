@@ -1,5 +1,7 @@
 # Cleaning Suno stems with TinyBooth
 
+![v0.4.x in action: a Suno-imported multitrack project with the Mix-tab console, multitrack waveform lanes, live BS.1770 LUFS metering on the transport bar, and a per-track Correction editor open over the top showing the full processing chain (DC remove / Nyquist clean / 4-band EQ / de-esser / gate / compressor) for one of the auto-seeded Suno-X presets.](assets/docs/suno-cleaning/00-hero.png)
+
 This is the workflow TinyBooth is built around: Suno bundle → cleanup
 → mix → release. Each step uses the v0.4.0 Suno-aware features (per-role
 correction presets, import-time coherence verification, polarity flip,
