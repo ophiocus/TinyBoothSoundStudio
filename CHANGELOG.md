@@ -6,6 +6,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); thi
 
 ## [Unreleased]
 
+## [0.4.2] — 2026-04-28
+
+### Added
+- **Cleanse protocol** for legacy bug residue. Pre-v0.4.0, recordings could be appended to whatever project the user had open at capture time — including imported Suno stem projects. The result: a Suno project's `tracks/` ended up with `TrackSource::Recorded` orphans at the wrong rate, breaking `Player::new`'s uniform-rate check on the next Mix-tab visit. v0.4.2's cleanse runs at the top of every Mix-tab render: scans the active project for `Recorded` entries while `suno_mixdown_path: Some(_)`, moves each WAV out into the recordings filespace via atomic rename (cross-device fallback to copy+delete), mints fresh `track-NNN` ids in the recordings project so we never collide with existing recordings, and removes the orphans from the active project. Every `Track` field is preserved (gain, mute, automation, correction chain, polarity, etc.) — no work lost. Idempotent and cheap when there's nothing to do.
+- New module `src/cleanup.rs` with `cleanse_recordings_in_suno_project(&mut Project) -> Result<CleanseReport>` and 4 unit tests covering empty-report behaviour, rate-mismatch flag rendering, failure-line rendering, and the non-Suno-project no-op path.
+- Status bar surfaces a multi-line `CleanseReport.summary()` after migration: how many moved, any per-file failures with file name + reason, and a ⚠ warning when migrated takes don't match the recordings project's existing rate (which would break Mix on Recordings).
+
 ## [0.4.1] — 2026-04-28
 
 ### Fixed

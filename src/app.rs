@@ -417,6 +417,43 @@ impl TinyBoothApp {
         }
     }
 
+    /// Run the v0.4.2 cleanse protocol on the currently-active project.
+    /// If it's a Suno-shaped project (has `suno_mixdown_path`) and
+    /// contains pre-v0.4.0-bug `Recorded` orphans in its tracks list,
+    /// migrate them out into the recordings filespace, save both
+    /// manifests, and drop the player so it rebuilds without the
+    /// offending tracks.
+    ///
+    /// Idempotent and cheap — early-returns when the active project
+    /// isn't Suno-shaped or has no orphans. Safe to call from the
+    /// Mix-tab `show()` on every visit.
+    pub fn cleanse_active_project(&mut self) {
+        match crate::cleanup::cleanse_recordings_in_suno_project(&mut self.project) {
+            Ok(report) if report.is_empty() => {
+                // No-op; don't clutter status.
+            }
+            Ok(report) => {
+                // Persist the active project (the orphans were removed
+                // from its tracks list); the recordings manifest was
+                // saved inside the cleanse.
+                if let Err(e) = self.project.save() {
+                    self.status = Some(format!(
+                        "cleanse migrated tracks but project save failed: {e:#}"
+                    ));
+                } else {
+                    self.status = Some(report.summary());
+                }
+                // Drop the player so it rebuilds with the new track
+                // count on the next Mix-tab render this same frame.
+                self.player = None;
+                self.player_error = None;
+            }
+            Err(e) => {
+                self.status = Some(format!("cleanse failed: {e:#}"));
+            }
+        }
+    }
+
     /// Open the persistent recordings project as the active project.
     /// Same shape as `open_project_path` but skips the recents-list
     /// bookkeeping (recordings aren't a "project the user is working

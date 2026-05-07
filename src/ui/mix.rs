@@ -38,6 +38,14 @@ const FONT_STRIP_DB: f32 = 12.0;
 const FONT_MASTER_NAME: f32 = 14.0;
 
 pub fn show(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
+    // Cleanse protocol (v0.4.2): if this Suno project still carries
+    // pre-v0.4.0-bug Recorded orphans (recordings appended into the
+    // wrong project's filespace), move them out into the recordings
+    // filespace before the player tries to load them. Idempotent —
+    // returns immediately when there's nothing to do, so the cost
+    // on every Mix-tab render is a couple of branch checks.
+    app.cleanse_active_project();
+
     if app.project.tracks.is_empty() {
         ui.heading("Mix");
         ui.separator();
