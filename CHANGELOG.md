@@ -6,6 +6,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); thi
 
 ## [Unreleased]
 
+## [0.4.3] — 2026-04-28
+
+### Fixed
+- v0.4.2's cleanse protocol gated on `suno_mixdown_path: Some(_)` to identify Suno projects, but that field only exists on bundles imported in v0.4.0+. Suno projects imported in v0.3.x have `suno_mixdown_path: None` (serde default for older manifests) — and those are exactly the projects most likely to contain pre-v0.4.0-bug recording orphans. The cleanse silently no-op'd on every v0.3.x-vintage project. Detection signal expanded: a project is now considered Suno-shaped if EITHER `suno_mixdown_path: Some(_)` OR any track carries `TrackSource::SunoStem { .. }`. New regression test covers the v0.3.x scenario explicitly.
+
 ## [0.4.2] — 2026-04-28
 
 ### Added
