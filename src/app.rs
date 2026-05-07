@@ -92,6 +92,15 @@ pub struct TinyBoothApp {
     // for a project, or when tracks change shape and we need to rebuild).
     pub player: Option<crate::player::Player>,
     pub player_error: Option<String>,
+    /// Project root the most recent `Player::new` attempt failed on.
+    /// Set when the rebuild fails; the Mix-tab lazy-rebuild guard
+    /// checks this and skips re-attempting on every frame for the
+    /// same project, which is the difference between "fans on full
+    /// because we re-allocate 600 MB of WAV samples per render" and
+    /// "fans idle, single error banner". Cleared on project change
+    /// (so opening a different project re-attempts) or on explicit
+    /// Retry click. v0.4.9.
+    pub player_attempt_failed_for: Option<PathBuf>,
     /// Index of the track whose Correction editor is open, if any.
     pub editing_correction_for: Option<usize>,
 
@@ -238,6 +247,7 @@ impl TinyBoothApp {
             md_cache: egui_commonmark::CommonMarkCache::default(),
             player: None,
             player_error: None,
+            player_attempt_failed_for: None,
             editing_correction_for: None,
             show_trim: false,
             trim_state: crate::ui::trim::TrimState::default(),

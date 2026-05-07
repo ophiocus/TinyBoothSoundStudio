@@ -298,6 +298,23 @@ impl Player {
             return Err(anyhow!("project has no tracks"));
         }
 
+        // Cheap output-device probe BEFORE loading any WAVs. v0.4.9:
+        // pre-fix, this check happened inside `build_output_stream`
+        // at the END of `Player::new`, so a machine with no default
+        // output device (no headphones, sound card disabled) caused
+        // the whole 600+ MB of WAV samples to be loaded into memory
+        // first, then thrown away when stream construction failed.
+        // Combined with the per-frame retry from the Mix-tab lazy-
+        // rebuild loop, that produced massive allocator pressure +
+        // frozen UI + fans-on-full. The fix is structural: probe the
+        // device first, cheap-fail immediately, no wasted work.
+        if cpal::default_host().default_output_device().is_none() {
+            return Err(anyhow!(
+                "no default output device — connect headphones or speakers \
+                 (or check Windows sound settings) and click Retry above"
+            ));
+        }
+
         // Load tracks tolerantly. v0.4.4: per-track failures (missing
         // file, corrupt WAV) get skipped with a warning routed through
         // `error_tx`. v0.4.5: the per-track conformance check covers

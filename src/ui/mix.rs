@@ -50,26 +50,44 @@ pub fn show(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
     }
 
     // Lazy-instantiate the player.
-    // Comparing against `project_track_count` (the project's track
-    // count at build time) rather than `state.tracks.len()` (the
-    // surviving-after-tolerant-load count) — see Player::new. A
-    // permanently-broken track row would otherwise trigger a rebuild
-    // every Mix-tab render.
+    //   • `project_track_count` (the project's track count at build
+    //     time) catches "user added or removed a track since build".
+    //     Comparing against `state.tracks.len()` would mismatch every
+    //     frame after a tolerant load and rebuild forever.
+    //   • `player_attempt_failed_for == Some(this root)` (v0.4.9)
+    //     short-circuits the rebuild when the LAST attempt failed for
+    //     this same project. Without this guard, a missing-output-
+    //     device situation re-called `Player::new` every Mix-tab frame
+    //     — even with the output-device cheap-check at the top of
+    //     Player::new (also v0.4.9), that's wasted work + a repaint
+    //     trigger. Cleared on project change (open_project_path) or
+    //     when the user clicks Retry on the error banner.
+    let attempt_already_failed = app
+        .player_attempt_failed_for
+        .as_ref()
+        .map(|p| p == &app.project.root)
+        .unwrap_or(false);
     let need_rebuild = match app.player.as_ref() {
-        None => true,
+        None => !attempt_already_failed,
         Some(p) => p.project_track_count != app.project.tracks.len(),
     };
     if need_rebuild {
         app.player = None;
         app.player_error = None;
         match Player::new(&app.project, app.audio_err_tx.clone()) {
-            Ok(p) => app.player = Some(p),
+            Ok(p) => {
+                app.player = Some(p);
+                app.player_attempt_failed_for = None;
+            }
             // {:#} renders the full anyhow context chain — top-level
             // wrapper plus every `with_context` and underlying I/O
             // error. Without it the user sees "reading track foo.wav"
             // and has no clue whether the file is missing, the WAV
             // header is corrupt, or the path got mangled.
-            Err(e) => app.player_error = Some(format!("{e:#}")),
+            Err(e) => {
+                app.player_error = Some(format!("{e:#}"));
+                app.player_attempt_failed_for = Some(app.project.root.clone());
+            }
         }
     }
 
@@ -79,8 +97,26 @@ pub fn show(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
     // do NOT early-return if a partial player got built. v0.4.4 makes
     // Player::new tolerant, so even after one bad track we may still
     // have a working console with the surviving tracks.
-    if let Some(err) = app.player_error.as_ref() {
-        ui.colored_label(Color32::LIGHT_RED, err);
+    if let Some(err) = app.player_error.clone() {
+        ui.horizontal_wrapped(|ui| {
+            ui.colored_label(Color32::LIGHT_RED, &err);
+            // Retry button (v0.4.9): clears the failed-attempt cache
+            // so the next frame re-runs Player::new. The natural
+            // recovery path when the user plugs in headphones / fixes
+            // their audio device after seeing this banner.
+            if app.player.is_none()
+                && app.player_attempt_failed_for.is_some()
+                && ui
+                    .button("↻ Retry")
+                    .on_hover_text(
+                        "Try to rebuild the player — useful after plugging in audio hardware.",
+                    )
+                    .clicked()
+            {
+                app.player_attempt_failed_for = None;
+                app.player_error = None;
+            }
+        });
     }
     if app.player.is_none() {
         return;

@@ -6,6 +6,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); thi
 
 ## [Unreleased]
 
+## [0.4.9] — 2026-04-28
+
+### Fixed
+- **Missing audio output device froze the Mix tab and spun fans.** When `default_output_device()` returned `None` (no headphones, sound card disabled, etc.), the failure happened at the *end* of `Player::new` — but `Player::new` had already loaded every track WAV into memory by then (~600 MB of `i16` sample arrays for a typical 9-stem Suno project). On Err, those allocations got dropped. The Mix-tab lazy-rebuild then re-called `Player::new` on the next frame because `app.player.is_none()`. Result: 600 MB of WAV decode + allocation per frame, allocator pegged, UI frozen, fans on full. Two fixes:
+  - **`Player::new` now probes the output device first**, before any WAV loading. Fast-fail on no device — bails in microseconds with a clear message ("connect headphones or speakers (or check Windows sound settings) and click Retry above") instead of allocating half a gig only to throw it away.
+  - **Per-frame retry storm killed by failure cache.** New `app.player_attempt_failed_for: Option<PathBuf>` records the project root that the last `Player::new` attempt failed on. The Mix-tab rebuild guard checks against the current project root and short-circuits when they match. Auto-invalidates on project change (root path comparison). Manually invalidated by a new `↻ Retry` button rendered next to the error banner — the natural recovery path when the user plugs in headphones.
+
+### Changed
+- The Mix-tab error banner gains a `↻ Retry` button when there's a failed-rebuild cache. Click rebuilds the player; the natural path back to a working Mix after fixing audio hardware externally.
+
 ## [0.4.8] — 2026-04-28
 
 ### Fixed
