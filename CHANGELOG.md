@@ -6,6 +6,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); thi
 
 ## [Unreleased]
 
+## [0.4.6] — 2026-04-28
+
+### Changed
+- **MSI installer relaunches the app on successful install.** The in-app self-updater spawns `msiexec /passive` and exits so the install can replace the running .exe — but the MSI then ended silently, leaving the user staring at an empty desktop with their session gone. v0.4.6 adds a Type-18 custom action keyed off the installed exe that runs at the end of `InstallFinalize`, so the new version comes up automatically and the user lands back where they were. Gated on `UILevel >= 3 AND NOT Installed` — fires on `/passive` (the self-updater path), `/qr`, `/qf`, and standard double-click installs; skips `/qn` silent corporate deploys, repairs, uninstalls, and modify-installs. Runs under user-context impersonation so the app comes up at the user's integrity level, not elevated. `Return="asyncNoWait"` so msiexec doesn't sit blocked waiting for the app to close.
+
 ## [0.4.5] — 2026-04-28
 
 ### Changed

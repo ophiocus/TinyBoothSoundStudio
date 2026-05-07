@@ -121,6 +121,46 @@
         <Property Id='ARPPRODUCTICON' Value='ProductICO' />
         <Property Id='ARPHELPLINK' Value='https://github.com/ophiocus/TinyBoothSoundStudio'/>
 
+        <!--
+          Launch-after-install custom action (v0.4.6).
+
+          The in-app self-updater (src/git_update.rs) shells out to
+          `msiexec /i ... /passive /norestart` via a RunAs PowerShell.
+          The old TinyBooth process exits as soon as msiexec is
+          spawned so the install can replace the running .exe. By
+          default the MSI then ends silently — the user is left
+          staring at the desktop with the app gone. This custom
+          action relaunches the new exe at the end of a successful
+          install so the user lands back where they were.
+
+          Type 18 custom action (FileKey + ExeCommand): runs the
+          installed exe directly without needing WixUtilExtension,
+          which `cargo-wix` doesn't enable by default. Execute=
+          "immediate" + Impersonate="yes" runs the launched app in
+          the user's session at user-level integrity, not as SYSTEM
+          / elevated. Return="asyncNoWait" so msiexec doesn't sit
+          blocked on the long-running app process.
+
+          Conditions:
+            UILevel >= 3   — fires for /passive, /qr, /qf, full UI;
+                              skips silent /qn corporate deploys.
+                              The self-updater uses /passive (3).
+            NOT Installed  — fires for fresh install + major-upgrade
+                              new-install phase; skips repair,
+                              uninstall, modify (where launching the
+                              app would be unwelcome).
+        -->
+        <CustomAction Id='LaunchApplication'
+                      FileKey='exe0'
+                      ExeCommand=''
+                      Execute='immediate'
+                      Impersonate='yes'
+                      Return='asyncNoWait'/>
+
+        <InstallExecuteSequence>
+            <Custom Action='LaunchApplication' After='InstallFinalize'>UILevel &gt;= 3 AND NOT Installed</Custom>
+        </InstallExecuteSequence>
+
         <UI>
             <UIRef Id='WixUI_FeatureTree'/>
             <Publish Dialog='WelcomeDlg' Control='Next' Event='NewDialog' Value='CustomizeDlg' Order='99'>1</Publish>
