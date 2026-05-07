@@ -54,24 +54,37 @@ pub fn show(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
     }
 
     // Lazy-instantiate the player.
+    // Comparing against `project_track_count` (the project's track
+    // count at build time) rather than `state.tracks.len()` (the
+    // surviving-after-tolerant-load count) — see Player::new. A
+    // permanently-broken track row would otherwise trigger a rebuild
+    // every Mix-tab render.
     let need_rebuild = match app.player.as_ref() {
         None => true,
-        Some(p) => p.state.tracks.len() != app.project.tracks.len(),
+        Some(p) => p.project_track_count != app.project.tracks.len(),
     };
     if need_rebuild {
         app.player = None;
         app.player_error = None;
         match Player::new(&app.project, app.audio_err_tx.clone()) {
             Ok(p) => app.player = Some(p),
-            Err(e) => app.player_error = Some(format!("{e}")),
+            // {:#} renders the full anyhow context chain — top-level
+            // wrapper plus every `with_context` and underlying I/O
+            // error. Without it the user sees "reading track foo.wav"
+            // and has no clue whether the file is missing, the WAV
+            // header is corrupt, or the path got mangled.
+            Err(e) => app.player_error = Some(format!("{e:#}")),
         }
     }
 
     transport_bar(app, ui);
 
+    // Show any player-load error as a banner above the console — but
+    // do NOT early-return if a partial player got built. v0.4.4 makes
+    // Player::new tolerant, so even after one bad track we may still
+    // have a working console with the surviving tracks.
     if let Some(err) = app.player_error.as_ref() {
         ui.colored_label(Color32::LIGHT_RED, err);
-        return;
     }
     if app.player.is_none() {
         return;

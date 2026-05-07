@@ -230,6 +230,12 @@ impl PlayerState {
 /// The owning handle. Drop = stream stop + cleanup.
 pub struct Player {
     pub state: Arc<PlayerState>,
+    /// Number of tracks the project had at build time. The Mix-tab
+    /// rebuild check keys on this rather than `state.tracks.len()`
+    /// — a tolerant load (v0.4.4) may produce fewer surviving tracks
+    /// than the project carries, and we don't want a perpetual rebuild
+    /// loop on every Mix-tab render when one row is permanently bad.
+    pub project_track_count: usize,
     _stream: Stream,
 }
 
@@ -246,25 +252,43 @@ impl Player {
             return Err(anyhow!("project has no tracks"));
         }
 
-        // Load tracks + check sample-rate consistency.
+        // Load tracks tolerantly. v0.4.4: any individual track that
+        // fails to load (missing file, corrupt WAV, wrong rate) gets
+        // skipped with a warning routed through `error_tx` (which the
+        // app surfaces in the status bar). The mix tab still loads and
+        // plays whatever's left, instead of one bad row killing the
+        // whole player. Rate-locked: we adopt the FIRST successful
+        // track's rate as the project rate; subsequent tracks at a
+        // different rate are warned + skipped.
         let mut tracks = Vec::with_capacity(project.tracks.len());
         let mut sample_rate = 0u32;
         let mut longest_frames = 0u64;
         for t in &project.tracks {
-            let tp = load_track(project, t)?;
+            let tp = match load_track(project, t) {
+                Ok(tp) => tp,
+                Err(e) => {
+                    let _ =
+                        error_tx.send(format!("skipped track '{}' ({}): {:#}", t.name, t.file, e));
+                    continue;
+                }
+            };
             if sample_rate == 0 {
                 sample_rate = tp.sample_rate;
             } else if tp.sample_rate != sample_rate {
-                return Err(anyhow!(
-                    "track '{}' has {} Hz but project plays at {} Hz — \
-                     resampling is not yet supported (Phase 3)",
-                    t.name,
-                    tp.sample_rate,
-                    sample_rate
+                let _ = error_tx.send(format!(
+                    "skipped track '{}': {} Hz doesn't match project rate {} Hz \
+                     (resampling not yet supported)",
+                    t.name, tp.sample_rate, sample_rate
                 ));
+                continue;
             }
             longest_frames = longest_frames.max(tp.frame_count);
             tracks.push(Arc::new(tp));
+        }
+        if tracks.is_empty() {
+            return Err(anyhow!(
+                "no tracks loaded successfully — see status bar for per-track reasons"
+            ));
         }
 
         let state = Arc::new(PlayerState {
@@ -289,6 +313,7 @@ impl Player {
 
         Ok(Self {
             state,
+            project_track_count: project.tracks.len(),
             _stream: stream,
         })
     }

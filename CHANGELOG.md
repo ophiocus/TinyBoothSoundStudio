@@ -6,6 +6,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); thi
 
 ## [Unreleased]
 
+## [0.4.4] — 2026-04-28
+
+### Fixed
+- **`Player::new` is now tolerant of per-track failures.** Previously, one missing or unreadable WAV (or a single rate-mismatched row that the cleanse couldn't reach) aborted the whole player and the Mix tab dead-ended on a red error banner. Now each load failure is sent through the audio-error channel as a "skipped track 'X' (file): <reason>" warning that the status bar surfaces, and the player builds from whatever tracks loaded successfully. The fail-fast Err is reserved for the case where *no* track loaded at all.
+- **Mix tab no longer early-returns on `player_error`.** A partial player still renders its console; the error banner stays as a warning above the transport bar instead of replacing it. Combined with the tolerant `Player::new`, you can mix the surviving stems while seeing exactly which row went bad.
+- **Full anyhow error chain in the player-error banner.** `format!("{e}")` only printed the top-level wrapper ("reading track …/track-010.wav") with the actual hound failure (file missing? corrupt header? path mangled?) hidden in the chain. Switched to `format!("{e:#}")` so the underlying cause renders inline.
+- **Mix-tab rebuild loop on permanently-broken track rows.** The lazy-rebuild check compared `state.tracks.len()` (post-tolerant-load survivors) against `project.tracks.len()` (manifest count). With one track permanently failing to load, those values never matched and the player rebuilt every frame — re-loading every WAV every render, re-sending all warnings every render. New `Player.project_track_count` field captures the manifest count at build time; the rebuild check keys on that, so the broken-track case stabilises after one rebuild.
+
 ## [0.4.3] — 2026-04-28
 
 ### Fixed
