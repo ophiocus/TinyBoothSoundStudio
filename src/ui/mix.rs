@@ -369,7 +369,14 @@ fn lanes_view(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
                         ui.label(egui::RichText::new(&track.name).strong());
                         ui.horizontal(|ui| {
                             let mut bypass = track.bypass_correction.load(Ordering::Relaxed);
-                            let has_corr = track.correction().is_some();
+                            // v0.4.7 perf: was `track.correction().is_some()` —
+                            // that took the Mutex and cloned the entire Profile
+                            // (Strings + EQ array + de-ess) every frame, every
+                            // track. Atomic-bool mirror set in lockstep with
+                            // `set_correction` is sufficient for "should the
+                            // A/B button be enabled?" / "show '+ Correction'
+                            // or 'Correction'?".
+                            let has_corr = track.has_correction();
                             ui.add_enabled_ui(has_corr, |ui| {
                                 if ui
                                     .add(egui::SelectableLabel::new(bypass, "A/B"))
@@ -399,16 +406,23 @@ fn lanes_view(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
                 let avail = ui.available_size().x.max(200.0);
                 let (rect, _) =
                     ui.allocate_exact_size(egui::vec2(avail, LANE_H), egui::Sense::hover());
-                draw_lane(
-                    ui,
-                    rect,
-                    &track.peaks,
-                    dur,
-                    pos,
-                    track.frame_count,
-                    track.sample_rate,
-                    track.automation().as_ref(),
-                );
+                // v0.4.7 perf: was `track.automation().as_ref()` — that
+                // cloned the Vec<AutomationPoint> only to take a reference
+                // to the clone for the draw call. Borrow via callback so
+                // the lock is held briefly during draw_lane (microseconds)
+                // with no allocation.
+                track.with_automation(|auto| {
+                    draw_lane(
+                        ui,
+                        rect,
+                        &track.peaks,
+                        dur,
+                        pos,
+                        track.frame_count,
+                        track.sample_rate,
+                        auto,
+                    );
+                });
             });
             ui.add_space(ROW_GAP);
         }

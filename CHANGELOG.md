@@ -6,6 +6,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); thi
 
 ## [Unreleased]
 
+## [0.4.7] — 2026-04-28
+
+### Fixed
+- **Mix-tab CPU / fan-spin**. Three per-frame allocation hot paths killed perf on the Mix tab — measurable as fans spinning up after a few seconds on the tab:
+  - `lanes_view` called `track.correction().is_some()` and `track.automation().as_ref()` once per track per frame. Both methods take a `parking_lot::Mutex` lock and **clone the entire contents** — `Profile` (Strings, 4-band EQ array, de-ess fields) and `AutomationLane` (`Vec<AutomationPoint>`). With 12 tracks at 30 fps that's 720 Profile clones + 720 AutomationLane clones per second, all heap allocation. `TrackPlay` now exposes `has_correction(&self) -> bool` (atomic-bool mirror, no lock) and `with_automation<R>(&self, f: impl FnOnce(Option<&AutomationLane>) -> R) -> R` (callback-style borrow, no clone). Lanes view switched to both. `Profile`/`AutomationLane` cloning is now zero per frame on the Mix tab's idle path.
+  - `cleanup::cleanse_recordings_in_suno_project` ran on every Mix-tab frame and unconditionally `drain()`-ed + rebuilt `project.tracks` even when no orphans were present — pointless heap shuffling on the common-case path. New cheap pre-check (`tracks.iter().any(|t| matches!(t.source, Recorded))`) returns the empty report before any mutation when there's nothing to do.
+- The `correction()` / `automation()` methods are kept on `TrackPlay` as `#[allow(dead_code)]` for non-hot-path callers (project-save sync, future diff logic) — clone-via-lock is the right shape for those, just not for per-frame UI peeks.
+
 ## [0.4.6] — 2026-04-28
 
 ### Changed

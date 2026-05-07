@@ -93,6 +93,12 @@ pub struct TrackPlay {
     /// Current correction profile. UI mutates and bumps the generation.
     correction_profile: Mutex<Option<Profile>>,
     pub correction_generation: AtomicU64,
+    /// Cheap "is correction set?" mirror for the UI. `Profile` is
+    /// expensive to clone (Strings + EQ array + de-ess + …), so the
+    /// lanes view checks this atomic instead of locking + cloning the
+    /// `correction_profile` Mutex on every frame. Updated in lockstep
+    /// with `set_correction`. v0.4.7.
+    correction_present: AtomicBool,
 
     /// Latest automation lane. Audio thread polls a generation counter
     /// to rebuild its `SplineSampler`. None / empty lane = no automation.
@@ -108,20 +114,60 @@ impl TrackPlay {
         self.gain_db_bits.store(db.to_bits(), Ordering::Relaxed);
     }
 
+    /// Snapshot the current correction profile by cloning under a
+    /// brief lock. Reserved for callers that need the actual `Profile`
+    /// (e.g. project-save sync paths). Per-frame UI checks should use
+    /// [`Self::has_correction`] instead — this clones the entire
+    /// `Profile` (Strings + EQ array + de-ess), which on a 30-fps
+    /// repaint with 12 tracks adds up to thousands of heap
+    /// allocations per second.
+    #[allow(dead_code)] // public API for future non-hot-path callers
     pub fn correction(&self) -> Option<Profile> {
         self.correction_profile.lock().clone()
     }
+
+    /// Cheap presence check — atomic load, no Mutex, no Profile clone.
+    /// The lanes view + correction-related buttons use this on every
+    /// frame; clone-via-lock would burn allocator time on a hot path
+    /// that only needs a yes/no. v0.4.7.
+    pub fn has_correction(&self) -> bool {
+        self.correction_present.load(Ordering::Relaxed)
+    }
+
     /// Replace the correction chain. Pass `None` to disable correction
     /// for this track. Bumps the generation counter so the audio thread
     /// rebuilds its local `FilterChainStereo` on its next callback.
     pub fn set_correction(&self, profile: Option<Profile>) {
+        let present = profile.is_some();
         *self.correction_profile.lock() = profile;
+        // Mirror the presence flag for cheap UI reads. Order: write
+        // the Mutex first so a UI thread that sees `present=true`
+        // can lock-and-clone the actual Profile without racing.
+        self.correction_present.store(present, Ordering::Release);
         self.correction_generation.fetch_add(1, Ordering::Release);
     }
 
+    /// Snapshot the current automation lane by cloning under a brief
+    /// lock. Reserved for callers that need an owned `AutomationLane`
+    /// (e.g. saving the project manifest). Per-frame UI use should go
+    /// through [`Self::with_automation`] which holds the lock for a
+    /// callback's duration with no allocation.
+    #[allow(dead_code)] // public API for future non-hot-path callers
     pub fn automation(&self) -> Option<AutomationLane> {
         self.automation_lane.lock().clone()
     }
+
+    /// Borrow the automation lane via a callback without cloning.
+    /// The Mutex is held for the duration of `f`, so the closure
+    /// should be cheap (waveform-curve drawing, not arbitrary work).
+    /// Avoids the per-frame `Vec<AutomationPoint>` clone that
+    /// `automation()` would otherwise do on every lane render.
+    /// v0.4.7.
+    pub fn with_automation<R>(&self, f: impl FnOnce(Option<&AutomationLane>) -> R) -> R {
+        let guard = self.automation_lane.lock();
+        f(guard.as_ref())
+    }
+
     pub fn set_automation(&self, lane: Option<AutomationLane>) {
         *self.automation_lane.lock() = lane;
         self.automation_generation.fetch_add(1, Ordering::Release);
@@ -418,6 +464,7 @@ fn load_track(project: &Project, t: &Track) -> Result<TrackPlay> {
         polarity_inverted: AtomicBool::new(t.polarity_inverted),
         bypass_correction: AtomicBool::new(false),
         correction_profile: Mutex::new(t.correction.clone()),
+        correction_present: AtomicBool::new(t.correction.is_some()),
         correction_generation: AtomicU64::new(1), // ≠0 forces audio thread to build chain on first callback
     })
 }

@@ -121,6 +121,20 @@ pub fn cleanse_recordings_in_suno_project(project: &mut Project) -> Result<Clean
         return Ok(CleanseReport::default());
     }
 
+    // v0.4.7 perf: cheap-check FIRST so the common no-orphan case
+    // doesn't pay the cost of draining + rebuilding `project.tracks`
+    // on every Mix-tab render. The cleanse hook fires on every frame;
+    // a Suno project that's already clean has no orphans 99.9% of the
+    // time, and we want that path to be a single-pass iteration with
+    // zero mutation.
+    let has_orphans = project
+        .tracks
+        .iter()
+        .any(|t| matches!(t.source, TrackSource::Recorded));
+    if !has_orphans {
+        return Ok(CleanseReport::default());
+    }
+
     // Partition: Recorded → orphans, everything else → keep.
     // Walk by index so we can pull out orphans without breaking the
     // remaining indices for the player rebuild that follows.
@@ -134,6 +148,8 @@ pub fn cleanse_recordings_in_suno_project(project: &mut Project) -> Result<Clean
     }
     project.tracks = keep;
 
+    // The has_orphans check above guarantees this is non-empty —
+    // belt-and-suspenders early-return for safety.
     if orphans.is_empty() {
         return Ok(CleanseReport::default());
     }
