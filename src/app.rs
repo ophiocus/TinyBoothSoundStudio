@@ -110,6 +110,15 @@ pub struct TinyBoothApp {
     pub show_trim: bool,
     pub trim_state: crate::ui::trim::TrimState,
 
+    /// Audio-reactive visualizer (v0.4.11). When `show_visualizer` is
+    /// true the central panel is taken over by `ui::visualizer::show`,
+    /// rendering one of four mathematically-grounded modes
+    /// (Lissajous / Mandala / Lorenz / Chladni) driven by the
+    /// master-bus sample tap. Toggled via the 🌀 icon in the top
+    /// menu bar.
+    pub show_visualizer: bool,
+    pub visualizer: crate::ui::visualizer::VisualizerState,
+
     /// Modal dialog shown after every import attempt — success or fail.
     pub import_dialog: Option<crate::suno_import::ImportOutcome>,
 
@@ -251,6 +260,8 @@ impl TinyBoothApp {
             editing_correction_for: None,
             show_trim: false,
             trim_state: crate::ui::trim::TrimState::default(),
+            show_visualizer: false,
+            visualizer: crate::ui::visualizer::VisualizerState::default(),
             import_dialog: None,
             import_conflict: None,
             recorder: crate::automation::Recorder::default(),
@@ -1005,6 +1016,23 @@ impl eframe::App for TinyBoothApp {
                 ui.selectable_value(&mut self.tab, Tab::Mix, "Mix");
                 ui.selectable_value(&mut self.tab, Tab::Export, "Export");
 
+                ui.separator();
+                // 🌀 Visualizer toggle (v0.4.11). Selectable so it
+                // visually highlights while open. Click to take over
+                // the central panel with the audio-reactive canvas;
+                // click again to dismiss.
+                if ui
+                    .selectable_label(self.show_visualizer, "🌀")
+                    .on_hover_text(
+                        "Visualizer — Lissajous, Spectral Mandala, Lorenz attractor, \
+                         Chladni cymatics. Toggle to take over the canvas with audio-reactive \
+                         visuals; click again to return.",
+                    )
+                    .clicked()
+                {
+                    self.show_visualizer = !self.show_visualizer;
+                }
+
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let label = if self.project_dirty {
                         format!("● {}", self.project.name)
@@ -1062,11 +1090,21 @@ impl eframe::App for TinyBoothApp {
             return;
         }
 
-        egui::CentralPanel::default().show(ctx, |ui| match self.tab {
-            Tab::Record => ui::record::show(self, ui),
-            Tab::Project => ui::project::show(self, ui),
-            Tab::Mix => ui::mix::show(self, ui),
-            Tab::Export => ui::export::show(self, ui),
+        egui::CentralPanel::default().show(ctx, |ui| {
+            // Visualizer takes over the central panel when toggled on.
+            // The user closes via the ✖ button inside the canvas, the
+            // 🌀 menu icon, or by switching tabs (we keep the active
+            // tab so they return to where they were).
+            if self.show_visualizer {
+                ui::visualizer::show(self, ui);
+                return;
+            }
+            match self.tab {
+                Tab::Record => ui::record::show(self, ui),
+                Tab::Project => ui::project::show(self, ui),
+                Tab::Mix => ui::mix::show(self, ui),
+                Tab::Export => ui::export::show(self, ui),
+            }
         });
 
         // Mix-tab transport runs continuously while playing — repaint so

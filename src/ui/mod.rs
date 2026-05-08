@@ -10,4 +10,5 @@ pub mod project;
 pub mod record;
 pub mod trim;
 pub mod update_dialog;
+pub mod visualizer;
 pub mod viz;

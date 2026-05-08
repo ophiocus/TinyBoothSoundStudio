@@ -217,7 +217,20 @@ pub struct PlayerState {
     /// `Project.corrections_disabled` at load and from either the
     /// persisted-disable button or the ephemeral A/B button. Added v0.3.4.
     pub global_bypass: AtomicBool,
+
+    /// Master-bus stereo sample tap (v0.4.11). The audio thread pushes
+    /// the most recent `OUTPUT_VIZ_LEN` post-fader L/R samples here;
+    /// the visualizer canvas (UI thread) snapshots the buffer when
+    /// rendering. parking_lot::Mutex keeps the lock window tiny —
+    /// well under any cpal callback budget.
+    pub output_viz: Mutex<std::collections::VecDeque<(f32, f32)>>,
 }
+
+/// Length of the master-bus sample tap in stereo frames. ~85 ms at
+/// 48 kHz — enough for the Lissajous trail and the FFT window the
+/// spectral-mandala mode wants, small enough that lock contention
+/// stays sub-microsecond.
+pub const OUTPUT_VIZ_LEN: usize = 4096;
 
 impl PlayerState {
     pub fn play_state(&self) -> PlayState {
@@ -402,6 +415,7 @@ impl Player {
             master_momentary_lufs_bits: AtomicU32::new(f32::NAN.to_bits()),
             master_integrated_lufs_bits: AtomicU32::new(f32::NAN.to_bits()),
             global_bypass: AtomicBool::new(project.corrections_disabled),
+            output_viz: Mutex::new(std::collections::VecDeque::with_capacity(OUTPUT_VIZ_LEN)),
         });
 
         let stream = build_output_stream(state.clone(), error_tx)?;
@@ -727,6 +741,19 @@ fn build_output_stream(
                 // muls + adds per frame).
                 if play_state == PlayState::Playing {
                     lufs_meter.push(out_l, out_r);
+                }
+
+                // Master-bus sample tap for the visualizer (v0.4.11).
+                // Always pushed — even at silence — so the viz canvas
+                // shows a stable centre dot rather than NaN'ing out
+                // when nothing's playing. Brief lock; parking_lot
+                // makes the contention path fast.
+                {
+                    let mut buf = state.output_viz.lock();
+                    if buf.len() >= OUTPUT_VIZ_LEN {
+                        buf.pop_front();
+                    }
+                    buf.push_back((out_l, out_r));
                 }
 
                 out[f * 2] = out_l;

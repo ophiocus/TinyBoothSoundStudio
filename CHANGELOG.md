@@ -6,6 +6,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); thi
 
 ## [Unreleased]
 
+## [0.4.11] — 2026-05-08
+
+### Added
+- **🌀 Audio-reactive visualizer** — toggleable full-window canvas accessible from the menu bar. Click the icon to take over the central panel; click again to return. Four mathematically-grounded modes, all on egui's 2D painter (no GPU shaders, no extra deps):
+  - **Lissajous goniometer** — XY plot of master-bus L vs R with phosphor-trail alpha gradient. Reveals stereo image geometry at a glance: mono content draws a vertical line, anti-phase draws a horizontal 45° line, full stereo draws organic figure-8s. Crosshair guides for the canonical phase angles.
+  - **Spectral mandala** — radial FFT, frequencies arranged around the centre with magnitude as petal length. Mirrored across the X axis for mandala symmetry. Hue tracks frequency: warm reds at the bass end, cool cyans at the treble. Tonal balance becomes literally glanceable.
+  - **Lorenz attractor (audio-modulated)** — RK4 integration of the Lorenz ODE with σ / ρ / β tugged in real time by spectral centroid and RMS. The strange attractor breathes with the music; auto-fitting projection keeps the orbit centred regardless of parameter drift. Trail of 2000 points coloured by recency through a hue gradient.
+  - **Chladni cymatics** — superposition of ten of Ernst Chladni's classic eigenmodes (sin·sin combinations on the unit square) weighted by FFT band energies. Renders the actual mathematical eigenmodes Chladni discovered in 1787. Slow phase drift keeps the figure animated even on steady-state input.
+- **Master-bus sample tap** on `PlayerState.output_viz` — `parking_lot::Mutex<VecDeque<(f32, f32)>>` of length `OUTPUT_VIZ_LEN` (4096 stereo frames, ~85 ms at 48 kHz). Audio thread pushes post-fader L/R samples on every callback; UI thread snapshots when rendering the visualizer. Brief lock window keeps the audio callback within budget.
+- 4 unit tests on the visualizer's pure helpers: RK4 Lorenz integrator stays bounded over 10k steps on default chaotic parameters; HSV → RGB conversion handles primary colours and zero-value black correctly.
+
+### Research notes
+The mode selection synthesises a brief literature scan covering: cymatics / Chladni patterns ([CymaVis](https://cymavis.com/), [Cymatica](https://www.cymatica.app/)), audio-reactive Lorenz visualizers ([3D Music Visualizer](https://github.com/hederhayat/Lorenz-3D-Music-Visualizer), Cherry Audio's Lorenz module), radial-FFT analyzers ([audioMotion](https://github.com/hvianna/audioMotion-analyzer), WaveForge), and phase-space portraits in audio research ([Audio Visualization in Phase Space](https://www.semanticscholar.org/paper/Audio-Visualization-in-Phase-Space-Gerhard/df1b84bc0c759708de2fe657df777d38027b950b), Royal Society's [phasegram paper](https://royalsocietypublishing.org/rsif/article/10/85/20130288)). Reaction-diffusion (Gray-Scott) was considered and skipped — needs GPU shaders to run real-time at fullscreen, scope creep for v0.4.x.
+
 ## [0.4.10] — 2026-04-28
 
 ### Added
