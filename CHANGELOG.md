@@ -6,6 +6,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); thi
 
 ## [Unreleased]
 
+## [0.4.12] — 2026-05-08
+
+### Added
+- **New visualizer mode: "Onion Skin" (multi-timescale trajectory)** — addresses the long-standing critique that audio visualizers are derivative-of-NOW and never show the volumes / cadences / colors a listener navigates while listening. Plots `(spectral_centroid, RMS)` as motion through 2D feature space with three layers of temporal memory: bright recent trail (note / beat scale), faded ghost trail (phrase scale, ~30 s), and a session-wide residency watermark heatmap (section / song scale). Optional anticipated-future projection extends the trajectory linearly via recent-direction averaging. The first mode designed against the "memoryless visualisation is sterile" critique articulated in `docs/sound-vision-philosophy.md`. Axis labels (soft↔loud, dark↔bright) so the listener orients at a glance.
+- **Collapsible left-side config panel** in the visualizer screen exposing every per-mode parameter as a slider / checkbox. Every control has a `.on_hover_text(...)` helper explaining what it does, what good values look like, and where defaults came from. Toggle visibility via the new "◀ Hide config" / "▶ Show config" button next to the heading.
+- **Temporal smoothing** for the modes that benefit:
+  - **Mandala** — exponential moving average on the spectrum (default α=0.6, slider 0..0.95). Reduces jitter without losing responsiveness; reveals the steady-state structure underneath the transient flicker.
+  - **Onion Skin** — EMA on the (centroid, RMS) point before plotting (default 0.5). Trades note-level reactivity for trajectory readability.
+- **Per-mode parameter structs** (`LissajousParams`, `MandalaParams`, `LorenzParams`, `ChladniParams`, `OnionSkinParams`) on `VisualizerParams`. Defaults reproduce v0.4.11 behaviour exactly; existing users see the same modes unless they tweak the new sliders.
+- New top-bar "Hide config" / "Show config" toggle and per-mode hover descriptions on the mode buttons.
+
+### Documentation
+- New essay: **[`docs/sound-vision-philosophy.md`](docs/sound-vision-philosophy.md)** — long-form engagement with the question of what it means to transform sound into vision. Argues most audio viz is sterile because it operates only at the sample / note timescale while listeners parse music at five hierarchical timescales simultaneously. Maps "volumes / cadences / colors" onto those timescales. Develops the "onion skin" insight (each visualised moment contextualised by its neighbors across multiple timescales). Includes a substantial DSP detour: the v0.4.11 Mandala's visible jerkiness on AI-generated audio is a *real diagnostic signal* — AI audio has band-decorrelated micro-fluctuations where natural recordings have correlated ones. Sketches a "Coherence Restoration" filter as a v0.5+ feature that would smooth this signature in the modulation domain, taking AI output meaningfully closer to "sounds like a recording". Linked from the README's contributor docs.
+
+### Changed
+- README's contributor-docs section now links the new philosophy essay alongside `design-vibes.md`.
+
 ## [0.4.11] — 2026-05-08
 
 ### Added

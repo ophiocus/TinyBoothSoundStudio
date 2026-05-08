@@ -46,6 +46,7 @@ For developers / contributors:
 
 - **[`docs/architecture.md`](docs/architecture.md)** — current application anatomy: module map, threading model, three principal flows, schema versioning, build & release pipeline.
 - **[`docs/design-vibes.md`](docs/design-vibes.md)** — creative brief for the visual / tactile direction. Frame of mind, sound-visualization explorations, tactile mini-game-feel controls, and a sober "what would actually ship next." Read when planning a polish or visualization push.
+- **[`docs/sound-vision-philosophy.md`](docs/sound-vision-philosophy.md)** — long-form essay on what it means to transform sound into vision. Why most audio visualizers are sterile, the multi-timescale structure of musical experience, the "onion-skin" insight, the AI-fingerprint diagnostic that shaped the visualizer's design — and the mathematics underneath each of the visualizer's modes.
 - **[`docs/rust-survival-guide.md`](docs/rust-survival-guide.md)** — opinionated field manual for shipping Rust desktop apps. Project structure, error handling, threading, GUI patterns, serialisation compatibility, build/dist, CI, self-update, logging, testing, dependency hygiene, performance, security.
 - **[`docs/audit/`](docs/audit/)** — periodic clinical audits of the codebase with categorised findings and prioritised refactor suggestions. Latest: [2026-04-27 (v0.3.5)](docs/audit/2026-04-27-codebase-audit.md).
 - **[`docs/feature-requests/`](docs/feature-requests/)** — formal RFCs (TBSS-FR-NNNN) for past and proposed features.
