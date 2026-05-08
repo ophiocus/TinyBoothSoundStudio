@@ -6,6 +6,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); thi
 
 ## [Unreleased]
 
+### Known issue — in-app updater / CI sync window
+
+If the user has the app open at the moment a new release is published, the bottom-bar version label keeps showing the current install indefinitely — `git_update::check_latest_release` only fires **once at app startup**, not periodically. Workaround today: click the version label in the bottom-left to retrigger the check, or restart the app. Manifested concretely on the v0.4.12 release: CI completed at 16:06:50Z and the GitHub release went live, but a session opened before that timestamp didn't see the new version until the user clicked the label.
+
+Proposed fix (queued for a follow-up patch): re-run the background check on a 5-minute timer while the app is idle, AND on every tab change. Both are cheap, both are bounded, and either one closes the window. ~30 LOC in `src/git_update.rs` plus a `last_check_at: Option<Instant>` field. No new deps.
+
 ## [0.4.12] — 2026-05-08
 
 ### Added
