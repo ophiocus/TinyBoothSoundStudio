@@ -20,14 +20,15 @@ If the input is hot before TinyBooth even sees it (the level is high before the 
 
 ## Export options are greyed out with "(ffmpeg missing)"
 
-Cause: the FLAC/MP3/Ogg/M4A encoders need an `ffmpeg.exe` somewhere TinyBooth can find it.
+Cause: TinyBooth ships a bundled `ffmpeg.exe` next to the main binary in any **MSI install** — so this should never happen on a release-installed copy. You're seeing this if you're running a **source build** (`cargo run`, `cargo build --release`) without an ffmpeg on `PATH` or in the target dir.
 
-Fix:
+Fix on a source build:
 1. Drop `ffmpeg.exe` in the same folder as `tinybooth-sound-studio.exe`, OR
-2. Drop the official ffmpeg release zip's `bin/` folder under `ffmpeg/bin/` next to the exe, OR
-3. Install ffmpeg system-wide: `winget install Gyan.FFmpeg` (then reopen TinyBooth).
+2. Install ffmpeg system-wide: `winget install Gyan.FFmpeg` (then reopen TinyBooth).
 
-WAV export always works without ffmpeg.
+If you're seeing this on an MSI-installed copy, the bundled `ffmpeg.exe` may be missing from the install dir — try reinstalling from the latest GitHub release.
+
+WAV export always works without ffmpeg, in any case.
 
 ## Self-update click does nothing
 

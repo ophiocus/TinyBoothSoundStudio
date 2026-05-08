@@ -39,6 +39,6 @@ Switch to the **Project** tab. Your take appears as a row with a name, source, s
 
 ## 6. Export when ready
 
-Switch to the **Export** tab. WAV is always available; FLAC / MP3 / Ogg / M4A appear if `ffmpeg.exe` is reachable (next to the app, in `./ffmpeg/bin/`, or on your PATH).
+Switch to the **Export** tab. WAV is always available; FLAC / MP3 / Ogg / M4A are also ready out of the box because TinyBooth ships a static-LGPL `ffmpeg.exe` bundled inside the MSI installer. No separate download or PATH plumbing needed.
 
 Pick a format, click **Export…**, choose a destination. That's it.

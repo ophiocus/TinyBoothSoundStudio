@@ -15,15 +15,21 @@ Mixes all unmuted tracks in the current project to a single audio file. The outp
 
 WAV is built in and always works. Everything else is dispatched to a bundled ffmpeg subprocess. If ffmpeg isn't found, the dropdown still shows those formats but they're disabled with an `(ffmpeg missing)` suffix.
 
-## Where ffmpeg is searched for
+## Where ffmpeg comes from
 
-In order:
+The MSI installer ships a static-LGPL build of `ffmpeg.exe` (sourced from [BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds)) and drops it next to `tinybooth-sound-studio.exe` in the install dir. Nothing for the user to do. FLAC / MP3 / Ogg / M4A export works out of the box on a fresh install.
 
-1. `ffmpeg.exe` next to the running TinyBooth exe.
-2. `ffmpeg/bin/ffmpeg.exe` next to the running exe (matches the Suno-style bundled layout).
+For dev / source builds, TinyBooth's discovery still falls back through the legacy paths in this order:
+
+1. `ffmpeg.exe` next to the running TinyBooth exe (where the MSI install drops it).
+2. `ffmpeg/bin/ffmpeg.exe` next to the running exe.
 3. `ffmpeg` or `ffmpeg.exe` on the system `PATH`.
 
-If you install ffmpeg via `winget install Gyan.FFmpeg` and reopen TinyBooth, all formats become available. No restart needed beyond a fresh process.
+So `cargo run` from the repo will use whatever ffmpeg you have on `PATH` if any (or no formats beyond WAV if you don't).
+
+### Licensing & attribution
+
+The bundled ffmpeg is the LGPL v2.1+ build (no GPL components, no patent-encumbered codecs we don't need). TinyBooth invokes it as a separate executable via subprocess, which is the LGPL-compliant integration mode for non-free apps. FFmpeg source is available from the [FFmpeg project](https://ffmpeg.org/) and BtbN's [build pipeline](https://github.com/BtbN/FFmpeg-Builds) (the exact build this MSI bundles).
 
 ## Mixdown algorithm
 

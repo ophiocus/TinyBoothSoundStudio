@@ -71,6 +71,26 @@
                                 Source='$(var.CargoTargetBinDir)\tinybooth-sound-studio.exe'
                                 KeyPath='yes'/>
                         </Component>
+                        <!--
+                          Bundled static LGPL ffmpeg (v0.4.10). The CI
+                          workflow downloads BtbN's nightly LGPL build,
+                          extracts the single .exe, and drops it next
+                          to the main binary. TinyBooth's export.rs
+                          discovery checks `<exe_dir>\ffmpeg.exe`
+                          first, so this lights up FLAC / MP3 / Ogg /
+                          M4A export immediately on a fresh install
+                          with no user setup. ~120 MB on disk — the
+                          single biggest contributor to install size,
+                          worth it for the "Just Works" feel.
+                        -->
+                        <Component Id='binary_ffmpeg' Guid='*'>
+                            <File
+                                Id='ffmpeg_exe'
+                                Name='ffmpeg.exe'
+                                DiskId='1'
+                                Source='$(var.CargoTargetBinDir)\ffmpeg.exe'
+                                KeyPath='yes'/>
+                        </Component>
                     </Directory>
 
                     <Component Id='DesktopShortcut' Guid='374063C9-D0B6-4E16-A3EB-BA80A6D47E8B'>
@@ -103,6 +123,7 @@
             Display='expand'
             Absent='disallow'>
             <ComponentRef Id='binary0'/>
+            <ComponentRef Id='binary_ffmpeg'/>
             <ComponentRef Id='DesktopShortcut'/>
 
             <Feature

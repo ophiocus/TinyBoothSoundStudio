@@ -53,6 +53,40 @@ jobs:
       - name: Build release
         run: cargo build --release
 
+      - name: Bundle static ffmpeg (LGPL)
+        # v0.4.10: TinyBooth ships a statically-linked LGPL ffmpeg.exe
+        # in the install dir, so FLAC / MP3 / Ogg / M4A export Just
+        # Works without the user having to scavenge a binary off the
+        # internet. ~120 MB single .exe — bigger MSI but no DLL hell
+        # and no dependency on system PATH.
+        #
+        # Source: BtbN's well-known nightly LGPL build. Static, no
+        # shared libs, no GPL components, no patent-encumbered codecs
+        # we don't need (libfdk-aac etc.). The export tab uses native
+        # AAC via ffmpeg's built-in `aac` encoder — quality is fine
+        # for the stem-mix workflow.
+        #
+        # Attribution: TinyBooth ships an LGPL ffmpeg per the LGPL
+        # v2.1+; the Export-tab manual + README link to the FFmpeg
+        # source mirror, which is the compliance ask.
+        shell: pwsh
+        run: |
+          $url = 'https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-lgpl.zip'
+          $zip = "$env:TEMP\ffmpeg-lgpl.zip"
+          $extract = "$env:TEMP\ffmpeg-lgpl"
+          Write-Host "Downloading $url"
+          Invoke-WebRequest $url -OutFile $zip
+          Expand-Archive $zip -DestinationPath $extract -Force
+          $exe = Get-ChildItem -Path $extract -Recurse -Filter 'ffmpeg.exe' | Select-Object -First 1
+          if (-not $exe) {
+            Write-Error "ffmpeg.exe not found in extracted archive"
+            exit 1
+          }
+          $dest = "target\release\ffmpeg.exe"
+          Copy-Item $exe.FullName -Destination $dest -Force
+          $size = [math]::Round((Get-Item $dest).Length / 1MB, 1)
+          Write-Host "Bundled ffmpeg.exe ($size MB) at $dest"
+
       - name: Install cargo-wix
         run: cargo install cargo-wix
 

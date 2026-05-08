@@ -14,7 +14,7 @@ Channel recorder, visualizer, and TinyBooth project exporter. Native Rust + egui
 2. **Verify** — every import runs a coherence pass: sum the stems at unity, subtract the mixdown, flag any stem that's polarity-flipped or doesn't compose into the bundled mix. Surfaced in the import-result dialog and the rotating per-import log.
 3. **Clean** — per-stem DC-offset trim, top-octave Nyquist cleanup for AI shimmer, one-click polarity flip (`Ø` button on every channel strip), and a fully editable processing chain (HPF / 4-band EQ / de-esser / gate / compressor / makeup) attached to each stem. Sensible defaults out of the box; tuneable from the Mix tab's per-track Correction window.
 4. **Mix** — multitrack lanes with synchronized playhead, per-track fader + recordable Catmull-Rom volume automation, per-track A/B against the unprocessed source, global Disable for a quick before/after of the whole project. Master bus shows live BS.1770-4 LUFS (momentary + integrated), measured against the bundled Suno mixdown's own loudness so you can target streaming (Spotify −14, Apple Music −16, broadcast −23) without guessing.
-5. **Export** — mixdown to WAV native, or FLAC / MP3 / Ogg Vorbis / Ogg Opus / M4A-AAC via `ffmpeg` dropped next to the exe (or on `PATH`).
+5. **Export** — mixdown to WAV native, or FLAC / MP3 / Ogg Vorbis / Ogg Opus / M4A-AAC via the bundled static-LGPL `ffmpeg.exe` (shipped inside the MSI; no separate download needed).
 
 **The other path: capture your own takes.** Pick an input device, choose channel or stereo L/R, hit ⏺. Live scrolling waveform + FFT spectrum + peak meter while recording. Each take lands in its own WAV under the project folder, processed through the active recording-tone preset (Guitar default; Vocals / Wind / Drums / Raw also shipped). Recorded takes mix alongside Suno stems as if they were just more tracks — layer your own playing over (or in place of) what Suno produced.
 
@@ -108,3 +108,5 @@ cargo wix
 Current version: see [Releases](https://github.com/ophiocus/TinyBoothSoundStudio/releases). Feature requests live under [`docs/feature-requests/`](docs/feature-requests/).
 
 Built with Rust + [egui](https://github.com/emilk/egui) · [cpal](https://github.com/RustAudio/cpal) · [hound](https://github.com/ruuda/hound) · [rustfft](https://github.com/ejmahler/RustFFT) · [biquad](https://github.com/korken89/biquad-rs).
+
+Ships a static-LGPL build of [FFmpeg](https://ffmpeg.org/) (sourced from [BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds)) bundled inside the MSI. FFmpeg is licensed under the LGPL v2.1+; source available from the FFmpeg project. TinyBooth uses it as a separate executable, invoked as a subprocess from the Export tab.

@@ -1036,6 +1036,17 @@ impl eframe::App for TinyBoothApp {
                 }
             });
         });
+
+        // Modal overlay during the MSI download. The bundled ffmpeg
+        // (~120 MB) made the download big enough to warrant a real
+        // dialog with rotating tips instead of a tiny "downloading…"
+        // bottom-bar label. See src/ui/update_dialog.rs.
+        if matches!(
+            self.update_state,
+            crate::git_update::UpdateState::Downloading(_)
+        ) {
+            crate::ui::update_dialog::show(ctx);
+        }
         if should_close_for_update {
             // Stop any in-flight recording first so the WAV writer
             // finalises its header before Drop. Save is implicit via

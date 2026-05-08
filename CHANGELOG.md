@@ -6,6 +6,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); thi
 
 ## [Unreleased]
 
+## [0.4.10] — 2026-04-28
+
+### Added
+- **Bundled static-LGPL ffmpeg.** TinyBooth's MSI now ships a `ffmpeg.exe` next to the main binary, sourced from [BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds)'s nightly LGPL build. FLAC / MP3 / Ogg Vorbis / Ogg Opus / M4A-AAC export Just Works on a fresh install — no separate download, no PATH plumbing, no scavenging binaries off the internet. Trade-off: install size jumps from ~10 MB to ~130 MB. CI workflow downloads + extracts `ffmpeg.exe` to `target/release/` before `cargo wix` packages the MSI; new `binary_ffmpeg` `<Component>` in `wix/main.wxs` references it. License attribution lives in the README's "Built with" line and the Export-tab manual chapter — TinyBooth uses ffmpeg as a separate subprocess (the LGPL-compliant integration mode for non-free apps).
+- **Update-download dialog with rotating fortune-cookie tips.** The bigger MSI means a longer self-update download; the existing tiny `"downloading…"` label in the bottom bar got old fast. New `src/ui/update_dialog.rs` shows a centred modal overlay during `UpdateState::Downloading(_)` with a spinner, a one-line note explaining why the download is heftier, and a rotating tip card cycling through 22 workflow facts every 6 seconds (recordings filespace, polarity flip, LUFS targets, F1, per-role presets, the cleanse, trim, automation arm, A/B, coherence, Suno-X chains, recordings list ▶, DC remove, polarity-as-debug-tool, etc.). Hooked from `app::update()` after the bottom-bar render — no-op when `update_state` isn't `Downloading`.
+
+### Documentation
+- README's "What it does" Export bullet, manual chapter `01-getting-started.md`, manual chapter `06-export.md`, and `appendix-a-troubleshooting.md` rewritten to reflect the bundled `ffmpeg.exe`. The manual now distinguishes MSI-installed copies (ffmpeg is there, do nothing) from source builds (legacy fallback paths still apply).
+- README's "Built with" line gains the FFmpeg attribution + LGPL pointer.
+
 ## [0.4.9] — 2026-04-28
 
 ### Fixed
