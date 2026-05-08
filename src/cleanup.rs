@@ -445,6 +445,7 @@ mod tests {
             correction: None,
             gain_automation: None,
             polarity_inverted: false,
+            telemetry: None,
         });
 
         let suno_shaped = p.suno_mixdown_path.is_some()

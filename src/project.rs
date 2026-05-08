@@ -118,6 +118,7 @@ impl Track {
             correction: None,
             gain_automation: None,
             polarity_inverted: false,
+            telemetry: None,
         }
     }
 
@@ -162,6 +163,7 @@ impl Track {
             correction: None,
             gain_automation: None,
             polarity_inverted: false,
+            telemetry: None,
         }
     }
 }
@@ -243,6 +245,17 @@ pub struct Track {
     /// Added v0.4.0; older manifests default to false.
     #[serde(default)]
     pub polarity_inverted: bool,
+
+    /// **Track telemetry** — pure-DSP audio analysis baked at first save
+    /// (post-import for stems, post-recording-stop for takes). Persisted
+    /// in the manifest so we don't re-analyze on every load. Drives the
+    /// Mix-tab lane chips (brightness, sustain, density, drum-kit
+    /// counts) and the Project Health panel. None until analysis lands;
+    /// re-computed when the WAV changes (e.g. after Trim).
+    /// See [`crate::telemetry`] for the analyzer and TBSS-FR-0005 for
+    /// the design rationale. Added v0.4.13.
+    #[serde(default)]
+    pub telemetry: Option<crate::telemetry::TrackTelemetry>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -436,6 +449,7 @@ mod tests {
                 ],
             }),
             polarity_inverted: true,
+            telemetry: None,
         }
     }
 

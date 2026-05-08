@@ -1,6 +1,7 @@
 pub mod admin;
 pub mod correction;
 pub mod export;
+pub mod health;
 pub mod import_conflict;
 pub mod import_dialog;
 pub mod manual;

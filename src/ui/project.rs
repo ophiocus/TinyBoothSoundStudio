@@ -36,6 +36,17 @@ pub fn show(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
         {
             app.show_trim = true;
         }
+        if ui
+            .button("📊  Project Health…")
+            .on_hover_text(
+                "Per-track telemetry summary, analyzer status, and metadata weight. \
+                 Telemetry is the brightness / sustain / density / drum-event data \
+                 baked at first save.",
+            )
+            .clicked()
+        {
+            app.show_health = true;
+        }
     });
     ui.horizontal_wrapped(|ui| {
         ui.label("Folder:");

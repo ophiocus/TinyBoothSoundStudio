@@ -241,12 +241,19 @@ fn apply_trim(app: &mut TinyBoothApp, start_secs: f32, end_secs: f32) {
                 trim::format_time_secs((report.end_secs - report.start_secs).max(0.0));
             app.trim_state.cached_for_root = None; // forces re-load on next frame
             app.project_dirty = true;
+            // The WAVs all changed under us — every track's telemetry is
+            // now stale. Clear it so the next dispatch re-analyzes.
+            // (TBSS-FR-0005 §"Lifecycle" — re-analyze after Trim.)
+            for t in &mut app.project.tracks {
+                t.telemetry = None;
+            }
             // Save immediately so a crash before the next manual save
             // doesn't lose the manifest update; the WAVs on disk are
             // already mutated, so the manifest and disk drift if we
             // postpone.
             app.save_project();
             app.trim_state.status = Some(report.summary_line());
+            app.dispatch_telemetry_for_active_project();
         }
         Err(e) => {
             app.trim_state.status = Some(format!("Trim failed: {e:#}"));

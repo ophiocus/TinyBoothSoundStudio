@@ -12,6 +12,29 @@ If the user has the app open at the moment a new release is published, the botto
 
 Proposed fix (queued for a follow-up patch): re-run the background check on a 5-minute timer while the app is idle, AND on every tab change. Both are cheap, both are bounded, and either one closes the window. ~30 LOC in `src/git_update.rs` plus a `last_check_at: Option<Instant>` field. No new deps.
 
+## [0.4.13] — 2026-05-08
+
+### Added
+- **Per-track audio telemetry — pure-DSP analysis baked at first save** (TBSS-FR-0005). Every imported stem and every recorded take is now analyzed in the background by a dedicated worker thread and the result is persisted on `Track.telemetry` inside the `.tinybooth` manifest. No ML, no LLM, no service calls — just rustfft + a single STFT pass per track. The first phase ships these features:
+  - **Spectral character**: spectral centroid (brightness), spectral flatness (Wiener entropy — tonal vs. noisy), 85% spectral rolloff. Means and standard deviations across the track.
+  - **Dynamics**: RMS dB (mean + stddev), peak dBFS, crest factor (peak / RMS).
+  - **Rhythmic articulation**: spectral-flux onset detection with adaptive median + k·MAD threshold. Reports onset count, onset rate (Hz), and a sustain ratio (fraction of frames within 10 dB of the loudest moment).
+  - **Mood proxies**: arousal in `[0,1]` (weighted blend of RMS, onset rate, centroid) and a phase-1 valence stub in `[-1,1]` (centroid × tonality). Surfaced as a small coloured pip whose hue tracks valence (cool blue ↔ warm yellow) and whose saturation tracks arousal.
+- **Drum-kit class detection** for stems whose role is `Drums` or `Percussion` — gated on role per the design spec, so the kick/snare/hat classifiers never run on vocals or pads. Algorithm is **multi-band parallel onset detection** (Option B from the design discussion): one STFT pass, five frequency-band energy curves (`SUB 40-120Hz`, `LOW_MID 80-300`, `MID 200-800`, `HIGH_MID 1.5k-5k`, `HIGH 5k-12k`), per-band spectral-flux onset detectors fire independently. Each event gets:
+  - **class** (Kick / Snare / HiHat / Tom / Cymbal / Other) decided by which bands the onset lands in plus a harmonic-content test (HNR > 15 in the 100ms post-onset window) for kick-vs-tom disambiguation,
+  - **velocity** normalised flux peak,
+  - **decay_ms** measured peak → 30 % energy.
+- **Mix-tab telemetry chips** under each track lane's name, pulled from the manifest. Phase-1 chip vocabulary: `☀` bright, `🌙` dark, `≈` sustained, `⚡` percussive, `▦` dense. Drum stems additionally show counts: `K12 S8 h31 T2 C4`. Hover any chip for the underlying numerics. Mood pip on the right edge of the chip strip.
+- **Project Health panel** (Project tab → "📊 Project Health…"). Modal showing per-track analyzer status, mood readout (arousal · valence), drum-event roll-up, and **metadata weight** in bytes (computed via JSON serialisation of each `TrackTelemetry`). Where "Infinity events vs. cap" got resolved: no event cap, but the user can see the cost and decide whether to compact in a future build. Live "Analyzing N/M…" progress while a batch is in flight, also surfaced as a chip on the bottom-bar.
+- **Background telemetry worker** (`crate::telemetry::TelemetryService`) — single named OS thread, owns one `mpsc::Receiver<TelemetryRequest>` and one `mpsc::Sender<TelemetryResult>`. UI thread dispatches at every lifecycle event that produces a fresh WAV (Suno import, `stop_take`, project open, project re-open after Trim) and drains results in `update()`, patching the matching tracks and saving the manifest once per drain. Foreign-project results (e.g. Recordings analysis lands while the user has a Suno project active) get written through to the recordings manifest on disk so nothing is lost. Cost target ≈ 1-3 s per 3-minute mono stem on a modern CPU; runs at idle priority through the OS scheduler since the audio callback never sees this thread.
+- **Schema version on telemetry** (`analyzer_version: u32`) so future analyzer changes can detect stale rows and re-compute on demand. The dispatcher already gates on this — tracks at the current version are skipped on every "open project" pass. Initial schema is `1`.
+
+### Documentation
+- TBSS-FR-0005 was written before this build (full RFC at `docs/feature-requests/TBSS-FR-0005-track-telemetry.md`). The implementation ships phase 1 + drum-kit detection together as decided in the design discussion. Phases 2-4 (pitch tracking, key detection, cross-band coherence, visualizer integration) remain queued.
+
+### Tests
+- 6 unit tests in `src/telemetry.rs`: silence handling without panic, pure-tone brightness detection, transient detection (≥3 of 5 synthetic pulses), arousal monotonicity, valence clamps, drum-class glyph non-emptiness. Total suite count up from 56 → 62.
+
 ## [0.4.12] — 2026-05-08
 
 ### Added

@@ -158,6 +158,23 @@ pub struct TinyBoothApp {
     // never `eprintln!` from the audio thread.
     pub audio_err_tx: mpsc::Sender<String>,
     pub audio_err_rx: mpsc::Receiver<String>,
+
+    /// Background telemetry analyzer (TBSS-FR-0005). Owns one worker
+    /// thread; takes per-track analysis requests, ships results back
+    /// via mpsc. The UI thread drains results in `update()` and
+    /// patches them onto `app.project`. v0.4.13.
+    pub telemetry: crate::telemetry::TelemetryService,
+
+    /// Set to `true` at construction; cleared on first `update()`
+    /// frame after dispatching the initial backfill scan over the
+    /// auto-restored project. Without this, the auto-restored
+    /// project would never get analyzed because `new()` can't call
+    /// methods on itself before returning. v0.4.13.
+    pub initial_telemetry_pending: bool,
+
+    /// Project Health panel (TBSS-FR-0005 §"Health"). Modal showing
+    /// per-track telemetry weight, totals, and stale rows. v0.4.13.
+    pub show_health: bool,
 }
 
 impl TinyBoothApp {
@@ -274,6 +291,9 @@ impl TinyBoothApp {
             update_rx: Some(rx),
             audio_err_tx,
             audio_err_rx,
+            telemetry: crate::telemetry::TelemetryService::spawn(),
+            initial_telemetry_pending: true,
+            show_health: false,
         }
     }
 
@@ -414,6 +434,19 @@ impl TinyBoothApp {
         rec.tracks.push(new_track.clone());
         match rec.save() {
             Ok(()) => {
+                // Dispatch telemetry analysis for the new take. Always
+                // non-drum (recorded takes don't carry a StemRole). The
+                // worker patches the result onto the recordings manifest
+                // when it lands; we go directly through the recordings
+                // project root so the result applies even if the user
+                // doesn't currently have the recordings project active.
+                let abs = rec.track_abs_path(&new_track);
+                self.telemetry.dispatch(crate::telemetry::TelemetryRequest {
+                    project_root: rec.root.clone(),
+                    track_id: new_track.id.clone(),
+                    abs_path: abs,
+                    is_drum_stem: false,
+                });
                 // If the user has the recordings project open as the
                 // active project (via File → Open Recordings), keep
                 // `app.project` in sync so the new take appears in
@@ -486,6 +519,7 @@ impl TinyBoothApp {
                 self.project_dirty = false;
                 self.player = None;
                 self.status = Some("Opened Recordings.".into());
+                self.dispatch_telemetry_for_active_project();
             }
             Err(e) => {
                 self.status = Some(format!("could not open Recordings: {e:#}"));
@@ -816,6 +850,10 @@ impl TinyBoothApp {
                 self.project_dirty = false;
                 self.player = None;
                 self.tab = Tab::Project;
+                // Kick off background telemetry analysis for every
+                // freshly-imported track. Drum / Percussion stems
+                // additionally get drum-kit classification.
+                self.dispatch_telemetry_for_active_project();
             }
         }
         self.status = Some(if outcome.success {
@@ -824,6 +862,125 @@ impl TinyBoothApp {
             "Suno import did not produce any tracks — see dialog".into()
         });
         self.import_dialog = Some(outcome);
+    }
+
+    /// Walk `self.project.tracks` and dispatch a telemetry analysis
+    /// request for every track whose `telemetry` is `None` or whose
+    /// `analyzer_version` is older than the current one. Drum-kit
+    /// detection is gated on `StemRole::Drums | Percussion` per
+    /// TBSS-FR-0005 §"Lifecycle". Cheap on the all-fresh path —
+    /// just iterates and pushes to a channel.
+    pub fn dispatch_telemetry_for_active_project(&mut self) {
+        use crate::project::{StemRole, TrackSource};
+        let root = self.project.root.clone();
+        for t in &self.project.tracks {
+            // Skip tracks whose telemetry is already current.
+            if let Some(tel) = &t.telemetry {
+                if tel.analyzer_version >= crate::telemetry::ANALYZER_VERSION {
+                    continue;
+                }
+            }
+            let abs = self.project.track_abs_path(t);
+            if !abs.is_file() {
+                continue;
+            }
+            let is_drum_stem = matches!(
+                &t.source,
+                TrackSource::SunoStem {
+                    role: StemRole::Drums | StemRole::Percussion,
+                    ..
+                }
+            );
+            self.telemetry.dispatch(crate::telemetry::TelemetryRequest {
+                project_root: root.clone(),
+                track_id: t.id.clone(),
+                abs_path: abs,
+                is_drum_stem,
+            });
+        }
+    }
+
+    /// Drain every result the worker has produced since the last
+    /// frame. For results matching the active project, patch the
+    /// telemetry onto the matching track and persist incrementally
+    /// (one save per drain — the manifest is cheap relative to
+    /// blocking on every result individually). Results targeting a
+    /// different project root (typically: recordings analysis while
+    /// the user has a Suno project active) get written through to
+    /// the manifest on disk. Stale results (file path no longer
+    /// matches, track id gone) are silently dropped.
+    pub fn drain_telemetry_results(&mut self) {
+        let results = self.telemetry.drain();
+        if results.is_empty() {
+            return;
+        }
+        let mut applied_active = 0;
+        let mut errored = 0;
+        // Group off-project results by root so each foreign manifest
+        // is loaded + saved once per drain rather than per result.
+        let mut foreign: std::collections::HashMap<
+            PathBuf,
+            Vec<crate::telemetry::TelemetryResult>,
+        > = std::collections::HashMap::new();
+        for r in results {
+            if let Err(e) = &r.outcome {
+                errored += 1;
+                eprintln!("telemetry: failed to analyze track {}: {e}", r.track_id);
+                continue;
+            }
+            if r.project_root == self.project.root {
+                if let Ok(tel) = r.outcome {
+                    if let Some(track) = self.project.tracks.iter_mut().find(|t| t.id == r.track_id)
+                    {
+                        // Verify the WAV path hasn't changed under us
+                        // (e.g. Trim moved it). If it has, drop the
+                        // result — Trim re-dispatches with the new path.
+                        let cur = self.project.root.join(&track.file);
+                        if cur == r.abs_path {
+                            track.telemetry = Some(tel);
+                            applied_active += 1;
+                        }
+                    }
+                }
+            } else {
+                foreign.entry(r.project_root.clone()).or_default().push(r);
+            }
+        }
+        if applied_active > 0 {
+            if let Err(e) = self.project.save() {
+                self.status = Some(format!("telemetry save error: {e:#}"));
+            }
+        }
+        // For each foreign root, load the manifest, patch matching
+        // tracks, save back. Silently no-op on load failure — we
+        // don't want a missing recordings manifest to spam the user.
+        for (root, group) in foreign {
+            let manifest = root.join(crate::project::MANIFEST_NAME);
+            let mut proj = match Project::load(&manifest) {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+            let mut changed = 0;
+            for r in group {
+                if let Ok(tel) = r.outcome {
+                    if let Some(track) = proj.tracks.iter_mut().find(|t| t.id == r.track_id) {
+                        let cur = proj.root.join(&track.file);
+                        if cur == r.abs_path {
+                            track.telemetry = Some(tel);
+                            changed += 1;
+                        }
+                    }
+                }
+            }
+            if changed > 0 {
+                let _ = proj.save();
+            }
+        }
+        if errored > 0 {
+            self.status = Some(format!(
+                "telemetry: {errored} track(s) failed to analyze; see console"
+            ));
+        }
     }
 
     pub fn open_project_dialog(&mut self) {
@@ -845,6 +1002,11 @@ impl TinyBoothApp {
                 self.project_dirty = false;
                 self.player = None; // force player rebuild for new project
                 self.status = Some(format!("opened {}", path.display()));
+                // Backfill telemetry for projects saved before TBSS-FR-0005
+                // landed (or analyzer-version mismatches). Cheap on the
+                // already-current path — dispatch_telemetry_for_active_project
+                // skips tracks whose analyzer_version is current.
+                self.dispatch_telemetry_for_active_project();
             }
             Err(e) => {
                 // Stale recent — drop it so the menu cleans up over time.
@@ -865,6 +1027,21 @@ impl eframe::App for TinyBoothApp {
         // first). Idempotent + cheap on the no-orphan path: a single
         // iter().any() over project.tracks before any mutation.
         self.cleanse_active_project();
+
+        // Initial backfill — runs once, on the first frame after
+        // `new()` finishes. Walks the auto-restored project and
+        // dispatches analysis for any track without telemetry.
+        if self.initial_telemetry_pending {
+            self.initial_telemetry_pending = false;
+            self.dispatch_telemetry_for_active_project();
+        }
+
+        // Drain any telemetry-analysis results the worker thread has
+        // produced. Runs every frame; cheap on the all-quiet path
+        // (one try_recv that returns Empty). When results arrive the
+        // matching tracks get their `telemetry` field populated and
+        // the manifest is saved once per drain.
+        self.drain_telemetry_results();
 
         // Repaint continuously while recording so the visualizer animates.
         if self.session.is_some() {
@@ -1062,6 +1239,20 @@ impl eframe::App for TinyBoothApp {
                 if let Some(s) = self.status.as_ref() {
                     ui.label(s);
                 }
+                // Telemetry-batch progress (TBSS-FR-0005). Surfaces
+                // "Analyzing N/M…" while the worker is busy. Hidden
+                // when idle.
+                if self.telemetry.has_pending() {
+                    if let Some((done, total)) = self.telemetry.progress() {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(
+                                egui::RichText::new(format!("📊 Analyzing {done}/{total}…"))
+                                    .small()
+                                    .color(egui::Color32::from_rgb(180, 220, 240)),
+                            );
+                        });
+                    }
+                }
             });
         });
 
@@ -1145,6 +1336,11 @@ impl eframe::App for TinyBoothApp {
         // Duplicate-import conflict modal.
         if self.import_conflict.is_some() {
             ui::import_conflict::show(self, ctx);
+        }
+
+        // Project Health modal (TBSS-FR-0005).
+        if self.show_health {
+            ui::health::show(self, ctx);
         }
     }
 

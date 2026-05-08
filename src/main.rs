@@ -16,6 +16,7 @@ mod player;
 mod project;
 mod suno_import;
 mod suno_meta;
+mod telemetry;
 mod trim;
 mod ui;
 

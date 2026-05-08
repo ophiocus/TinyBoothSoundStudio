@@ -399,6 +399,13 @@ fn lanes_view(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
                     |ui| {
                         ui.add_space(2.0);
                         ui.label(egui::RichText::new(&track.name).strong());
+                        // Telemetry chips — pulled from the manifest
+                        // (app.project.tracks), not the player's
+                        // LiveTrack. The lane row is by-index aligned
+                        // with the project tracks list. v0.4.13.
+                        if let Some(t) = app.project.tracks.get(idx) {
+                            telemetry_chips(ui, t);
+                        }
                         ui.horizontal(|ui| {
                             let mut bypass = track.bypass_correction.load(Ordering::Relaxed);
                             // v0.4.7 perf: was `track.correction().is_some()` —
@@ -914,4 +921,151 @@ fn commit_master_automation(app: &mut TinyBoothApp) {
 fn fmt_time(secs: f32) -> String {
     let total = secs.max(0.0) as u32;
     format!("{:02}:{:02}", total / 60, total % 60)
+}
+
+// ───────────────────── telemetry chips ─────────────────────
+//
+// Inline tag chips rendered under each lane's track name. Pulls from
+// `Track.telemetry`; renders nothing if absent (analyzer hasn't run
+// yet, or analyzed and saved no result). Each chip's tooltip carries
+// the underlying numerics for quick debugging without opening the
+// (planned) full per-track telemetry panel.
+//
+// Phase-1 chip vocabulary (TBSS-FR-0005 §"UI"):
+//   ☀️  spectral_centroid_avg ≥ 0.45      bright timbre
+//   🌙  spectral_centroid_avg ≤ 0.15      dark timbre
+//   🌊  sustain_ratio ≥ 0.65              sustained
+//   ⚡  sustain_ratio ≤ 0.30              percussive / staccato
+//   🔨  onset_rate_hz ≥ 4.0               dense / busy
+//
+// Drum-stem additions (when DrumKitTelemetry is present):
+//   🥁N kick · ◎N snare · ✨N hat · 🪘N tom · 🔔N cymbal
+fn telemetry_chips(ui: &mut egui::Ui, track: &crate::project::Track) {
+    let Some(tel) = track.telemetry.as_ref() else {
+        return;
+    };
+    ui.horizontal_wrapped(|ui| {
+        let chip = |ui: &mut egui::Ui, glyph: &str, tooltip: String| {
+            ui.label(
+                egui::RichText::new(glyph)
+                    .size(13.0)
+                    .color(Color32::from_rgb(180, 200, 220)),
+            )
+            .on_hover_text(tooltip);
+        };
+
+        if tel.spectral_centroid_avg >= 0.45 {
+            chip(
+                ui,
+                "☀",
+                format!(
+                    "Bright timbre (centroid {:.2}, rolloff {:.2})",
+                    tel.spectral_centroid_avg, tel.spectral_rolloff_avg
+                ),
+            );
+        } else if tel.spectral_centroid_avg <= 0.15 {
+            chip(
+                ui,
+                "🌙",
+                format!(
+                    "Dark timbre (centroid {:.2}, rolloff {:.2})",
+                    tel.spectral_centroid_avg, tel.spectral_rolloff_avg
+                ),
+            );
+        }
+        if tel.sustain_ratio >= 0.65 {
+            chip(
+                ui,
+                "≈",
+                format!(
+                    "Sustained (sustain ratio {:.0}%)",
+                    tel.sustain_ratio * 100.0
+                ),
+            );
+        } else if tel.sustain_ratio <= 0.30 {
+            chip(
+                ui,
+                "⚡",
+                format!(
+                    "Percussive / staccato (sustain ratio {:.0}%)",
+                    tel.sustain_ratio * 100.0
+                ),
+            );
+        }
+        if tel.onset_rate_hz >= 4.0 {
+            chip(
+                ui,
+                "▦",
+                format!(
+                    "Dense ({:.1} onsets/sec, {} total)",
+                    tel.onset_rate_hz, tel.onset_count
+                ),
+            );
+        }
+
+        // Drum-kit roll-up. Display only the non-zero counts to
+        // avoid header clutter on a stem with mostly one class.
+        if let Some(kit) = tel.drum_kit.as_ref() {
+            for (n, glyph, label) in [
+                (kit.kick_count, "K", "kicks"),
+                (kit.snare_count, "S", "snares"),
+                (kit.hihat_count, "h", "hats"),
+                (kit.tom_count, "T", "toms"),
+                (kit.cymbal_count, "C", "cymbals"),
+            ] {
+                if n == 0 {
+                    continue;
+                }
+                ui.label(
+                    egui::RichText::new(format!("{glyph}{n}"))
+                        .size(11.0)
+                        .monospace()
+                        .color(Color32::from_rgb(220, 200, 130)),
+                )
+                .on_hover_text(format!("{n} {label}"));
+            }
+        }
+
+        // Mood pip — small coloured square positioned by valence
+        // (cool ↔ warm hue) and saturated by arousal. Always shown
+        // when telemetry exists. Hovers reveal the numerics.
+        let (r, g, b) = mood_color(tel.arousal, tel.valence);
+        let (rect, _) =
+            ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
+        ui.painter().rect_filled(rect, 2.0, Color32::from_rgb(r, g, b));
+        ui.label("").on_hover_text(format!(
+            "Mood proxy — arousal {:.2}, valence {:+.2}\nRMS {:.1} dB · crest {:.1} · peak {:.1} dB",
+            tel.arousal, tel.valence, tel.rms_avg_db, tel.crest_factor_avg, tel.peak_db
+        ));
+    });
+}
+
+/// Map an (arousal, valence) point in [0,1] × [-1,1] to an RGB triple.
+/// Hue: valence (cool blue → warm yellow). Saturation: arousal.
+fn mood_color(arousal: f32, valence: f32) -> (u8, u8, u8) {
+    // Blue ≈ 220° at v=-1, yellow ≈ 50° at v=+1. Interpolate.
+    let h = 220.0 - (valence.clamp(-1.0, 1.0) + 1.0) * 0.5 * (220.0 - 50.0);
+    let s = arousal.clamp(0.0, 1.0) * 0.85 + 0.15;
+    let v = 0.85;
+    hsv_to_rgb_u8(h, s, v)
+}
+
+fn hsv_to_rgb_u8(h: f32, s: f32, v: f32) -> (u8, u8, u8) {
+    let c = v * s;
+    let h6 = (h.rem_euclid(360.0)) / 60.0;
+    let x = c * (1.0 - (h6 % 2.0 - 1.0).abs());
+    let (r, g, b) = match h6 as i32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let m = v - c;
+    (
+        ((r + m) * 255.0).clamp(0.0, 255.0) as u8,
+        ((g + m) * 255.0).clamp(0.0, 255.0) as u8,
+        ((b + m) * 255.0).clamp(0.0, 255.0) as u8,
+    )
 }
