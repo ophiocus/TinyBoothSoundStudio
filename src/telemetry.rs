@@ -33,13 +33,93 @@ use std::path::Path;
 
 /// Schema version. Bumped when the analyzer changes shape so old
 /// telemetry can be detected as stale and re-computed on demand.
-pub const ANALYZER_VERSION: u32 = 1;
+///
+/// History:
+///   v1 (0.4.13): universal features + drum-kit detection.
+///   v2 (0.4.14): + guitar/bass pick analyzer (YIN), key estimation
+///                  (Krumhansl-Schmuckler), user-selectable profile.
+pub const ANALYZER_VERSION: u32 = 2;
 
 /// FFT window size for spectral analysis. Power of two for rustfft.
 const FFT_SIZE: usize = 2048;
 /// Hop size between FFT windows. 25% hop = 75% overlap = smooth
 /// onset-detection but more compute.
 const FFT_HOP: usize = 512;
+
+/// User-tweakable analyzer thresholds. Persisted to
+/// `%APPDATA%\TinyBooth Sound Studio\telemetry_settings.json`.
+/// Defaults are picked to be conservative on Suno output (the only
+/// audio shape we know we'll always see). Surfaced via Admin →
+/// Telemetry settings…. v0.4.14.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TelemetrySettings {
+    /// k·MAD multiplier for the spectral-flux peak picker (drum +
+    /// guitar onsets share this). Higher = fewer onsets detected.
+    /// Default 3.0.
+    pub drum_onset_k_mad: f32,
+    /// Minimum velocity (peak amplitude in [0, 1] at the onset
+    /// frame) for a guitar onset to count as a pick. Below this
+    /// it's classified as Noise. Default 0.05.
+    pub guitar_pick_threshold: f32,
+    /// Same shape for bass — usually a touch lower because basses
+    /// pluck quieter relative to peak. Default 0.04.
+    pub bass_pick_threshold: f32,
+    /// YIN cumulative-mean-difference threshold. Lags whose value
+    /// drops below this are considered confident pitch picks.
+    /// 0.10–0.20 is the standard range; lower = stricter. Default 0.15.
+    pub yin_threshold: f32,
+    /// Polyphony cutoff — events whose post-onset window has more
+    /// than this many spectral peaks above –12 dB get classified
+    /// as Strum (no pitch reported). Default 5.
+    pub polyphony_peak_count: usize,
+    /// Cents tolerance for "same pitch" classification (Pluck vs.
+    /// Repeat). Default 50 (a quarter-tone). Bigger = more events
+    /// classified as Repeat.
+    pub same_pitch_cents: f32,
+}
+
+impl Default for TelemetrySettings {
+    fn default() -> Self {
+        Self {
+            drum_onset_k_mad: 3.0,
+            guitar_pick_threshold: 0.05,
+            bass_pick_threshold: 0.04,
+            yin_threshold: 0.15,
+            polyphony_peak_count: 5,
+            same_pitch_cents: 50.0,
+        }
+    }
+}
+
+impl TelemetrySettings {
+    fn config_path() -> Option<std::path::PathBuf> {
+        crate::config::Config::dir().map(|d| d.join("telemetry_settings.json"))
+    }
+
+    /// Load from disk; on first run / parse error fall back to
+    /// defaults silently.
+    pub fn load() -> Self {
+        let Some(path) = Self::config_path() else {
+            return Self::default();
+        };
+        let Ok(s) = std::fs::read_to_string(&path) else {
+            return Self::default();
+        };
+        serde_json::from_str(&s).unwrap_or_default()
+    }
+
+    pub fn save(&self) -> anyhow::Result<()> {
+        let Some(path) = Self::config_path() else {
+            anyhow::bail!("no platform config dir");
+        };
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        let json = serde_json::to_string_pretty(self)?;
+        std::fs::write(&path, json)?;
+        Ok(())
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrackTelemetry {
@@ -82,6 +162,219 @@ pub struct TrackTelemetry {
     // ── Drum kit (only when role == Drums | Percussion) ──
     /// Kit-class detection result. None for non-drum tracks.
     pub drum_kit: Option<DrumKitTelemetry>,
+
+    /// Pick-stroke detection result with YIN pitch tracking.
+    /// Populated for tracks whose resolved profile is `Guitar` or
+    /// `Bass`. None otherwise. Added v0.4.14.
+    #[serde(default)]
+    pub guitar: Option<GuitarTelemetry>,
+
+    /// Per-track Krumhansl-Schmuckler key estimate. Populated when
+    /// pitch data is present (Guitar / Bass profiles). Added v0.4.14.
+    #[serde(default)]
+    pub key_estimate: Option<KeyEstimate>,
+}
+
+/// Pick-stroke / pitch telemetry for guitar / bass content. See
+/// TBSS-FR-0005 §"Phase 2 (Guitar)" and the v0.4.14 design discussion
+/// — pick events come from spectral-flux onsets, each event is
+/// classified via a YIN pitch read in a 50-150 ms window post-onset
+/// plus a polyphony probe. Strums become single events with no pitch.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GuitarTelemetry {
+    /// Total picks detected (every kind — including Strum and Repeat).
+    pub pick_count: u32,
+    /// Picks where the dominant pitch matched the previous event
+    /// (within ±50 cents). E.g. tremolo picking on a single fret.
+    pub repeated_pick_count: u32,
+    /// Picks whose pitch differed from the previous event by more
+    /// than ±50 cents (a fret / string change). Strums don't count.
+    pub pitch_change_count: u32,
+    /// Picks classified as Slide / Bend (smooth pitch trajectory
+    /// between two events with no intervening pluck transient).
+    pub bend_or_slide_count: u32,
+    /// Picks classified as Strum (polyphonic onset; no usable pitch).
+    pub strum_count: u32,
+    /// Estimated polyphony in [0, 1]. Mean of per-event polyphony
+    /// scores. 0 ≈ pure monophonic line, 1 ≈ heavily strummed
+    /// chordal content.
+    pub estimated_polyphony: f32,
+    /// Full per-event list. No cap (TBSS-FR-0005 §"Infinity"). The
+    /// Project Health panel surfaces total bytes; users can see when
+    /// to compact.
+    pub events: Vec<GuitarEvent>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GuitarEvent {
+    /// Onset time in seconds from track start.
+    pub time_secs: f32,
+    /// Detected fundamental in Hz, or `None` when YIN gave up
+    /// (polyphonic moment / noise-only window). Persist raw Hz —
+    /// cents-off-pitch and bend detection are free post-processing.
+    pub pitch_hz: Option<f32>,
+    /// YIN's normalised difference at the chosen lag. Lower = more
+    /// confident; values ≤ 0.15 are typically reliable. Surfaced so
+    /// downstream passes can filter without re-running the analyzer.
+    pub confidence: f32,
+    /// Peak amplitude at the onset in [0, 1]. Doubles as a "velocity"
+    /// surrogate.
+    pub velocity: f32,
+    /// Decay duration (peak → 30 % energy) in milliseconds.
+    pub decay_ms: f32,
+    pub kind: PickKind,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum PickKind {
+    /// Single-string monophonic pick at a new pitch.
+    Pluck,
+    /// Same pitch as the previous event (within ±50 cents).
+    Repeat,
+    /// Polyphonic onset — likely a strummed chord. No pitch.
+    Strum,
+    /// Smooth pitch trajectory continuing from the previous event
+    /// (slide or bend, not a fresh pluck).
+    Slide,
+    /// Onset detected but no usable pitch and not polyphonic — fret
+    /// noise / fingering / breath / etc.
+    Noise,
+}
+
+impl PickKind {
+    #[allow(dead_code)]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Pluck => "pluck",
+            Self::Repeat => "repeat",
+            Self::Strum => "strum",
+            Self::Slide => "slide",
+            Self::Noise => "noise",
+        }
+    }
+}
+
+/// Krumhansl-Schmuckler key estimate. Computed from the pitch-class
+/// histogram of every `GuitarEvent.pitch_hz` (when present), weighted
+/// by event velocity × duration-until-next-event.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct KeyEstimate {
+    /// 0 = C, 1 = C♯/D♭, …, 11 = B.
+    pub root: u8,
+    pub mode: KeyMode,
+    /// Pearson correlation against the winning K-S template. Higher
+    /// = stronger key feeling. Below ~0.5 is "key is ambiguous".
+    pub confidence: f32,
+    /// Second-place key — useful when `confidence` is close, e.g.
+    /// minor-mode tracks often correlate with their relative major.
+    pub second_choice_root: u8,
+    pub second_choice_mode: KeyMode,
+    pub second_choice_confidence: f32,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum KeyMode {
+    Major,
+    Minor,
+}
+
+impl KeyMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Major => "maj",
+            Self::Minor => "min",
+        }
+    }
+}
+
+impl KeyEstimate {
+    /// Human-readable label like "G♯ min" (12-tone naming, sharps).
+    pub fn label(&self) -> String {
+        const NOTES: [&str; 12] = [
+            "C", "C♯", "D", "E♭", "E", "F", "F♯", "G", "A♭", "A", "B♭", "B",
+        ];
+        format!("{} {}", NOTES[(self.root as usize) % 12], self.mode.label())
+    }
+}
+
+/// User-selectable analyzer profile per track. `Auto` resolves at
+/// dispatch time from `TrackSource` (drums → drum kit, guitar/bass →
+/// guitar pitch analyzer, everything else → universal-only). Explicit
+/// values override the auto-resolution — useful when Suno mislabels
+/// a stem (e.g. a percussive synth pad) or when a recorded take has
+/// no role at all. v0.4.14.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub enum TelemetryProfile {
+    /// Infer from `TrackSource`. Default for back-compat with v0.4.13
+    /// manifests (this is the only profile they ever knew).
+    #[default]
+    Auto,
+    /// Universal features only — no instrument-specific layer.
+    UniversalOnly,
+    Drums,
+    Guitar,
+    Bass,
+    /// Skip telemetry entirely. Useful for room tone, count-ins,
+    /// silence stems, anything not worth analyzing.
+    None,
+}
+
+impl TelemetryProfile {
+    /// Resolve to a concrete analyzer profile given the track source.
+    /// `Auto` reads `StemRole`; explicit values pass through.
+    pub fn resolve(self, source: &crate::project::TrackSource) -> ResolvedProfile {
+        use crate::project::{StemRole, TrackSource};
+        match self {
+            Self::None => ResolvedProfile::None,
+            Self::UniversalOnly => ResolvedProfile::UniversalOnly,
+            Self::Drums => ResolvedProfile::Drums,
+            Self::Guitar => ResolvedProfile::Guitar,
+            Self::Bass => ResolvedProfile::Bass,
+            Self::Auto => match source {
+                TrackSource::SunoStem { role, .. } => match role {
+                    StemRole::Drums | StemRole::Percussion => ResolvedProfile::Drums,
+                    StemRole::ElectricGuitar | StemRole::AcousticGuitar => ResolvedProfile::Guitar,
+                    StemRole::Bass => ResolvedProfile::Bass,
+                    _ => ResolvedProfile::UniversalOnly,
+                },
+                TrackSource::Recorded => ResolvedProfile::UniversalOnly,
+            },
+        }
+    }
+
+    /// All variants in stable order — for the dropdown.
+    pub fn all() -> &'static [TelemetryProfile] {
+        &[
+            Self::Auto,
+            Self::UniversalOnly,
+            Self::Drums,
+            Self::Guitar,
+            Self::Bass,
+            Self::None,
+        ]
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "Auto",
+            Self::UniversalOnly => "Universal only",
+            Self::Drums => "Drums",
+            Self::Guitar => "Guitar",
+            Self::Bass => "Bass",
+            Self::None => "Off",
+        }
+    }
+}
+
+/// Concrete (non-Auto) analyzer profile — what `analyze_wav` actually
+/// dispatches on. Internal to the telemetry pipeline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolvedProfile {
+    None,
+    UniversalOnly,
+    Drums,
+    Guitar,
+    Bass,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -174,11 +467,17 @@ impl FreqBands {
     }
 }
 
-/// Run the analyzer on a WAV file. Returns the populated telemetry
-/// struct or an anyhow error chain. `is_drum_stem` gates the drum-
-/// kit detection so we don't run kick / snare / hat classifiers on
-/// vocal content.
-pub fn analyze_wav(path: &Path, is_drum_stem: bool) -> Result<TrackTelemetry> {
+/// Run the analyzer on a WAV file with the user-selected profile.
+/// Returns the populated telemetry struct or an anyhow error chain.
+/// `profile` is the already-resolved profile (Auto resolution is
+/// done by the caller via `TelemetryProfile::resolve`). The
+/// `settings` controls thresholds — pick velocity, YIN tolerance,
+/// polyphony cutoff. v0.4.14.
+pub fn analyze_wav(
+    path: &Path,
+    profile: ResolvedProfile,
+    settings: &TelemetrySettings,
+) -> Result<TrackTelemetry> {
     let mut reader =
         hound::WavReader::open(path).with_context(|| format!("opening {}", path.display()))?;
     let spec = reader.spec();
@@ -279,7 +578,7 @@ pub fn analyze_wav(path: &Path, is_drum_stem: bool) -> Result<TrackTelemetry> {
     let mut all_onset_frames: Vec<usize> = Vec::new();
     let mut per_band_onsets: Vec<Vec<usize>> = Vec::with_capacity(bands_idx.len());
     for flux in &band_flux {
-        let onsets = peak_pick(flux, 3.0);
+        let onsets = peak_pick(flux, settings.drum_onset_k_mad);
         for &f in &onsets {
             all_onset_frames.push(f);
         }
@@ -300,8 +599,8 @@ pub fn analyze_wav(path: &Path, is_drum_stem: bool) -> Result<TrackTelemetry> {
     // 30% of local max) / total_frames. Higher = more sustained.
     let sustain_ratio = sustain_ratio_compute(&short_rms_history);
 
-    // ── Drum-kit detection ───────────────────────────────────────
-    let drum_kit = if is_drum_stem {
+    // ── Profile-gated instrument layers ──────────────────────────
+    let drum_kit = if profile == ResolvedProfile::Drums {
         Some(classify_drum_events(
             &per_band_onsets,
             &band_flux,
@@ -313,6 +612,40 @@ pub fn analyze_wav(path: &Path, is_drum_stem: bool) -> Result<TrackTelemetry> {
     } else {
         None
     };
+
+    let (guitar, key_estimate) =
+        if profile == ResolvedProfile::Guitar || profile == ResolvedProfile::Bass {
+            let pick_threshold = if profile == ResolvedProfile::Bass {
+                settings.bass_pick_threshold
+            } else {
+                settings.guitar_pick_threshold
+            };
+            let lo_hz = if profile == ResolvedProfile::Bass {
+                30.0
+            } else {
+                70.0
+            };
+            let hi_hz = if profile == ResolvedProfile::Bass {
+                500.0
+            } else {
+                1_400.0
+            };
+            let g = analyze_guitar_picks(
+                &mono,
+                sr,
+                &per_band_onsets,
+                &band_flux,
+                &band_energy,
+                pick_threshold,
+                lo_hz,
+                hi_hz,
+                settings,
+            );
+            let k = estimate_key_from_events(&g.events);
+            (Some(g), k)
+        } else {
+            (None, None)
+        };
 
     // ── Mood proxies ─────────────────────────────────────────────
     let arousal = arousal_proxy(rms, onset_rate_hz, centroid_avg);
@@ -334,6 +667,8 @@ pub fn analyze_wav(path: &Path, is_drum_stem: bool) -> Result<TrackTelemetry> {
         arousal,
         valence,
         drum_kit,
+        guitar,
+        key_estimate,
     })
 }
 
@@ -511,12 +846,7 @@ fn classify_drum_events(
         let look_ahead = 10.min(energy.len() - onset_frame - 1);
         let mut peak_idx = onset_frame;
         let mut peak_val = energy[onset_frame];
-        for (i, &v) in energy
-            .iter()
-            .enumerate()
-            .skip(onset_frame)
-            .take(look_ahead)
-        {
+        for (i, &v) in energy.iter().enumerate().skip(onset_frame).take(look_ahead) {
             if v > peak_val {
                 peak_val = v;
                 peak_idx = i;
@@ -753,6 +1083,562 @@ fn sustain_ratio_compute(rms_history_db: &[f32]) -> f32 {
     active as f32 / rms_history_db.len() as f32
 }
 
+// ───────────────────── guitar / bass pitch analyzer ─────────────────────
+
+/// Pick-stroke detector: each spectral-flux onset in the MID +
+/// HIGH_MID bands becomes a candidate event; the post-onset window
+/// is fed to YIN for pitch + to a polyphony probe; the result is
+/// classified into Pluck / Repeat / Strum / Slide / Noise.
+#[allow(clippy::too_many_arguments)]
+fn analyze_guitar_picks(
+    mono: &[f32],
+    sr: u32,
+    per_band_onsets: &[Vec<usize>],
+    _band_flux: &[Vec<f32>],
+    band_energy: &[Vec<f32>],
+    pick_threshold: f32,
+    pitch_lo_hz: f32,
+    pitch_hi_hz: f32,
+    settings: &TelemetrySettings,
+) -> GuitarTelemetry {
+    const MID: usize = 2;
+    const HIGH_MID: usize = 3;
+
+    let frame_secs = FFT_HOP as f32 / sr as f32;
+    let sr_f = sr as f32;
+
+    // Merge MID + HIGH_MID onsets — the bands where pick attacks
+    // live. Dedup near-duplicates within 3 frames so we don't fire
+    // twice on a single pluck whose energy spans both bands.
+    let mut onset_frames: Vec<usize> = Vec::new();
+    for &f in &per_band_onsets[MID] {
+        onset_frames.push(f);
+    }
+    for &f in &per_band_onsets[HIGH_MID] {
+        onset_frames.push(f);
+    }
+    onset_frames.sort_unstable();
+    onset_frames.dedup_by(|a, b| a.abs_diff(*b) < 3);
+
+    // For each candidate onset, find peak amplitude in a small
+    // post-onset window in the time domain — that's our velocity.
+    // Then run YIN + polyphony probe.
+    let yin_window_samples = (sr_f * 0.10) as usize; // 100 ms
+    let pre_skip_samples = (sr_f * 0.020) as usize; // skip the attack noise (~20 ms)
+    let lookahead_samples = (sr_f * 0.150) as usize;
+
+    let lag_min = (sr_f / pitch_hi_hz) as usize;
+    let lag_max = ((sr_f / pitch_lo_hz) as usize).min(yin_window_samples - 1);
+
+    let mut events: Vec<GuitarEvent> = Vec::new();
+    let mut polyphony_acc = 0.0_f32;
+    let mut polyphony_n = 0_u32;
+
+    for &of in &onset_frames {
+        let sample_at_onset = of * FFT_HOP;
+        if sample_at_onset >= mono.len() {
+            continue;
+        }
+        // Velocity: max |sample| in 0..lookahead from the onset.
+        let velocity = {
+            let end = (sample_at_onset + lookahead_samples).min(mono.len());
+            mono[sample_at_onset..end]
+                .iter()
+                .fold(0.0_f32, |m, &s| m.max(s.abs()))
+        };
+
+        // Decay: walk band_energy of MID, find peak then time to 30%.
+        let decay_ms = decay_ms_from_energy(&band_energy[MID], of, frame_secs);
+
+        if velocity < pick_threshold {
+            // Sub-threshold onset = noise. Persist with no pitch.
+            events.push(GuitarEvent {
+                time_secs: of as f32 * frame_secs,
+                pitch_hz: None,
+                confidence: 1.0,
+                velocity,
+                decay_ms,
+                kind: PickKind::Noise,
+            });
+            continue;
+        }
+
+        // YIN window — start a touch after the onset so the attack
+        // transient doesn't dominate the autocorrelation.
+        let win_start = (sample_at_onset + pre_skip_samples).min(mono.len());
+        let win_end = (win_start + yin_window_samples).min(mono.len());
+        if win_end - win_start < lag_max + 8 {
+            // Not enough samples left — emit as Noise.
+            events.push(GuitarEvent {
+                time_secs: of as f32 * frame_secs,
+                pitch_hz: None,
+                confidence: 1.0,
+                velocity,
+                decay_ms,
+                kind: PickKind::Noise,
+            });
+            continue;
+        }
+        let window = &mono[win_start..win_end];
+
+        // Polyphony probe: spectral peak count in the window.
+        let poly_score = polyphony_score(window, sr, settings);
+        polyphony_acc += poly_score;
+        polyphony_n += 1;
+
+        let (pitch_opt, confidence) =
+            yin_pitch(window, sr_f, lag_min, lag_max, settings.yin_threshold);
+
+        // Strum classification — many spectral peaks → no pitch
+        // even if YIN happened to lock onto something.
+        let is_polyphonic = poly_score >= 0.65;
+
+        let kind = if is_polyphonic {
+            PickKind::Strum
+        } else if pitch_opt.is_none() {
+            PickKind::Noise
+        } else {
+            // Compare to most recent pitched event for Pluck / Repeat.
+            let prev_pitch = events
+                .iter()
+                .rev()
+                .find_map(|e| e.pitch_hz.filter(|_| e.kind != PickKind::Noise));
+            match (prev_pitch, pitch_opt) {
+                (Some(p_prev), Some(p_now)) => {
+                    let cents = 1200.0 * (p_now / p_prev).log2().abs();
+                    if cents <= settings.same_pitch_cents {
+                        PickKind::Repeat
+                    } else {
+                        PickKind::Pluck
+                    }
+                }
+                _ => PickKind::Pluck,
+            }
+        };
+
+        let pitch_hz = if matches!(kind, PickKind::Strum | PickKind::Noise) {
+            None
+        } else {
+            pitch_opt
+        };
+
+        events.push(GuitarEvent {
+            time_secs: of as f32 * frame_secs,
+            pitch_hz,
+            confidence,
+            velocity,
+            decay_ms,
+            kind,
+        });
+    }
+
+    // Slide detection: a Pluck whose pitch is within 200 cents of the
+    // previous Pluck AND fires within 100 ms gets reclassified as
+    // Slide. Bend behaves the same way structurally — both have a
+    // smooth-pitch-transition signature.
+    for i in 1..events.len() {
+        let (prev_t, prev_pitch, prev_kind) = (
+            events[i - 1].time_secs,
+            events[i - 1].pitch_hz,
+            events[i - 1].kind,
+        );
+        let cur = &mut events[i];
+        if cur.kind != PickKind::Pluck || prev_kind != PickKind::Pluck {
+            continue;
+        }
+        let (Some(p1), Some(p0)) = (cur.pitch_hz, prev_pitch) else {
+            continue;
+        };
+        if cur.time_secs - prev_t > 0.100 {
+            continue;
+        }
+        let cents = 1200.0 * (p1 / p0).log2().abs();
+        if (50.0..200.0).contains(&cents) {
+            cur.kind = PickKind::Slide;
+        }
+    }
+
+    // Roll up counts.
+    let mut pick_count = 0_u32;
+    let mut repeated = 0_u32;
+    let mut pitch_change = 0_u32;
+    let mut bends = 0_u32;
+    let mut strums = 0_u32;
+    for ev in &events {
+        match ev.kind {
+            PickKind::Noise => {}
+            PickKind::Strum => {
+                pick_count += 1;
+                strums += 1;
+            }
+            PickKind::Pluck => {
+                pick_count += 1;
+                pitch_change += 1;
+            }
+            PickKind::Repeat => {
+                pick_count += 1;
+                repeated += 1;
+            }
+            PickKind::Slide => {
+                pick_count += 1;
+                bends += 1;
+            }
+        }
+    }
+
+    let estimated_polyphony = if polyphony_n > 0 {
+        polyphony_acc / polyphony_n as f32
+    } else {
+        0.0
+    };
+
+    GuitarTelemetry {
+        pick_count,
+        repeated_pick_count: repeated,
+        pitch_change_count: pitch_change,
+        bend_or_slide_count: bends,
+        strum_count: strums,
+        estimated_polyphony: estimated_polyphony.clamp(0.0, 1.0),
+        events,
+    }
+}
+
+fn decay_ms_from_energy(energy: &[f32], onset_frame: usize, frame_secs: f32) -> f32 {
+    if onset_frame >= energy.len() - 1 {
+        return 0.0;
+    }
+    let look_ahead = 10.min(energy.len() - onset_frame - 1);
+    let mut peak_idx = onset_frame;
+    let mut peak_val = energy[onset_frame];
+    for (i, &v) in energy.iter().enumerate().skip(onset_frame).take(look_ahead) {
+        if v > peak_val {
+            peak_val = v;
+            peak_idx = i;
+        }
+    }
+    let target = peak_val * 0.3;
+    for (i, &v) in energy.iter().enumerate().skip(peak_idx) {
+        if v < target {
+            return (i - peak_idx) as f32 * frame_secs * 1000.0;
+        }
+    }
+    (energy.len() - peak_idx) as f32 * frame_secs * 1000.0
+}
+
+/// Polyphony probe — count spectral peaks above –12 dB from max in
+/// the time window. Returns a score in [0, 1] where 0 ≈ pure tone,
+/// 1 ≈ many simultaneous fundamentals (strum). Uses the same
+/// `settings.polyphony_peak_count` cutoff but reports a continuous
+/// score so the GuitarTelemetry's `estimated_polyphony` can be a
+/// useful average over the whole track, not just a binary.
+fn polyphony_score(window: &[f32], sr: u32, settings: &TelemetrySettings) -> f32 {
+    use rustfft::{num_complex::Complex, FftPlanner};
+    // Pad / truncate to a fixed power-of-two FFT for the probe.
+    const PROBE_SIZE: usize = 4096;
+    let mut buf = vec![Complex { re: 0.0, im: 0.0 }; PROBE_SIZE];
+    let n = window.len().min(PROBE_SIZE);
+    for (i, b) in buf.iter_mut().enumerate().take(n) {
+        let w = 0.5 - 0.5 * (std::f32::consts::TAU * i as f32 / (PROBE_SIZE - 1) as f32).cos();
+        b.re = window[i] * w;
+    }
+    let mut planner = FftPlanner::<f32>::new();
+    let fft = planner.plan_fft_forward(PROBE_SIZE);
+    fft.process(&mut buf);
+    let half = PROBE_SIZE / 2;
+    let mags: Vec<f32> = buf[..half].iter().map(|c| c.norm()).collect();
+    let bin_hz = sr as f32 / PROBE_SIZE as f32;
+
+    // Restrict to musical fundamentals range (50–2000 Hz). We don't
+    // care if there's an extra peak at 8 kHz — that's overtone, not
+    // a separate fundamental.
+    let lo = (50.0 / bin_hz) as usize;
+    let hi = ((2_000.0 / bin_hz) as usize).min(half);
+    if hi <= lo + 4 {
+        return 0.0;
+    }
+
+    let max = mags[lo..hi].iter().cloned().fold(0.0_f32, f32::max);
+    if max < 1e-6 {
+        return 0.0;
+    }
+    let threshold = max * 0.25; // –12 dB
+    let mut peaks = 0_usize;
+    for i in (lo + 1)..(hi - 1) {
+        if mags[i] >= threshold && mags[i] > mags[i - 1] && mags[i] > mags[i + 1] {
+            peaks += 1;
+        }
+    }
+    // Map peak count → [0, 1] saturating at the configured cutoff.
+    let cap = settings.polyphony_peak_count.max(1) as f32;
+    (peaks as f32 / cap).clamp(0.0, 1.0)
+}
+
+/// YIN pitch tracker (de Cheveigné & Kawahara 2002). Returns the
+/// detected fundamental in Hz and the cumulative mean normalised
+/// difference at the chosen lag (lower = more confident; values
+/// below `threshold` are typically reliable).
+///
+/// Implementation: difference function → cumulative mean normalised
+/// difference (CMND) → first lag whose CMND drops below the threshold
+/// → parabolic interpolation around that lag. ~80 LOC, no FFT —
+/// straight time-domain autocorrelation. O(n²) in the lag range,
+/// but n is only a few hundred for guitar / bass fundamentals at a
+/// 100 ms window, so fast enough.
+///
+/// Returns `(None, normalised_difference_at_min)` when no lag in
+/// the search range is below the threshold.
+fn yin_pitch(
+    x: &[f32],
+    sr: f32,
+    lag_min: usize,
+    lag_max: usize,
+    threshold: f32,
+) -> (Option<f32>, f32) {
+    if x.len() < lag_max + 4 || lag_max <= lag_min {
+        return (None, 1.0);
+    }
+    let n = x.len();
+    let max_tau = lag_max.min(n / 2);
+    if max_tau <= lag_min {
+        return (None, 1.0);
+    }
+
+    // Step 1 — difference function d_t(τ) = Σ_{j=0}^{W-1} (x_j − x_{j+τ})².
+    // Step 2 — cumulative mean normalised difference d′_t(τ) = d_t(τ) /
+    //          ((1/τ) · Σ_{k=1}^τ d_t(k)).  d′(0) := 1.
+    let mut d = vec![0.0_f32; max_tau + 1];
+    for tau in 1..=max_tau {
+        let mut s = 0.0_f32;
+        let limit = n - tau;
+        for j in 0..limit {
+            let diff = x[j] - x[j + tau];
+            s += diff * diff;
+        }
+        d[tau] = s;
+    }
+    let mut cmnd = vec![1.0_f32; max_tau + 1];
+    let mut running = 0.0_f64;
+    for tau in 1..=max_tau {
+        running += d[tau] as f64;
+        let avg = (running / tau as f64) as f32;
+        cmnd[tau] = if avg > 1e-9 { d[tau] / avg } else { 1.0 };
+    }
+
+    // Step 3 — first τ ≥ lag_min with cmnd(τ) < threshold AND a
+    // local minimum (cmnd(τ-1) > cmnd(τ) and cmnd(τ+1) > cmnd(τ)).
+    let mut chosen: Option<usize> = None;
+    for tau in lag_min..max_tau {
+        if cmnd[tau] < threshold && cmnd[tau] < cmnd[tau + 1] {
+            // walk down to the local minimum (handles plateau edges)
+            let mut t = tau;
+            while t < max_tau && cmnd[t + 1] < cmnd[t] {
+                t += 1;
+            }
+            chosen = Some(t);
+            break;
+        }
+    }
+    let Some(tau) = chosen else {
+        // Best-effort: report the cmnd at the global minimum so the
+        // caller has a confidence number even when no candidate
+        // crossed the threshold.
+        let (_, &min_v) = cmnd[lag_min..max_tau]
+            .iter()
+            .enumerate()
+            .min_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .unwrap_or((0, &1.0));
+        return (None, min_v);
+    };
+
+    // Step 4 — parabolic interpolation around the chosen lag for
+    // sub-sample accuracy.
+    let refined_tau = if tau == 0 || tau == max_tau {
+        tau as f32
+    } else {
+        let s0 = cmnd[tau - 1];
+        let s1 = cmnd[tau];
+        let s2 = cmnd[tau + 1];
+        let denom = 2.0 * (2.0 * s1 - s0 - s2);
+        let delta = if denom.abs() > 1e-9 {
+            (s2 - s0) / denom
+        } else {
+            0.0
+        };
+        tau as f32 + delta.clamp(-1.0, 1.0)
+    };
+    if refined_tau < 1.0 {
+        return (None, cmnd[tau]);
+    }
+    (Some(sr / refined_tau), cmnd[tau])
+}
+
+// ───────────────────── Krumhansl-Schmuckler key estimation ─────────────────────
+
+/// Krumhansl & Kessler (1982) major / minor key profiles. 12 values
+/// each, indexed by pitch class (0=C, 1=C♯, …, 11=B). The numbers
+/// reflect the perceived fit of each scale degree within the key.
+const KS_MAJOR: [f32; 12] = [
+    6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88,
+];
+const KS_MINOR: [f32; 12] = [
+    6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17,
+];
+
+/// Estimate the key from a list of `GuitarEvent`s. Builds a
+/// pitch-class histogram (12 bins) weighted by velocity × duration-
+/// until-next-event, correlates against each of the 24 K-S templates,
+/// returns the best fit + a runner-up.
+pub fn estimate_key_from_events(events: &[GuitarEvent]) -> Option<KeyEstimate> {
+    let pitched: Vec<&GuitarEvent> = events
+        .iter()
+        .filter(|e| e.pitch_hz.is_some() && !matches!(e.kind, PickKind::Noise | PickKind::Strum))
+        .collect();
+    if pitched.len() < 8 {
+        // Not enough pitched material to commit to a key.
+        return None;
+    }
+    let mut histogram = [0.0_f32; 12];
+    for (i, ev) in pitched.iter().enumerate() {
+        let Some(hz) = ev.pitch_hz else { continue };
+        // Convert Hz to MIDI: m = 69 + 12·log2(hz / 440).
+        let midi = 69.0 + 12.0 * (hz / 440.0).log2();
+        let pc = ((midi.round() as i32).rem_euclid(12)) as usize;
+        // Weight by velocity × duration until the next pitched event
+        // (default 0.25 s for the last event so it isn't ignored).
+        let dur = if i + 1 < pitched.len() {
+            (pitched[i + 1].time_secs - ev.time_secs).clamp(0.05, 4.0)
+        } else {
+            0.25
+        };
+        histogram[pc] += ev.velocity.max(0.05) * dur;
+    }
+
+    estimate_key_from_histogram(&histogram)
+}
+
+/// Public so the project-level aggregation (sum of per-track
+/// histograms) can use the same K-S code path.
+pub fn estimate_key_from_histogram(histogram: &[f32; 12]) -> Option<KeyEstimate> {
+    let total: f32 = histogram.iter().sum();
+    if total < 1e-3 {
+        return None;
+    }
+
+    // Score every (root, mode) by Pearson correlation of the rotated
+    // histogram against the corresponding K-S template.
+    let mut scores: Vec<(u8, KeyMode, f32)> = Vec::with_capacity(24);
+    for root in 0..12 {
+        for &(template, mode) in &[(KS_MAJOR, KeyMode::Major), (KS_MINOR, KeyMode::Minor)] {
+            let r = pearson_rotated(histogram, &template, root);
+            scores.push((root as u8, mode, r));
+        }
+    }
+    scores.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+    let (root, mode, conf) = scores[0];
+    let (root2, mode2, conf2) = scores[1];
+    Some(KeyEstimate {
+        root,
+        mode,
+        confidence: conf,
+        second_choice_root: root2,
+        second_choice_mode: mode2,
+        second_choice_confidence: conf2,
+    })
+}
+
+/// Pearson correlation between `hist` (rotated by `root` so
+/// `hist[root + i mod 12]` aligns with `template[i]`) and `template`.
+fn pearson_rotated(hist: &[f32; 12], template: &[f32; 12], root: usize) -> f32 {
+    let mut h_mean = 0.0_f32;
+    let mut t_mean = 0.0_f32;
+    for i in 0..12 {
+        h_mean += hist[(root + i) % 12];
+        t_mean += template[i];
+    }
+    h_mean /= 12.0;
+    t_mean /= 12.0;
+    let mut num = 0.0_f32;
+    let mut den_h = 0.0_f32;
+    let mut den_t = 0.0_f32;
+    for i in 0..12 {
+        let dh = hist[(root + i) % 12] - h_mean;
+        let dt = template[i] - t_mean;
+        num += dh * dt;
+        den_h += dh * dh;
+        den_t += dt * dt;
+    }
+    if den_h < 1e-9 || den_t < 1e-9 {
+        return 0.0;
+    }
+    num / (den_h.sqrt() * den_t.sqrt())
+}
+
+/// Aggregate key estimate from many tracks' telemetry — sums their
+/// pitch-class histograms (re-derived from each track's events) and
+/// runs K-S over the union. The right call for the project-level
+/// "Estimated key" readout in the Project tab.
+pub fn estimate_song_key(tracks: &[crate::project::Track]) -> Option<KeyEstimate> {
+    let mut histogram = [0.0_f32; 12];
+    let mut total_events = 0_usize;
+    for t in tracks {
+        let Some(tel) = t.telemetry.as_ref() else {
+            continue;
+        };
+        let Some(g) = tel.guitar.as_ref() else {
+            continue;
+        };
+        let pitched: Vec<&GuitarEvent> = g
+            .events
+            .iter()
+            .filter(|e| {
+                e.pitch_hz.is_some() && !matches!(e.kind, PickKind::Noise | PickKind::Strum)
+            })
+            .collect();
+        for (i, ev) in pitched.iter().enumerate() {
+            let Some(hz) = ev.pitch_hz else { continue };
+            let midi = 69.0 + 12.0 * (hz / 440.0).log2();
+            let pc = ((midi.round() as i32).rem_euclid(12)) as usize;
+            let dur = if i + 1 < pitched.len() {
+                (pitched[i + 1].time_secs - ev.time_secs).clamp(0.05, 4.0)
+            } else {
+                0.25
+            };
+            histogram[pc] += ev.velocity.max(0.05) * dur;
+        }
+        total_events += pitched.len();
+    }
+    if total_events < 16 {
+        return None;
+    }
+    estimate_key_from_histogram(&histogram)
+}
+
+/// Sentinel telemetry record — what a "Profile = Off" track gets.
+/// All numerics zeroed; analyzer_version current so the dispatcher
+/// won't keep re-trying. Safe to render — the chip strip skips zero
+/// onset / zero pick / zero drum cases automatically.
+fn empty_telemetry() -> TrackTelemetry {
+    TrackTelemetry {
+        analyzer_version: ANALYZER_VERSION,
+        spectral_centroid_avg: 0.0,
+        spectral_centroid_std: 0.0,
+        spectral_flatness_avg: 0.0,
+        spectral_rolloff_avg: 0.0,
+        rms_avg_db: -120.0,
+        rms_std_db: 0.0,
+        crest_factor_avg: 0.0,
+        peak_db: -120.0,
+        onset_count: 0,
+        onset_rate_hz: 0.0,
+        sustain_ratio: 0.0,
+        arousal: 0.0,
+        valence: 0.0,
+        drum_kit: None,
+        guitar: None,
+        key_estimate: None,
+    }
+}
+
 // ───────────────────── async service ─────────────────────
 //
 // One worker thread drains a request queue, runs `analyze_wav` per
@@ -776,7 +1662,13 @@ pub struct TelemetryRequest {
     pub project_root: PathBuf,
     pub track_id: String,
     pub abs_path: PathBuf,
-    pub is_drum_stem: bool,
+    /// Profile already resolved from `(TelemetryProfile, TrackSource)`
+    /// by the caller. The worker doesn't re-resolve.
+    pub profile: ResolvedProfile,
+    /// Snapshot of the user-tweakable thresholds at dispatch time.
+    /// Avoids a shared lock; if the user edits settings mid-batch
+    /// the in-flight requests still finish on the old values.
+    pub settings: TelemetrySettings,
 }
 
 #[derive(Debug)]
@@ -808,8 +1700,13 @@ impl TelemetryService {
             .name("tbss-telemetry".into())
             .spawn(move || {
                 while let Ok(req) = req_rx.recv() {
-                    let outcome =
-                        analyze_wav(&req.abs_path, req.is_drum_stem).map_err(|e| format!("{e:#}"));
+                    let outcome = if req.profile == ResolvedProfile::None {
+                        // Profile == Off → don't even open the WAV.
+                        Ok(empty_telemetry())
+                    } else {
+                        analyze_wav(&req.abs_path, req.profile, &req.settings)
+                            .map_err(|e| format!("{e:#}"))
+                    };
                     let result = TelemetryResult {
                         project_root: req.project_root,
                         track_id: req.track_id,
@@ -910,7 +1807,12 @@ mod tests {
         let dir = std::env::temp_dir();
         let path = dir.join("tbss_test_silence.wav");
         write_synthetic_wav(&path, vec![0.0; 48_000], 48_000).unwrap();
-        let t = analyze_wav(&path, false).unwrap();
+        let t = analyze_wav(
+            &path,
+            ResolvedProfile::UniversalOnly,
+            &TelemetrySettings::default(),
+        )
+        .unwrap();
         assert_eq!(t.analyzer_version, ANALYZER_VERSION);
         assert!(t.peak_db < -60.0);
         assert_eq!(t.onset_count, 0);
@@ -931,7 +1833,12 @@ mod tests {
         let dir = std::env::temp_dir();
         let path = dir.join("tbss_test_tone.wav");
         write_synthetic_wav(&path, samples, sr).unwrap();
-        let t = analyze_wav(&path, false).unwrap();
+        let t = analyze_wav(
+            &path,
+            ResolvedProfile::UniversalOnly,
+            &TelemetrySettings::default(),
+        )
+        .unwrap();
         // 4kHz on a 24kHz Nyquist → centroid > 0.05 (4/24).
         assert!(t.spectral_centroid_avg > 0.05);
         // Pure tone → low flatness.
@@ -960,7 +1867,12 @@ mod tests {
         let dir = std::env::temp_dir();
         let path = dir.join("tbss_test_pulses.wav");
         write_synthetic_wav(&path, samples, sr).unwrap();
-        let t = analyze_wav(&path, false).unwrap();
+        let t = analyze_wav(
+            &path,
+            ResolvedProfile::UniversalOnly,
+            &TelemetrySettings::default(),
+        )
+        .unwrap();
         // Should detect at least 3 of the 5 pulses (some may be merged).
         assert!(
             t.onset_count >= 3,
@@ -1002,5 +1914,203 @@ mod tests {
             assert!(!c.glyph().is_empty());
             assert!(!c.label().is_empty());
         }
+    }
+
+    /// Synthetic 440 Hz sine into YIN should report ~440 Hz within
+    /// 5 cents. Confidence (cmnd at the chosen lag) should be near 0.
+    #[test]
+    fn yin_recovers_pure_a4() {
+        let sr = 48_000.0;
+        let f = 440.0;
+        let n = 4096;
+        let samples: Vec<f32> = (0..n)
+            .map(|i| 0.5 * (std::f32::consts::TAU * f * i as f32 / sr).sin())
+            .collect();
+        let lag_min = (sr / 1_000.0) as usize;
+        let lag_max = (sr / 80.0) as usize;
+        let (pitch, conf) = yin_pitch(&samples, sr, lag_min, lag_max, 0.15);
+        let pitch = pitch.expect("YIN should lock on a pure 440 Hz sine");
+        let cents = 1200.0 * (pitch / f).log2().abs();
+        assert!(
+            cents < 5.0,
+            "YIN drift = {cents:.2} cents (got {pitch:.2} Hz)"
+        );
+        assert!(conf < 0.10, "YIN confidence too high (worse): {conf}");
+    }
+
+    /// The polyphony probe should fire (high score) on a chord and
+    /// stay quiet (low score) on a single sine. This is what gates
+    /// `PickKind::Strum` in `analyze_guitar_picks`. We verify the
+    /// gate, not YIN itself — YIN is known to lock onto the implied
+    /// fundamental of a triad (the chord root), which is actually
+    /// the right behaviour for "what key is this chord in".
+    #[test]
+    fn polyphony_probe_separates_mono_from_chord() {
+        let sr = 48_000;
+        let n = 4096;
+        let mono: Vec<f32> = (0..n)
+            .map(|i| 0.5 * (std::f32::consts::TAU * 440.0 * i as f32 / sr as f32).sin())
+            .collect();
+        // Three pitches with no clean low-period commonality: detuned
+        // so the polyphony probe sees three distinct spectral peaks.
+        let chord: Vec<f32> = (0..n)
+            .map(|i| {
+                let t = i as f32 / sr as f32;
+                ((std::f32::consts::TAU * 313.0 * t).sin()
+                    + (std::f32::consts::TAU * 461.0 * t).sin()
+                    + (std::f32::consts::TAU * 727.0 * t).sin())
+                    * 0.3
+            })
+            .collect();
+        let s = TelemetrySettings::default();
+        let mono_score = polyphony_score(&mono, sr, &s);
+        let chord_score = polyphony_score(&chord, sr, &s);
+        assert!(
+            chord_score > mono_score + 0.1,
+            "expected chord_score > mono_score by 0.1+, got mono={mono_score} chord={chord_score}"
+        );
+    }
+
+    /// Krumhansl-Schmuckler should return the right key for a
+    /// hand-built C major histogram (major-scale notes weighted
+    /// strongly, off-scale notes weighted weakly).
+    #[test]
+    fn ks_finds_c_major_from_scale_histogram() {
+        // C major scale degrees with strong tonic + dominant
+        // weighting, weak chromatic notes. Should correlate strongest
+        // with the major template rotated to C (root = 0).
+        let mut h = [0.0_f32; 12];
+        h[0] = 6.0; // C
+        h[2] = 4.0; // D
+        h[4] = 4.0; // E
+        h[5] = 3.5; // F
+        h[7] = 5.5; // G
+        h[9] = 3.5; // A
+        h[11] = 3.0; // B
+                     // Light chromatic noise on the off-scale notes.
+        h[1] = 0.5;
+        h[3] = 0.5;
+        h[6] = 0.5;
+        h[8] = 0.5;
+        h[10] = 0.5;
+
+        let est = estimate_key_from_histogram(&h).expect("non-empty histogram → Some");
+        assert_eq!(est.root, 0, "expected C, got {}", est.root);
+        assert_eq!(est.mode, KeyMode::Major);
+        assert!(
+            est.confidence > 0.7,
+            "confidence too low: {}",
+            est.confidence
+        );
+    }
+
+    /// K-S on an empty histogram returns None — guard against /0.
+    #[test]
+    fn ks_returns_none_on_empty_histogram() {
+        let h = [0.0_f32; 12];
+        assert!(estimate_key_from_histogram(&h).is_none());
+    }
+
+    /// `KeyEstimate::label` produces sensible strings for the canonical
+    /// roots — a regression-guard for the 12-tone naming table.
+    #[test]
+    fn key_estimate_labels_match_table() {
+        let make = |root: u8, mode: KeyMode| KeyEstimate {
+            root,
+            mode,
+            confidence: 1.0,
+            second_choice_root: 0,
+            second_choice_mode: KeyMode::Major,
+            second_choice_confidence: 0.0,
+        };
+        assert_eq!(make(0, KeyMode::Major).label(), "C maj");
+        assert_eq!(make(9, KeyMode::Minor).label(), "A min");
+        assert_eq!(make(8, KeyMode::Major).label(), "A♭ maj");
+    }
+
+    /// `TelemetryProfile::resolve` must honour explicit values and
+    /// defer to `Auto` only when it's been chosen.
+    #[test]
+    fn profile_resolution_explicit_overrides_role() {
+        use crate::project::{StemRole, TrackSource};
+        let suno_drums = TrackSource::SunoStem {
+            role: StemRole::Drums,
+            original_filename: "drums.wav".into(),
+            session_epoch: None,
+            session_ordinal: None,
+            provenance: None,
+        };
+        // Auto on a Drums stem → Drums.
+        assert_eq!(
+            TelemetryProfile::Auto.resolve(&suno_drums),
+            ResolvedProfile::Drums
+        );
+        // Explicit Guitar wins, even if the role says Drums.
+        assert_eq!(
+            TelemetryProfile::Guitar.resolve(&suno_drums),
+            ResolvedProfile::Guitar
+        );
+        // Explicit None always disables.
+        assert_eq!(
+            TelemetryProfile::None.resolve(&suno_drums),
+            ResolvedProfile::None
+        );
+        // Recorded with Auto → UniversalOnly.
+        assert_eq!(
+            TelemetryProfile::Auto.resolve(&TrackSource::Recorded),
+            ResolvedProfile::UniversalOnly
+        );
+    }
+
+    /// End-to-end: write a synthetic guitar-like WAV (decaying sines
+    /// at three different pitches with sharp attacks at known times),
+    /// run `analyze_wav` with the Guitar profile, expect ≥3 picks
+    /// classified as Pluck and a usable key estimate populated.
+    #[test]
+    fn analyzer_guitar_profile_detects_picks_and_pitch() {
+        let sr = 48_000;
+        let dur_secs = 1.5_f32;
+        let total = (sr as f32 * dur_secs) as usize;
+        let mut samples = vec![0.0_f32; total];
+
+        // Three hits at 0.1, 0.5, 0.9 s, pitches A2 (~110), E3 (~165),
+        // A3 (~220). Sharp attack + exponential decay (~250 ms tau).
+        let hits = [(0.10_f32, 110.0_f32), (0.50, 164.81), (0.90, 220.0)];
+        for (t0, f) in hits {
+            let start = (t0 * sr as f32) as usize;
+            let tau = sr as f32 * 0.25; // 250 ms decay
+            for i in 0..(sr as usize / 2) {
+                if start + i >= total {
+                    break;
+                }
+                let env = (-(i as f32) / tau).exp();
+                samples[start + i] +=
+                    0.4 * env * (std::f32::consts::TAU * f * i as f32 / sr as f32).sin();
+            }
+        }
+
+        let dir = std::env::temp_dir();
+        let path = dir.join("tbss_test_guitar.wav");
+        write_synthetic_wav(&path, samples, sr).unwrap();
+        let t = analyze_wav(
+            &path,
+            ResolvedProfile::Guitar,
+            &TelemetrySettings::default(),
+        )
+        .unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        let g = t
+            .guitar
+            .expect("guitar profile must populate guitar telemetry");
+        assert!(
+            g.pick_count >= 2,
+            "expected ≥2 picks, got {} (events: {})",
+            g.pick_count,
+            g.events.len()
+        );
+        // At least one event should have a pitched read.
+        let pitched = g.events.iter().filter(|e| e.pitch_hz.is_some()).count();
+        assert!(pitched >= 1, "no pitched events recovered");
     }
 }

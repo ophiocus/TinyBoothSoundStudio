@@ -165,6 +165,15 @@ pub struct TinyBoothApp {
     /// patches them onto `app.project`. v0.4.13.
     pub telemetry: crate::telemetry::TelemetryService,
 
+    /// User-tweakable analyzer thresholds (pick velocity, YIN
+    /// tolerance, polyphony cutoff). Persisted to
+    /// `telemetry_settings.json`. Edited via Admin → Telemetry
+    /// settings…. Snapshotted into each `TelemetryRequest` at
+    /// dispatch time so in-flight requests use the values that were
+    /// active when they were queued. Added v0.4.14.
+    pub telemetry_settings: crate::telemetry::TelemetrySettings,
+    pub show_telemetry_settings: bool,
+
     /// Set to `true` at construction; cleared on first `update()`
     /// frame after dispatching the initial backfill scan over the
     /// auto-restored project. Without this, the auto-restored
@@ -292,6 +301,8 @@ impl TinyBoothApp {
             audio_err_tx,
             audio_err_rx,
             telemetry: crate::telemetry::TelemetryService::spawn(),
+            telemetry_settings: crate::telemetry::TelemetrySettings::load(),
+            show_telemetry_settings: false,
             initial_telemetry_pending: true,
             show_health: false,
         }
@@ -434,18 +445,23 @@ impl TinyBoothApp {
         rec.tracks.push(new_track.clone());
         match rec.save() {
             Ok(()) => {
-                // Dispatch telemetry analysis for the new take. Always
-                // non-drum (recorded takes don't carry a StemRole). The
-                // worker patches the result onto the recordings manifest
-                // when it lands; we go directly through the recordings
-                // project root so the result applies even if the user
-                // doesn't currently have the recordings project active.
+                // Dispatch telemetry analysis for the new take. The
+                // resolved profile is `Auto`'s default for Recorded
+                // sources → `UniversalOnly`. (Users can switch the
+                // profile to Guitar from the Mix-tab lane to re-run
+                // pitch analysis on a take.) The worker patches the
+                // result onto the recordings manifest when it lands;
+                // we go directly through the recordings project root
+                // so the result applies even if the user doesn't
+                // currently have the recordings project active.
                 let abs = rec.track_abs_path(&new_track);
+                let profile = new_track.telemetry_profile.resolve(&new_track.source);
                 self.telemetry.dispatch(crate::telemetry::TelemetryRequest {
                     project_root: rec.root.clone(),
                     track_id: new_track.id.clone(),
                     abs_path: abs,
-                    is_drum_stem: false,
+                    profile,
+                    settings: self.telemetry_settings.clone(),
                 });
                 // If the user has the recordings project open as the
                 // active project (via File → Open Recordings), keep
@@ -866,12 +882,11 @@ impl TinyBoothApp {
 
     /// Walk `self.project.tracks` and dispatch a telemetry analysis
     /// request for every track whose `telemetry` is `None` or whose
-    /// `analyzer_version` is older than the current one. Drum-kit
-    /// detection is gated on `StemRole::Drums | Percussion` per
-    /// TBSS-FR-0005 §"Lifecycle". Cheap on the all-fresh path —
+    /// `analyzer_version` is older than the current one. The profile
+    /// (drum / guitar / bass / etc.) is resolved per track via
+    /// `TelemetryProfile::resolve`. Cheap on the all-fresh path —
     /// just iterates and pushes to a channel.
     pub fn dispatch_telemetry_for_active_project(&mut self) {
-        use crate::project::{StemRole, TrackSource};
         let root = self.project.root.clone();
         for t in &self.project.tracks {
             // Skip tracks whose telemetry is already current.
@@ -884,20 +899,41 @@ impl TinyBoothApp {
             if !abs.is_file() {
                 continue;
             }
-            let is_drum_stem = matches!(
-                &t.source,
-                TrackSource::SunoStem {
-                    role: StemRole::Drums | StemRole::Percussion,
-                    ..
-                }
-            );
+            let profile = t.telemetry_profile.resolve(&t.source);
             self.telemetry.dispatch(crate::telemetry::TelemetryRequest {
                 project_root: root.clone(),
                 track_id: t.id.clone(),
                 abs_path: abs,
-                is_drum_stem,
+                profile,
+                settings: self.telemetry_settings.clone(),
             });
         }
+    }
+
+    /// Force-re-analyze a single track (typically because its
+    /// `telemetry_profile` just changed). Sets `telemetry = None`
+    /// then dispatches with the new resolved profile. Saves so the
+    /// `None` is persisted — otherwise the user could close the
+    /// app between profile-change and analysis-completion and the
+    /// stale telemetry would still be on disk.
+    pub fn invalidate_telemetry_for_track(&mut self, idx: usize) {
+        let Some(track) = self.project.tracks.get_mut(idx) else {
+            return;
+        };
+        track.telemetry = None;
+        let profile = track.telemetry_profile.resolve(&track.source);
+        let track_id = track.id.clone();
+        let abs = self.project.root.join(&track.file);
+        if abs.is_file() {
+            self.telemetry.dispatch(crate::telemetry::TelemetryRequest {
+                project_root: self.project.root.clone(),
+                track_id,
+                abs_path: abs,
+                profile,
+                settings: self.telemetry_settings.clone(),
+            });
+        }
+        let _ = self.project.save();
     }
 
     /// Drain every result the worker has produced since the last
@@ -947,6 +983,11 @@ impl TinyBoothApp {
             }
         }
         if applied_active > 0 {
+            // Re-estimate the project-level key from the union of
+            // every melodic track's pitch-class histogram (cheap —
+            // a couple of hundred adds, one Pearson over 24 keys).
+            self.project.song_key_estimate =
+                crate::telemetry::estimate_song_key(&self.project.tracks);
             if let Err(e) = self.project.save() {
                 self.status = Some(format!("telemetry save error: {e:#}"));
             }
@@ -973,6 +1014,7 @@ impl TinyBoothApp {
                 }
             }
             if changed > 0 {
+                proj.song_key_estimate = crate::telemetry::estimate_song_key(&proj.tracks);
                 let _ = proj.save();
             }
         }
@@ -1179,6 +1221,10 @@ impl eframe::App for TinyBoothApp {
                         }
                         ui.close_menu();
                     }
+                    if ui.button("Telemetry settings…").clicked() {
+                        self.show_telemetry_settings = true;
+                        ui.close_menu();
+                    }
                 });
                 ui.menu_button("Help", |ui| {
                     if ui.button("Manual…  (F1)").clicked() {
@@ -1341,6 +1387,11 @@ impl eframe::App for TinyBoothApp {
         // Project Health modal (TBSS-FR-0005).
         if self.show_health {
             ui::health::show(self, ctx);
+        }
+
+        // Telemetry settings modal (Admin → Telemetry settings…).
+        if self.show_telemetry_settings {
+            ui::telemetry_settings::show(self, ctx);
         }
     }
 

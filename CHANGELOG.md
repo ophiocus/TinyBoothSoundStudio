@@ -12,6 +12,43 @@ If the user has the app open at the moment a new release is published, the botto
 
 Proposed fix (queued for a follow-up patch): re-run the background check on a 5-minute timer while the app is idle, AND on every tab change. Both are cheap, both are bounded, and either one closes the window. ~30 LOC in `src/git_update.rs` plus a `last_check_at: Option<Instant>` field. No new deps.
 
+## [0.4.14] — 2026-05-08
+
+### Added
+- **Guitar / bass pick-stroke detection with YIN pitch tracking** (TBSS-FR-0005 phase 2). Each spectral-flux onset in the MID + HIGH_MID bands becomes a candidate event; YIN runs on a 50–150 ms post-onset window for sub-sample-accurate pitch; a polyphony probe counts spectral peaks above –12 dB to flag strums. Each event is classified into one of:
+  - `Pluck` — single-string monophonic pick at a new pitch
+  - `Repeat` — same pitch as previous (within ±50 cents, configurable) — tremolo / repeat picking
+  - `Strum` — polyphonic onset; no pitch reported, single event per strum (per the design discussion's "1 event per strum" decision)
+  - `Slide` — smooth pitch trajectory continuing from the previous event, between 50–200 cents in <100 ms
+  - `Noise` — onset detected but velocity below the configured pick threshold OR YIN gave up cleanly
+- **Pitch persisted as raw Hz** plus YIN confidence (cmnd at the chosen lag). Cents-off-pitch / detune analysis / bend density / key inference / riff fingerprinting are all free post-processing of the persisted data — no re-analysis needed when those features land.
+- **Krumhansl-Schmuckler key detection** (per-track + project-level). Per-track: weighted pitch-class histogram (velocity × duration-until-next-pitched-event) → 24-key Pearson correlation against the canonical Krumhansl & Kessler 1982 templates → top key + runner-up. Project-level: union of every guitar/bass track's histogram, recomputed every time a guitar/bass result lands in `drain_telemetry_results`. Surfaced on the Project tab ("Estimated key: G♯ min") and per-track on the Mix-tab lane chips ("♪ E♭ maj").
+- **User-selectable analyzer profile per track** (TBSS-FR-0005 §"Phase 2"). New `▾ Auto` / `▾ Guitar` / `▾ Bass` / `▾ Drums` / `▾ Universal only` / `▾ Off` dropdown on every Mix-tab lane header. Default is `Auto` — resolves from the track's `StemRole` (drums → drum kit, electric/acoustic guitar → guitar, bass → bass, everything else → universal-only). Explicit values override — useful when Suno mislabels a stem as `FxOther` when it's actually a percussive synth, or when a recorded take has no role at all and the user wants a guitar pitch read on it. Changing the profile clears `track.telemetry`, persists, and re-dispatches.
+- **Admin → Telemetry settings…** modal with sliders for every analyzer threshold:
+  - k·MAD onset threshold (default 3.0)
+  - Guitar pick velocity threshold (default 0.05)
+  - Bass pick velocity threshold (default 0.04)
+  - YIN cumulative-mean-difference threshold (default 0.15)
+  - Same-pitch tolerance in cents (default 50, controls Pluck / Repeat split)
+  - Polyphony cutoff (default 5 peaks above –12 dB → Strum)
+  Persisted to `%APPDATA%\TinyBooth Sound Studio\telemetry_settings.json`. Snapshotted into each `TelemetryRequest` at dispatch time so in-flight analyses use the values that were active when they were queued (mid-batch edits don't corrupt running work).
+- **Project Health panel** gained two columns: `Profile` (selected → resolved, e.g. `Auto → guitar`) and `Key`. Instrument-layer column now shows `🎸N ↗N (poly NN%)` for guitar tracks alongside the existing drum-kit roll-up.
+- **`ANALYZER_VERSION` bumped to 2** — old v0.4.13 telemetry is treated as stale and re-computed on next project open. Migration is invisible: the dispatcher already skips up-to-date rows.
+
+### Why no MIDI ingest
+Suno's bundle is purely audio (WAV stems + RIFF `LIST/INFO/ICMT` provenance — already parsed in `src/suno_meta.rs`). No `.mid`, no symbolic notes, no chord chart. Suno is a generative *audio* model; stem separation is post-hoc Demucs-style source separation that by construction can't recover MIDI. All pitch data has to come from our own analysis — YIN is the lever. A future `pitch_source: Analyzed | ImportedMidi` enum is reserved on the schema so user-supplied sidecar `.mid` files (from Basic Pitch / Melodyne / MT3) can plug in without a re-migration.
+
+### Tests
+- 7 new unit tests:
+  - YIN recovers pure 440 Hz within 5 cents on a synthetic A4 sine
+  - Polyphony probe scores chord (313 + 461 + 727 Hz, no clean common period) ≥ 0.1 higher than a pure 440 Hz sine
+  - Krumhansl-Schmuckler returns root=C, mode=Major on a hand-built C-major-scale histogram (confidence > 0.7)
+  - K-S returns None on an all-zero histogram (no /0)
+  - `KeyEstimate::label` produces "C maj" / "A min" / "A♭ maj" for canonical roots
+  - `TelemetryProfile::resolve` honours explicit values (Guitar over a Drums-roled stem) and Auto resolves correctly
+  - End-to-end: synthetic 3-pitch guitar-like WAV (decaying sines) → Guitar profile → ≥2 picks detected, ≥1 pitched event recovered
+- Total suite: 62 → **69 passing**
+
 ## [0.4.13] — 2026-05-08
 
 ### Added

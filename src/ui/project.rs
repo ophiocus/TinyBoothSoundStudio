@@ -58,6 +58,30 @@ pub fn show(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
         "Created: {}",
         app.project.created.format("%Y-%m-%d %H:%M UTC")
     ));
+    // Song-level key estimate (v0.4.14). Sums every guitar/bass
+    // track's pitch-class histogram and runs Krumhansl-Schmuckler
+    // over the union. Updates incrementally as telemetry results
+    // land. Hidden when no melodic track has analyzed yet.
+    if let Some(k) = app.project.song_key_estimate.as_ref() {
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Estimated key:").strong());
+            ui.label(egui::RichText::new(k.label()).color(egui::Color32::from_rgb(180, 220, 240)))
+                .on_hover_text(format!(
+                    "Krumhansl-Schmuckler over the summed pitch-class histograms \
+                 of every guitar/bass track in this project.\n\
+                 Confidence {:.2}. Runner-up: {} {} ({:.2}).",
+                    k.confidence,
+                    {
+                        const NOTES: [&str; 12] = [
+                            "C", "C♯", "D", "E♭", "E", "F", "F♯", "G", "A♭", "A", "B♭", "B",
+                        ];
+                        NOTES[(k.second_choice_root as usize) % 12]
+                    },
+                    k.second_choice_mode.label(),
+                    k.second_choice_confidence,
+                ));
+        });
+    }
     ui.separator();
 
     if app.project.tracks.is_empty() {

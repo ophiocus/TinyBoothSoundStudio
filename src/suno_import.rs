@@ -782,6 +782,7 @@ fn build_project(
         default_correction: None,
         suno_mixdown_path: None,
         suno_mixdown_lufs: None,
+        song_key_estimate: None,
         root: project_root.to_path_buf(),
     };
     let ordinal = project.next_suno_ordinal;

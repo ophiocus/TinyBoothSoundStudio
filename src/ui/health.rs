@@ -12,6 +12,7 @@
 
 use crate::app::TinyBoothApp;
 use crate::project::{StemRole, TrackSource};
+use crate::telemetry::ResolvedProfile;
 use eframe::egui;
 
 pub fn show(app: &mut TinyBoothApp, ctx: &egui::Context) {
@@ -117,29 +118,38 @@ pub fn show(app: &mut TinyBoothApp, ctx: &egui::Context) {
                 .max_height(360.0)
                 .show(ui, |ui| {
                     egui::Grid::new("tbss_health_grid")
-                        .num_columns(7)
+                        .num_columns(9)
                         .striped(true)
                         .min_col_width(50.0)
                         .show(ui, |ui| {
                             // Header row.
                             ui.label(egui::RichText::new("Track").strong());
                             ui.label(egui::RichText::new("Role").strong());
+                            ui.label(egui::RichText::new("Profile").strong());
                             ui.label(egui::RichText::new("Status").strong());
                             ui.label(egui::RichText::new("Onsets").strong());
                             ui.label(egui::RichText::new("Sustain").strong());
                             ui.label(egui::RichText::new("Mood").strong());
-                            ui.label(egui::RichText::new("Drum events").strong());
+                            ui.label(egui::RichText::new("Inst. layer").strong());
+                            ui.label(egui::RichText::new("Key").strong());
                             ui.end_row();
 
                             for t in &app.project.tracks {
                                 ui.label(&t.name);
                                 ui.label(role_label(&t.source));
+                                let resolved = t.telemetry_profile.resolve(&t.source);
+                                ui.label(format!(
+                                    "{} → {}",
+                                    t.telemetry_profile.label(),
+                                    resolved_label(resolved)
+                                ));
                                 match &t.telemetry {
                                     None => {
                                         ui.label(
                                             egui::RichText::new("pending")
                                                 .color(egui::Color32::from_rgb(240, 200, 100)),
                                         );
+                                        ui.label("—");
                                         ui.label("—");
                                         ui.label("—");
                                         ui.label("—");
@@ -162,16 +172,33 @@ pub fn show(app: &mut TinyBoothApp, ctx: &egui::Context) {
                                             "a {:.2} · v {:+.2}",
                                             tel.arousal, tel.valence
                                         ));
-                                        ui.label(match &tel.drum_kit {
-                                            None => "—".to_string(),
-                                            Some(kit) => format!(
+                                        // Instrument layer roll-up:
+                                        // drums → counts, guitar → pick
+                                        // count + bend count, else dash.
+                                        ui.label(if let Some(kit) = &tel.drum_kit {
+                                            format!(
                                                 "K{} S{} h{} T{} C{}",
                                                 kit.kick_count,
                                                 kit.snare_count,
                                                 kit.hihat_count,
                                                 kit.tom_count,
                                                 kit.cymbal_count
-                                            ),
+                                            )
+                                        } else if let Some(g) = &tel.guitar {
+                                            format!(
+                                                "🎸{} ↗{} (poly {:.0}%)",
+                                                g.pick_count,
+                                                g.bend_or_slide_count,
+                                                g.estimated_polyphony * 100.0
+                                            )
+                                        } else {
+                                            "—".to_string()
+                                        });
+                                        ui.label(match tel.key_estimate.as_ref() {
+                                            None => "—".to_string(),
+                                            Some(k) => {
+                                                format!("{} ({:.2})", k.label(), k.confidence)
+                                            }
                                         });
                                     }
                                 }
@@ -186,7 +213,8 @@ pub fn show(app: &mut TinyBoothApp, ctx: &egui::Context) {
                     egui::RichText::new(
                         "Telemetry is computed once per track at first save, \
                          persisted in the manifest, refreshed after Trim. \
-                         Drum-class detection runs only on Drums / Percussion stems.",
+                         The Profile column shows what was selected → what \
+                         was actually run (Auto resolves from the track role).",
                     )
                     .small()
                     .color(egui::Color32::from_gray(150)),
@@ -203,6 +231,16 @@ fn role_label(src: &TrackSource) -> String {
     match src {
         TrackSource::Recorded => "recorded".into(),
         TrackSource::SunoStem { role, .. } => role.label().to_string(),
+    }
+}
+
+fn resolved_label(p: ResolvedProfile) -> &'static str {
+    match p {
+        ResolvedProfile::None => "off",
+        ResolvedProfile::UniversalOnly => "universal",
+        ResolvedProfile::Drums => "drums",
+        ResolvedProfile::Guitar => "guitar",
+        ResolvedProfile::Bass => "bass",
     }
 }
 

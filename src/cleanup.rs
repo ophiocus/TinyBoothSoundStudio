@@ -446,6 +446,7 @@ mod tests {
             gain_automation: None,
             polarity_inverted: false,
             telemetry: None,
+            telemetry_profile: crate::telemetry::TelemetryProfile::default(),
         });
 
         let suno_shaped = p.suno_mixdown_path.is_some()

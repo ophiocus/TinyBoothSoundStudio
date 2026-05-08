@@ -389,6 +389,7 @@ fn lanes_view(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
     let pos = player.state.position_secs();
 
     let mut requested_correction: Option<usize> = None;
+    let mut requested_profile_change: Option<(usize, crate::telemetry::TelemetryProfile)> = None;
 
     egui::ScrollArea::vertical().show(ui, |ui| {
         for (idx, track) in player.state.tracks.iter().enumerate() {
@@ -398,7 +399,35 @@ fn lanes_view(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
                     egui::Layout::top_down(egui::Align::Min),
                     |ui| {
                         ui.add_space(2.0);
-                        ui.label(egui::RichText::new(&track.name).strong());
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new(&track.name).strong());
+                            // Telemetry profile dropdown (v0.4.14).
+                            // Compact "▾ Auto" / "▾ Guitar" etc. selector
+                            // to the right of the name. Changing it
+                            // schedules a re-analysis.
+                            if let Some(t) = app.project.tracks.get(idx) {
+                                let cur = t.telemetry_profile;
+                                let label = format!("▾ {}", cur.label());
+                                egui::ComboBox::from_id_source(("tel_prof", idx))
+                                    .selected_text(
+                                        egui::RichText::new(label)
+                                            .size(11.0)
+                                            .color(egui::Color32::from_gray(160)),
+                                    )
+                                    .width(96.0)
+                                    .show_ui(ui, |ui| {
+                                        let mut sel = cur;
+                                        for &p in crate::telemetry::TelemetryProfile::all() {
+                                            ui.selectable_value(&mut sel, p, p.label());
+                                        }
+                                        if sel != cur {
+                                            // Defer — `player` borrow blocks
+                                            // mutation of app.project here.
+                                            requested_profile_change = Some((idx, sel));
+                                        }
+                                    });
+                            }
+                        });
                         // Telemetry chips — pulled from the manifest
                         // (app.project.tracks), not the player's
                         // LiveTrack. The lane row is by-index aligned
@@ -484,6 +513,17 @@ fn lanes_view(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
             }
         }
         app.editing_correction_for = Some(i);
+    }
+
+    // Telemetry profile change — apply the staged choice (deferred
+    // out of the lane closure so the `player` borrow drops first),
+    // then re-dispatch the analyzer for that track.
+    if let Some((idx, new_profile)) = requested_profile_change {
+        if let Some(track) = app.project.tracks.get_mut(idx) {
+            track.telemetry_profile = new_profile;
+            app.project_dirty = true;
+        }
+        app.invalidate_telemetry_for_track(idx);
     }
 }
 
@@ -1026,6 +1066,57 @@ fn telemetry_chips(ui: &mut egui::Ui, track: &crate::project::Track) {
             }
         }
 
+        // Guitar / bass chips (v0.4.14). Pick count is the headline
+        // number — every Pluck / Repeat / Strum / Slide event counts.
+        // Bend/slide and strum-percentage get sub-chips when non-zero.
+        if let Some(g) = tel.guitar.as_ref() {
+            ui.label(
+                egui::RichText::new(format!("🎸{}", g.pick_count))
+                    .size(11.0)
+                    .monospace()
+                    .color(Color32::from_rgb(200, 220, 180)),
+            )
+            .on_hover_text(format!(
+                "{} picks total ({} pitch-changes, {} repeats, {} bends/slides, {} strums) · estimated polyphony {:.0}%",
+                g.pick_count,
+                g.pitch_change_count,
+                g.repeated_pick_count,
+                g.bend_or_slide_count,
+                g.strum_count,
+                g.estimated_polyphony * 100.0,
+            ));
+            if g.bend_or_slide_count > 0 {
+                ui.label(
+                    egui::RichText::new(format!("↗{}", g.bend_or_slide_count))
+                        .size(11.0)
+                        .monospace()
+                        .color(Color32::from_rgb(220, 180, 220)),
+                )
+                .on_hover_text(format!(
+                    "{} bend(s) or slide(s) detected",
+                    g.bend_or_slide_count
+                ));
+            }
+        }
+        // Per-track key estimate. Surfaced when present + confident.
+        if let Some(k) = tel.key_estimate.as_ref() {
+            if k.confidence >= 0.50 {
+                ui.label(
+                    egui::RichText::new(format!("♪ {}", k.label()))
+                        .size(11.0)
+                        .color(Color32::from_rgb(200, 220, 240)),
+                )
+                .on_hover_text(format!(
+                    "Estimated key: {} (confidence {:.2})\nRunner-up: {} {} ({:.2})",
+                    k.label(),
+                    k.confidence,
+                    note_name(k.second_choice_root),
+                    k.second_choice_mode.label(),
+                    k.second_choice_confidence,
+                ));
+            }
+        }
+
         // Mood pip — small coloured square positioned by valence
         // (cool ↔ warm hue) and saturated by arousal. Always shown
         // when telemetry exists. Hovers reveal the numerics.
@@ -1038,6 +1129,15 @@ fn telemetry_chips(ui: &mut egui::Ui, track: &crate::project::Track) {
             tel.arousal, tel.valence, tel.rms_avg_db, tel.crest_factor_avg, tel.peak_db
         ));
     });
+}
+
+/// 12-tone note name with sharps used for both the per-track and
+/// project-level key chip / readout. Matches `KeyEstimate::label`.
+fn note_name(root: u8) -> &'static str {
+    const NOTES: [&str; 12] = [
+        "C", "C♯", "D", "E♭", "E", "F", "F♯", "G", "A♭", "A", "B♭", "B",
+    ];
+    NOTES[(root as usize) % 12]
 }
 
 /// Map an (arousal, valence) point in [0,1] × [-1,1] to an RGB triple.

@@ -119,6 +119,7 @@ impl Track {
             gain_automation: None,
             polarity_inverted: false,
             telemetry: None,
+            telemetry_profile: crate::telemetry::TelemetryProfile::default(),
         }
     }
 
@@ -164,6 +165,7 @@ impl Track {
             gain_automation: None,
             polarity_inverted: false,
             telemetry: None,
+            telemetry_profile: crate::telemetry::TelemetryProfile::default(),
         }
     }
 }
@@ -256,6 +258,16 @@ pub struct Track {
     /// the design rationale. Added v0.4.13.
     #[serde(default)]
     pub telemetry: Option<crate::telemetry::TrackTelemetry>,
+
+    /// **User-selectable analyzer profile** (TBSS-FR-0005 §"Phase 2").
+    /// `Auto` (default) infers from `TrackSource`; explicit values
+    /// override — useful when Suno mislabels a stem (e.g. percussive
+    /// synth pad classified as `FxOther`) or when the user wants to
+    /// run a guitar analyzer on a recorded take. Changing this resets
+    /// `telemetry` to `None` and re-dispatches.
+    /// Added v0.4.14.
+    #[serde(default)]
+    pub telemetry_profile: crate::telemetry::TelemetryProfile,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -320,6 +332,15 @@ pub struct Project {
     #[serde(default)]
     pub suno_mixdown_lufs: Option<f32>,
 
+    /// Project-level key estimate — Krumhansl-Schmuckler over the
+    /// summed pitch-class histograms of every track that has guitar /
+    /// bass telemetry. Recomputed whenever a telemetry result lands
+    /// for a melodic track. `None` when no track has pitched events
+    /// yet (or all tracks are drums / vocals / FX). Surfaced in the
+    /// Project tab. Added v0.4.14.
+    #[serde(default)]
+    pub song_key_estimate: Option<crate::telemetry::KeyEstimate>,
+
     /// Filled in at load time; not serialised.
     #[serde(skip)]
     pub root: PathBuf,
@@ -339,6 +360,7 @@ impl Project {
             default_correction: None,
             suno_mixdown_path: None,
             suno_mixdown_lufs: None,
+            song_key_estimate: None,
             root,
         }
     }
@@ -450,6 +472,7 @@ mod tests {
             }),
             polarity_inverted: true,
             telemetry: None,
+            telemetry_profile: crate::telemetry::TelemetryProfile::default(),
         }
     }
 
@@ -466,6 +489,7 @@ mod tests {
             default_correction: None,
             suno_mixdown_path: Some(format!("{TRACKS_DIR}/mixdown.wav")),
             suno_mixdown_lufs: Some(-14.3),
+            song_key_estimate: None,
             root: PathBuf::from("/tmp/test"),
         }
     }
