@@ -16,7 +16,9 @@ Channel recorder, visualizer, and TinyBooth project exporter. Native Rust + egui
 4. **Mix** — multitrack lanes with synchronized playhead, per-track fader + recordable Catmull-Rom volume automation, per-track A/B against the unprocessed source, global Disable for a quick before/after of the whole project. Master bus shows live BS.1770-4 LUFS (momentary + integrated), measured against the bundled Suno mixdown's own loudness so you can target streaming (Spotify −14, Apple Music −16, broadcast −23) without guessing.
 5. **Export** — mixdown to WAV native, or FLAC / MP3 / Ogg Vorbis / Ogg Opus / M4A-AAC via the bundled static-LGPL `ffmpeg.exe` (shipped inside the MSI; no separate download needed).
 
-**The other path: capture your own takes.** Pick an input device, choose channel or stereo L/R, hit ⏺. Live scrolling waveform + FFT spectrum + peak meter while recording. Each take lands in its own WAV under the project folder, processed through the active recording-tone preset (Guitar default; Vocals / Wind / Drums / Raw also shipped). Recorded takes mix alongside Suno stems as if they were just more tracks — layer your own playing over (or in place of) what Suno produced.
+**Plus a project-wide ✂ Trim panel** (Project tab) for cropping dead air or count-ins at the start / end of a song — every WAV in the project (stems + bundled mixdown) gets cropped to the same range atomically, coherence stays valid because every file shares the new frame-0.
+
+**The other path: capture your own takes.** Pick an input device, choose channel or stereo L/R, hit ⏺. Live scrolling waveform + FFT spectrum + peak meter while recording. **Takes always land in a dedicated app-owned recordings filespace** at `%APPDATA%\TinyBooth Sound Studio\recordings\`, kept fully separate from any stem-mixing project — recording into a Suno project never contaminates its filespace. Recordings get their own Project tab / Mix tab via **File → Open Recordings**; the Record tab itself shows a paged list of every take ever captured, with one-click ▶ to send any take to the main mixer. Each take is processed through the active recording-tone preset (Guitar default; Vocals / Wind / Drums / Raw also shipped).
 
 ## Recording tones
 
@@ -29,6 +31,8 @@ Opinionated presets for shoestring-budget capture. Guitar is the default — the
 | **Wind / Brass** | 50 Hz | off | 2:1, 15 / 180 ms, +1 dB | Breath is the sound |
 | **Drums / Percussion** | off | off | 4:1, 3 / 80 ms, +2 dB | Transient-forward, wide headroom |
 | **Raw / Clean** | off | off | off | No processing, bit-exact capture |
+
+Plus an **eleven-preset Suno-X library** (`Suno-Vocal`, `Suno-BackingVocal`, `Suno-Drums`, `Suno-Bass`, `Suno-ElectricGuitar`, `Suno-AcousticGuitar`, `Suno-Keys`, `Suno-Synth`, `Suno-Pads`, `Suno-Percussion`, `Suno-FxOther`) tuned for each role's typical Suno artefacts — DC removal, top-octave Nyquist cleanup for AI shimmer, role-appropriate EQ / de-essing / compression. Auto-mapped onto each stem at import time. See [`docs/suno-cleaning.md`](docs/suno-cleaning.md) for the per-role tunings and the full workflow.
 
 Every parameter is editable under **Admin → Recording-tone profiles…** and persists to `%APPDATA%\TinyBooth Sound Studio\profiles.json`.
 
@@ -85,14 +89,22 @@ cargo wix
 │   ├── main.rs               # eframe entry + viewport icon
 │   ├── app.rs                # tab state, top + bottom bars
 │   ├── audio.rs              # cpal input, SourceMode, WAV writer
+│   ├── player.rs             # multitrack playback engine (cpal output)
 │   ├── dsp.rs                # Profile + FilterChain / FilterChainStereo
 │   ├── analysis.rs           # FFT spectrum + waveform peak decimator
+│   ├── coherence.rs          # sum-of-stems vs mixdown residual + polarity check
+│   ├── lufs.rs               # BS.1770-4 K-weighting + integrated loudness
+│   ├── trim.rs               # project-wide WAV crop (atomic, .tmp + rename)
+│   ├── cleanup.rs            # cleanse protocol — migrate Recorded orphans
+│   ├── automation.rs         # AutomationLane + Catmull-Rom SplineSampler
 │   ├── project.rs            # .tinybooth JSON manifest
 │   ├── export.rs             # WAV native + ffmpeg subprocess
 │   ├── git_update.rs         # GitHub releases self-updater
 │   ├── manual.rs             # in-app manual: include_str! of docs/manual/
 │   ├── suno_import.rs        # Suno stem-bundle ingester
-│   └── ui/                   # record, project, export, admin, manual, viz
+│   └── ui/                   # record, project, export, admin, mix, correction,
+│                             #   profile_editor, trim, manual, viz, update_dialog,
+│                             #   import_dialog, import_conflict
 ├── docs/
 │   ├── manual/               # ← single source of truth, browsable on GitHub,
 │   │                         #   embedded into the exe at build time
