@@ -12,6 +12,15 @@ If the user has the app open at the moment a new release is published, the botto
 
 Proposed fix (queued for a follow-up patch): re-run the background check on a 5-minute timer while the app is idle, AND on every tab change. Both are cheap, both are bounded, and either one closes the window. ~30 LOC in `src/git_update.rs` plus a `last_check_at: Option<Instant>` field. No new deps.
 
+## [0.4.15] — 2026-05-08
+
+### Changed
+- **Mix-tab telemetry chips: single-line consolidated strip.** v0.4.13–14 rendered each telemetry feature as its own chip — bright/dark + sustained/percussive + dense + 5 separate drum-class counts (`K744 S1789 h1288 T1280 C232`) + guitar pick chip + bend chip + key chip + mood pip. On drum/percussion stems the chip strip wrapped onto a second line, making the row taller than non-drum rows — every lane started at a different vertical offset, layout looked uneven. Replaced with a fixed three-element strip rendered via `ui.horizontal` (no `_wrapped`, no overflow): one instrument summary chip (`🥁 5333` or `🎸 730 ↗3`) carrying the full per-class breakdown in its tooltip, one key chip when confident, one mood pip whose tooltip carries every spectral / dynamics / rhythm numeric that used to be a separate chip. Every row is now the same height regardless of telemetry density.
+- **Tooltips on every header-column control** — telemetry profile dropdown now has a hover explaining all six profile options (Auto / Universal only / Drums / Guitar / Bass / Off) plus the currently-active resolved profile. `+ Correction` / `Correction` button has hover explaining what attaching a chain does (and what happens when the seed comes from the project default vs. the Suno-Clean preset). Mood pip's tooltip got expanded from one line to a structured block with mood / timbre / dynamics / rhythm sections so glance-decoding the colour is feasible.
+
+### Known issue — drum classifier over-firing
+Flagged as a follow-up: the multi-band onset detector emits independent events per band, so a single snare hit produces concurrent events in `MID` + `HIGH_MID` + `HIGH` and gets counted as Snare + Cymbal + HiHat. Real numbers on a 3:20 Suno drum stem: ~5,300 total drum events (≈ 27/sec, physically impossible — sane rate is 3–8/sec). The universal `onset_count` is correctly deduplicated; the drum classifier needs the same cross-band time-window dedup with class arbitration via dominant flux peak. Targeted for v0.4.16. Doesn't affect tonality / non-drum analyses.
+
 ## [0.4.14] — 2026-05-08
 
 ### Added

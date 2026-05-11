@@ -407,7 +407,24 @@ fn lanes_view(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
                             // schedules a re-analysis.
                             if let Some(t) = app.project.tracks.get(idx) {
                                 let cur = t.telemetry_profile;
+                                let resolved = cur.resolve(&t.source);
                                 let label = format!("▾ {}", cur.label());
+                                let tip = format!(
+                                    "Telemetry analyzer profile.\n\
+                                     Currently: {} (running as: {})\n\
+                                     \n\
+                                     • Auto — infer from track role (drums → drum kit, \
+                                     guitar/bass → pitch tracker, else universal-only).\n\
+                                     • Universal only — basic features only.\n\
+                                     • Drums — kick / snare / hat / tom / cymbal.\n\
+                                     • Guitar — pick detection + YIN pitch + key.\n\
+                                     • Bass — same, biased toward low strings.\n\
+                                     • Off — skip analysis for this track.\n\
+                                     \n\
+                                     Changing this re-runs the analyzer.",
+                                    cur.label(),
+                                    resolved_short(resolved),
+                                );
                                 egui::ComboBox::from_id_source(("tel_prof", idx))
                                     .selected_text(
                                         egui::RichText::new(label)
@@ -425,7 +442,9 @@ fn lanes_view(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
                                             // mutation of app.project here.
                                             requested_profile_change = Some((idx, sel));
                                         }
-                                    });
+                                    })
+                                    .response
+                                    .on_hover_text(tip);
                             }
                         });
                         // Telemetry chips — pulled from the manifest
@@ -464,7 +483,16 @@ fn lanes_view(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
                             } else {
                                 "+ Correction"
                             };
-                            if ui.button(label).clicked() {
+                            let corr_tip = if has_corr {
+                                "Open the per-track correction chain editor \
+                                 (HPF / EQ / de-esser / gate / compressor / makeup) \
+                                 — applied at playback and export."
+                            } else {
+                                "Attach a correction chain to this track. Seeded from \
+                                 the project default if set, else from the Suno-Clean \
+                                 preset. Edit at any time; takes effect on next playback."
+                            };
+                            if ui.button(label).on_hover_text(corr_tip).clicked() {
                                 requested_correction = Some(idx);
                             }
                         });
@@ -965,119 +993,85 @@ fn fmt_time(secs: f32) -> String {
 
 // ───────────────────── telemetry chips ─────────────────────
 //
-// Inline tag chips rendered under each lane's track name. Pulls from
-// `Track.telemetry`; renders nothing if absent (analyzer hasn't run
-// yet, or analyzed and saved no result). Each chip's tooltip carries
-// the underlying numerics for quick debugging without opening the
-// (planned) full per-track telemetry panel.
+// Compact, single-line chip strip rendered under each lane's track
+// name. Pulls from `Track.telemetry`; renders nothing if absent
+// (analyzer hasn't run yet). v0.4.15 redesign — every glance-level
+// numeric got consolidated into at most three visible elements:
 //
-// Phase-1 chip vocabulary (TBSS-FR-0005 §"UI"):
-//   ☀️  spectral_centroid_avg ≥ 0.45      bright timbre
-//   🌙  spectral_centroid_avg ≤ 0.15      dark timbre
-//   🌊  sustain_ratio ≥ 0.65              sustained
-//   ⚡  sustain_ratio ≤ 0.30              percussive / staccato
-//   🔨  onset_rate_hz ≥ 4.0               dense / busy
+//   ┌──────────┐  ┌──────────┐  ┌─┐
+//   │ 🥁  543  │  │ ♪ G maj  │  │■│
+//   └──────────┘  └──────────┘  └─┘
+//      instrument      key       mood pip
+//      summary
 //
-// Drum-stem additions (when DrumKitTelemetry is present):
-//   🥁N kick · ◎N snare · ✨N hat · 🪘N tom · 🔔N cymbal
+// — the instrument chip shows the headline number (drum hits OR
+//   guitar picks) and its tooltip carries the full per-class
+//   breakdown (kick/snare/hat/tom/cymbal or pluck/repeat/strum/slide).
+// — the key chip shows the most-likely tonic + mode (only when
+//   K-S confidence ≥ 0.5).
+// — the mood pip's color encodes arousal × valence; its tooltip
+//   carries the spectral / dynamics numerics that used to be five
+//   separate chips (brightness, sustain, density, RMS, crest, peak).
+//
+// Single line via `ui.horizontal` (not `_wrapped`) → every row has
+// the same height regardless of telemetry density. Headers are no
+// longer uneven between drum stems and vocal stems.
 fn telemetry_chips(ui: &mut egui::Ui, track: &crate::project::Track) {
     let Some(tel) = track.telemetry.as_ref() else {
         return;
     };
-    ui.horizontal_wrapped(|ui| {
-        let chip = |ui: &mut egui::Ui, glyph: &str, tooltip: String| {
-            ui.label(
-                egui::RichText::new(glyph)
-                    .size(13.0)
-                    .color(Color32::from_rgb(180, 200, 220)),
-            )
-            .on_hover_text(tooltip);
-        };
-
-        if tel.spectral_centroid_avg >= 0.45 {
-            chip(
-                ui,
-                "☀",
-                format!(
-                    "Bright timbre (centroid {:.2}, rolloff {:.2})",
-                    tel.spectral_centroid_avg, tel.spectral_rolloff_avg
-                ),
-            );
-        } else if tel.spectral_centroid_avg <= 0.15 {
-            chip(
-                ui,
-                "🌙",
-                format!(
-                    "Dark timbre (centroid {:.2}, rolloff {:.2})",
-                    tel.spectral_centroid_avg, tel.spectral_rolloff_avg
-                ),
-            );
-        }
-        if tel.sustain_ratio >= 0.65 {
-            chip(
-                ui,
-                "≈",
-                format!(
-                    "Sustained (sustain ratio {:.0}%)",
-                    tel.sustain_ratio * 100.0
-                ),
-            );
-        } else if tel.sustain_ratio <= 0.30 {
-            chip(
-                ui,
-                "⚡",
-                format!(
-                    "Percussive / staccato (sustain ratio {:.0}%)",
-                    tel.sustain_ratio * 100.0
-                ),
-            );
-        }
-        if tel.onset_rate_hz >= 4.0 {
-            chip(
-                ui,
-                "▦",
-                format!(
-                    "Dense ({:.1} onsets/sec, {} total)",
-                    tel.onset_rate_hz, tel.onset_count
-                ),
-            );
-        }
-
-        // Drum-kit roll-up. Display only the non-zero counts to
-        // avoid header clutter on a stem with mostly one class.
+    ui.horizontal(|ui| {
+        // ── Instrument summary chip ───────────────────────────
+        // Drum stem → "🥁 N" with full per-class tooltip.
+        // Guitar/bass stem → "🎸 N (↗M)" with kind-breakdown tooltip.
         if let Some(kit) = tel.drum_kit.as_ref() {
-            for (n, glyph, label) in [
-                (kit.kick_count, "K", "kicks"),
-                (kit.snare_count, "S", "snares"),
-                (kit.hihat_count, "h", "hats"),
-                (kit.tom_count, "T", "toms"),
-                (kit.cymbal_count, "C", "cymbals"),
-            ] {
-                if n == 0 {
-                    continue;
-                }
-                ui.label(
-                    egui::RichText::new(format!("{glyph}{n}"))
-                        .size(11.0)
-                        .monospace()
-                        .color(Color32::from_rgb(220, 200, 130)),
-                )
-                .on_hover_text(format!("{n} {label}"));
-            }
-        }
-
-        // Guitar / bass chips (v0.4.14). Pick count is the headline
-        // number — every Pluck / Repeat / Strum / Slide event counts.
-        // Bend/slide and strum-percentage get sub-chips when non-zero.
-        if let Some(g) = tel.guitar.as_ref() {
+            let total = kit.kick_count
+                + kit.snare_count
+                + kit.hihat_count
+                + kit.tom_count
+                + kit.cymbal_count
+                + kit.other_count;
             ui.label(
-                egui::RichText::new(format!("🎸{}", g.pick_count))
+                egui::RichText::new(format!("🥁 {total}"))
+                    .size(11.0)
+                    .monospace()
+                    .color(Color32::from_rgb(220, 200, 130)),
+            )
+            .on_hover_text(format!(
+                "Drum hits: {total} total\n\
+                 • {} kicks\n\
+                 • {} snares\n\
+                 • {} hats\n\
+                 • {} toms\n\
+                 • {} cymbals\n\
+                 • {} other\n\
+                 (full event list in Project → 📊 Project Health…)",
+                kit.kick_count,
+                kit.snare_count,
+                kit.hihat_count,
+                kit.tom_count,
+                kit.cymbal_count,
+                kit.other_count,
+            ));
+        } else if let Some(g) = tel.guitar.as_ref() {
+            let suffix = if g.bend_or_slide_count > 0 {
+                format!(" ↗{}", g.bend_or_slide_count)
+            } else {
+                String::new()
+            };
+            ui.label(
+                egui::RichText::new(format!("🎸 {}{}", g.pick_count, suffix))
                     .size(11.0)
                     .monospace()
                     .color(Color32::from_rgb(200, 220, 180)),
             )
             .on_hover_text(format!(
-                "{} picks total ({} pitch-changes, {} repeats, {} bends/slides, {} strums) · estimated polyphony {:.0}%",
+                "Picks: {} total\n\
+                 • {} plucks (new pitch)\n\
+                 • {} repeats (same pitch)\n\
+                 • {} bends / slides\n\
+                 • {} strums (polyphonic)\n\
+                 estimated polyphony {:.0}%",
                 g.pick_count,
                 g.pitch_change_count,
                 g.repeated_pick_count,
@@ -1085,20 +1079,9 @@ fn telemetry_chips(ui: &mut egui::Ui, track: &crate::project::Track) {
                 g.strum_count,
                 g.estimated_polyphony * 100.0,
             ));
-            if g.bend_or_slide_count > 0 {
-                ui.label(
-                    egui::RichText::new(format!("↗{}", g.bend_or_slide_count))
-                        .size(11.0)
-                        .monospace()
-                        .color(Color32::from_rgb(220, 180, 220)),
-                )
-                .on_hover_text(format!(
-                    "{} bend(s) or slide(s) detected",
-                    g.bend_or_slide_count
-                ));
-            }
         }
-        // Per-track key estimate. Surfaced when present + confident.
+
+        // ── Key estimate chip (when confident enough) ─────────
         if let Some(k) = tel.key_estimate.as_ref() {
             if k.confidence >= 0.50 {
                 ui.label(
@@ -1107,28 +1090,85 @@ fn telemetry_chips(ui: &mut egui::Ui, track: &crate::project::Track) {
                         .color(Color32::from_rgb(200, 220, 240)),
                 )
                 .on_hover_text(format!(
-                    "Estimated key: {} (confidence {:.2})\nRunner-up: {} {} ({:.2})",
+                    "Estimated key: {} ({:.0}% confidence)\n\
+                     Runner-up: {} {} ({:.0}%)\n\
+                     (Krumhansl-Schmuckler over pitched events)",
                     k.label(),
-                    k.confidence,
+                    k.confidence * 100.0,
                     note_name(k.second_choice_root),
                     k.second_choice_mode.label(),
-                    k.second_choice_confidence,
+                    k.second_choice_confidence * 100.0,
                 ));
             }
         }
 
-        // Mood pip — small coloured square positioned by valence
-        // (cool ↔ warm hue) and saturated by arousal. Always shown
-        // when telemetry exists. Hovers reveal the numerics.
+        // ── Mood pip ──────────────────────────────────────────
+        // 10×10 px coloured square. Hue = valence (cool ↔ warm),
+        // saturation = arousal. Tooltip carries every numeric
+        // that used to be its own chip.
         let (r, g, b) = mood_color(tel.arousal, tel.valence);
-        let (rect, _) =
-            ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
-        ui.painter().rect_filled(rect, 2.0, Color32::from_rgb(r, g, b));
-        ui.label("").on_hover_text(format!(
-            "Mood proxy — arousal {:.2}, valence {:+.2}\nRMS {:.1} dB · crest {:.1} · peak {:.1} dB",
-            tel.arousal, tel.valence, tel.rms_avg_db, tel.crest_factor_avg, tel.peak_db
+        let (rect, resp) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
+        ui.painter()
+            .rect_filled(rect, 2.0, Color32::from_rgb(r, g, b));
+        ui.painter()
+            .rect_stroke(rect, 2.0, egui::Stroke::new(0.5, Color32::from_gray(80)));
+        resp.on_hover_text(format!(
+            "Mood proxy\n\
+             • arousal {:.2}  (RMS + onsets + brightness)\n\
+             • valence {:+.2}  (brightness × tonality)\n\
+             \n\
+             Timbre\n\
+             • centroid {:.2}  ({})\n\
+             • flatness {:.2}  ({})\n\
+             • rolloff  {:.2}\n\
+             \n\
+             Dynamics\n\
+             • RMS  {:.1} dB ± {:.1}\n\
+             • peak {:.1} dB\n\
+             • crest {:.1}\n\
+             \n\
+             Rhythm\n\
+             • {} onsets ({:.1}/s)\n\
+             • sustain {:.0}%",
+            tel.arousal,
+            tel.valence,
+            tel.spectral_centroid_avg,
+            if tel.spectral_centroid_avg >= 0.45 {
+                "bright"
+            } else if tel.spectral_centroid_avg <= 0.15 {
+                "dark"
+            } else {
+                "neutral"
+            },
+            tel.spectral_flatness_avg,
+            if tel.spectral_flatness_avg >= 0.5 {
+                "noisy"
+            } else {
+                "tonal"
+            },
+            tel.spectral_rolloff_avg,
+            tel.rms_avg_db,
+            tel.rms_std_db,
+            tel.peak_db,
+            tel.crest_factor_avg,
+            tel.onset_count,
+            tel.onset_rate_hz,
+            tel.sustain_ratio * 100.0,
         ));
     });
+}
+
+/// Short label for `ResolvedProfile`, used in the profile-dropdown
+/// tooltip's "running as: X" line.
+fn resolved_short(p: crate::telemetry::ResolvedProfile) -> &'static str {
+    use crate::telemetry::ResolvedProfile;
+    match p {
+        ResolvedProfile::None => "off",
+        ResolvedProfile::UniversalOnly => "universal",
+        ResolvedProfile::Drums => "drums",
+        ResolvedProfile::Guitar => "guitar",
+        ResolvedProfile::Bass => "bass",
+    }
 }
 
 /// 12-tone note name with sharps used for both the per-track and
