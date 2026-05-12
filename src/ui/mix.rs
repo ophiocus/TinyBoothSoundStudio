@@ -36,7 +36,15 @@ const ROW_GAP: f32 = 8.0;
 /// lanes shrink for compactness.
 const SPECTRUM_H: f32 = 80.0;
 
+/// Fixed strip card width. Tight by design — the vertical label
+/// gutter on the left (v0.4.22) saves the horizontal space the
+/// centred top label used to consume, so the card stays narrow.
 const STRIP_W: f32 = 108.0;
+/// Width of the rotated-label column at the left of each strip
+/// card. v0.4.22 — replaces the horizontal-centred name label that
+/// used to sit above the M/S/R/Ø row; freeing a row of vertical
+/// space means the fader sees that height instead.
+const STRIP_LABEL_COL_W: f32 = 18.0;
 const STRIP_GAP: f32 = 4.0;
 const FADER_H: f32 = 130.0;
 /// Hard cap on fader rail height. v0.4.19 made the rail stretch into
@@ -231,22 +239,16 @@ pub fn show(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
 // ───────────────────── transport ─────────────────────
 
 fn transport_bar(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
-    // Snapshot read-only player state so we can split borrows.
-    let (have_player, playing, pos_str, sample_rate, momentary_lufs, integrated_lufs) =
-        if let Some(p) = app.player.as_ref() {
-            let pos = p.state.position_secs();
-            let dur = p.state.duration_secs();
-            (
-                true,
-                p.state.play_state() == PlayState::Playing,
-                format!("{}  /  {}", fmt_time(pos), fmt_time(dur)),
-                p.state.sample_rate,
-                p.state.master_momentary_lufs(),
-                p.state.master_integrated_lufs(),
-            )
-        } else {
-            (false, false, String::new(), 0, f32::NAN, f32::NAN)
-        };
+    // Snapshot the booleans the transport bar still cares about.
+    // v0.4.22 — the readings (pos / sample-rate / LUFS) moved to
+    // the top bar as a right-hand aside next to the project name,
+    // so this bar is now a pure controls strip: Play / Stop +
+    // Enable / Disable / Reset / A/B.
+    let (have_player, playing) = if let Some(p) = app.player.as_ref() {
+        (true, p.state.play_state() == PlayState::Playing)
+    } else {
+        (false, false)
+    };
 
     // How many tracks already carry a correction chain — drives the
     // bulk-action buttons' enabled state and labels.
@@ -298,36 +300,6 @@ fn transport_bar(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
             }
         });
         ui.separator();
-        if have_player {
-            ui.monospace(pos_str);
-            ui.separator();
-            ui.label(format!("{} Hz · stereo bus", sample_rate));
-            ui.separator();
-            // LUFS readout (BS.1770-4). NaN until 400 ms have played.
-            let momentary_str = if momentary_lufs.is_nan() {
-                "—".to_string()
-            } else {
-                format!("{:+.1}", momentary_lufs)
-            };
-            let integrated_str = if integrated_lufs.is_nan() {
-                "—".to_string()
-            } else {
-                format!("{:+.1}", integrated_lufs)
-            };
-            ui.label(
-                egui::RichText::new(format!(
-                    "M {momentary_str}  ·  I {integrated_str}  LUFS"
-                ))
-                .monospace(),
-            )
-            .on_hover_text(
-                "BS.1770-4 loudness of the master bus. \
-                 M = momentary (400 ms window). \
-                 I = gated integrated (whole programme). \
-                 Streaming targets: Spotify −14, Apple Music −16, broadcast −23.",
-            );
-            ui.separator();
-        }
 
         // Bulk correction toggles. "Enable all" seeds Suno-Clean on
         // every track currently at correction = None; doesn't overwrite
@@ -805,112 +777,137 @@ fn strip(app: &mut TinyBoothApp, ui: &mut egui::Ui, idx: usize, available_h: f32
     let mut just_disarmed = false;
     egui::Frame::group(ui.style())
         .fill(frame_color)
-        .inner_margin(egui::Margin::same(8.0))
+        .inner_margin(egui::Margin::same(6.0))
         .show(ui, |ui| {
             ui.set_width(STRIP_W);
-            // `spacing.slider_width` (the *main-axis rail length* for
-            // vertical sliders, not thickness) is set just before the
-            // fader is drawn — once we know the stretched height.
-            // Scoped to this strip — sliders elsewhere keep defaults.
-            ui.vertical_centered(|ui| {
-                let name = ellipsize(&track.name, STRIP_NAME_CHARS);
-                ui.label(egui::RichText::new(name).size(FONT_STRIP_NAME).strong());
-            });
-            ui.add_space(3.0);
-            ui.vertical_centered(|ui| {
-                ui.horizontal(|ui| {
-                    let mute = track.mute.load(Ordering::Relaxed);
-                    if ui
-                        .add_sized([22.0, 22.0], egui::SelectableLabel::new(mute, "M"))
-                        .on_hover_text("Mute")
-                        .clicked()
-                    {
-                        track.mute.store(!mute, Ordering::Relaxed);
-                    }
-                    let solo = track.solo.load(Ordering::Relaxed);
-                    if ui
-                        .add_sized([22.0, 22.0], egui::SelectableLabel::new(solo, "S"))
-                        .on_hover_text("Solo")
-                        .clicked()
-                    {
-                        track.solo.store(!solo, Ordering::Relaxed);
-                    }
-                    let armed = track.recording_armed.load(Ordering::Relaxed);
-                    if ui
-                        .add_sized([22.0, 22.0], egui::SelectableLabel::new(armed, "R"))
-                        .on_hover_text("Arm — record fader gestures during playback")
-                        .clicked()
-                    {
-                        let new_armed = !armed;
-                        track.recording_armed.store(new_armed, Ordering::Relaxed);
-                        if !new_armed {
-                            just_disarmed = true;
-                        }
-                    }
-                    // Polarity flip — "Ø" is the standard audio-gear glyph
-                    // for phase invert. Selectable so the label highlights
-                    // when active. Follows the same sync pattern as
-                    // `correction`: write to both the player atomic AND
-                    // the project field on click so it survives reload.
-                    let polarity = track.polarity_inverted.load(Ordering::Relaxed);
-                    if ui
-                        .add_sized([22.0, 22.0], egui::SelectableLabel::new(polarity, "Ø"))
-                        .on_hover_text(
-                            "Polarity flip (phase invert) — multiplies samples by −1. \
-                             Use when this stem appears anti-phase relative to others \
-                             (mix gets thin/hollow when soloed against the mixdown).",
-                        )
-                        .clicked()
-                    {
-                        let new_polarity = !polarity;
-                        track
-                            .polarity_inverted
-                            .store(new_polarity, Ordering::Relaxed);
-                        if let Some(t) = app.project.tracks.get_mut(idx) {
-                            t.polarity_inverted = new_polarity;
-                        }
-                        app.project_dirty = true;
-                    }
-                });
-            });
-            ui.add_space(6.0);
-            // v0.4.19 — stretch the fader rail to fill the card.
-            // `available_h` is the height the console deck gave us;
-            // subtract the rough overhead of label + button row +
-            // dB readout + frame margins to leave that much rail.
-            // Floors at FADER_H so a too-small console deck still
-            // shows a usable fader.
-            // v0.4.20 — also cap the rail (was: stretch unbounded
-            // into available_h, which on tall windows produced 400+ px
-            // rails inside the strip card). Floors at FADER_H so a
-            // short deck still gets a usable fader; ceilings at
-            // FADER_H_MAX so the card stays compact.
-            let fader_h = (available_h - 110.0).clamp(FADER_H, FADER_H_MAX);
+            // Hard cap the rail (was: stretch unbounded into
+            // available_h, which on tall windows produced 400+ px
+            // rails). Floors at FADER_H so a short deck still gets
+            // a usable fader; ceilings at FADER_H_MAX so the card
+            // stays compact. v0.4.20–v0.4.22.
+            let fader_h = (available_h - 60.0).clamp(FADER_H, FADER_H_MAX);
             ui.style_mut().spacing.slider_width = fader_h;
+
             ui.horizontal(|ui| {
-                let mut gain = track.gain_db();
-                let resp = ui.add_sized(
-                    [STRIP_W - 30.0, fader_h],
-                    egui::Slider::new(&mut gain, -60.0..=6.0)
-                        .vertical()
-                        .show_value(false),
+                // ── Rotated label gutter (v0.4.22) ──
+                // Replaces the horizontal centred name label at the
+                // top of the card. Uses a Painter + TextShape with
+                // angle = π/2 (top-to-bottom reading, classic console
+                // style) so we save a row of vertical space and
+                // claim a narrow horizontal gutter instead.
+                let inner_h = fader_h + 60.0;
+                let (label_rect, _) = ui.allocate_exact_size(
+                    egui::vec2(STRIP_LABEL_COL_W, inner_h),
+                    egui::Sense::hover(),
                 );
-                if resp.changed() {
-                    track.set_gain_db(gain);
-                }
-                draw_meter(ui, track.peak(), fader_h);
-            });
-            ui.add_space(3.0);
-            ui.vertical_centered(|ui| {
-                ui.label(
-                    egui::RichText::new(format!("{:+.1} dB", track.gain_db()))
-                        .size(FONT_STRIP_DB)
-                        .monospace(),
+                draw_rotated_label(
+                    ui,
+                    label_rect,
+                    &ellipsize(&track.name, STRIP_NAME_CHARS),
+                    FONT_STRIP_NAME,
+                    Color32::from_rgb(220, 230, 220),
                 );
+
+                // ── Right column: buttons + fader + meter + dB ──
+                ui.vertical(|ui| {
+                    ui.horizontal(|ui| {
+                        let mute = track.mute.load(Ordering::Relaxed);
+                        if ui
+                            .add_sized([18.0, 20.0], egui::SelectableLabel::new(mute, "M"))
+                            .on_hover_text("Mute")
+                            .clicked()
+                        {
+                            track.mute.store(!mute, Ordering::Relaxed);
+                        }
+                        let solo = track.solo.load(Ordering::Relaxed);
+                        if ui
+                            .add_sized([18.0, 20.0], egui::SelectableLabel::new(solo, "S"))
+                            .on_hover_text("Solo")
+                            .clicked()
+                        {
+                            track.solo.store(!solo, Ordering::Relaxed);
+                        }
+                        let armed = track.recording_armed.load(Ordering::Relaxed);
+                        if ui
+                            .add_sized([18.0, 20.0], egui::SelectableLabel::new(armed, "R"))
+                            .on_hover_text("Arm — record fader gestures during playback")
+                            .clicked()
+                        {
+                            let new_armed = !armed;
+                            track.recording_armed.store(new_armed, Ordering::Relaxed);
+                            if !new_armed {
+                                just_disarmed = true;
+                            }
+                        }
+                        let polarity = track.polarity_inverted.load(Ordering::Relaxed);
+                        if ui
+                            .add_sized([18.0, 20.0], egui::SelectableLabel::new(polarity, "Ø"))
+                            .on_hover_text(
+                                "Polarity flip (phase invert) — multiplies \
+                                 samples by −1. Use when this stem appears \
+                                 anti-phase relative to others.",
+                            )
+                            .clicked()
+                        {
+                            let new_polarity = !polarity;
+                            track
+                                .polarity_inverted
+                                .store(new_polarity, Ordering::Relaxed);
+                            if let Some(t) = app.project.tracks.get_mut(idx) {
+                                t.polarity_inverted = new_polarity;
+                            }
+                            app.project_dirty = true;
+                        }
+                    });
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        let mut gain = track.gain_db();
+                        let resp = ui.add_sized(
+                            [STRIP_W - STRIP_LABEL_COL_W - 30.0, fader_h],
+                            egui::Slider::new(&mut gain, -60.0..=6.0)
+                                .vertical()
+                                .show_value(false),
+                        );
+                        if resp.changed() {
+                            track.set_gain_db(gain);
+                        }
+                        draw_meter(ui, track.peak(), fader_h);
+                    });
+                    ui.add_space(2.0);
+                    ui.label(
+                        egui::RichText::new(format!("{:+.1} dB", track.gain_db()))
+                            .size(FONT_STRIP_DB)
+                            .monospace(),
+                    );
+                });
             });
         });
     let _ = app; // keep argument used for future expansion
     just_disarmed
+}
+
+/// Render a label rotated 90° CW (top-to-bottom reading) centred
+/// inside `rect`. Used by the v0.4.22 strip-card layout — replaces
+/// the previous horizontal-centred name label that ate a full row
+/// of vertical space at the top of every card.
+fn draw_rotated_label(ui: &mut egui::Ui, rect: Rect, text: &str, size_pt: f32, color: Color32) {
+    let painter = ui.painter_at(rect);
+    let galley =
+        painter.layout_no_wrap(text.to_string(), egui::FontId::proportional(size_pt), color);
+    let text_size = galley.size();
+    // For TextShape::angle = +π/2 (CW rotation around `pos`):
+    //   the unrotated rect [0,w]×[0,h] anchored at pos becomes
+    //   the rotated rect [pos.x − h, pos.x] × [pos.y, pos.y + w].
+    // To centre the rotated rect inside `rect`:
+    //   pos.x = rect.center().x + h/2
+    //   pos.y = rect.center().y − w/2
+    let pos = Pos2::new(
+        rect.center().x + text_size.y * 0.5,
+        rect.center().y - text_size.x * 0.5,
+    );
+    let mut shape = egui::epaint::TextShape::new(pos, galley, color);
+    shape.angle = std::f32::consts::FRAC_PI_2;
+    painter.add(shape);
 }
 
 /// Returns true if the master strip's R toggle was just turned OFF.
@@ -934,77 +931,73 @@ fn master_strip(app: &mut TinyBoothApp, ui: &mut egui::Ui, available_h: f32) -> 
     let mut new_master_db: Option<f32> = None;
     egui::Frame::group(ui.style())
         .fill(frame_color)
-        .inner_margin(egui::Margin::same(8.0))
+        .inner_margin(egui::Margin::same(6.0))
         .show(ui, |ui| {
-            ui.set_width(STRIP_W + 12.0);
-            // slider_width set just before the fader is drawn — once
-            // we know the stretched height from `available_h`.
-            ui.vertical_centered(|ui| {
-                ui.label(
-                    egui::RichText::new("MASTER")
-                        .size(FONT_MASTER_NAME)
-                        .strong()
-                        .color(Color32::from_rgb(230, 200, 80)),
-                );
-            });
-            ui.add_space(3.0);
-            ui.vertical_centered(|ui| {
-                ui.horizontal(|ui| {
-                    ui.add_sized([26.0, 22.0], egui::SelectableLabel::new(false, "M"))
-                        .on_hover_text("Mute (no-op on bus)");
-                    ui.add_sized([26.0, 22.0], egui::SelectableLabel::new(false, "S"))
-                        .on_hover_text("Solo (no-op on bus)");
-                    let armed = state.master_recording_armed.load(Ordering::Relaxed);
-                    if ui
-                        .add_sized([26.0, 22.0], egui::SelectableLabel::new(armed, "R"))
-                        .on_hover_text("Arm — record master fader gestures")
-                        .clicked()
-                    {
-                        let new_armed = !armed;
-                        state
-                            .master_recording_armed
-                            .store(new_armed, Ordering::Relaxed);
-                        if !new_armed {
-                            just_disarmed = true;
-                        }
-                    }
-                });
-            });
-            ui.add_space(6.0);
-            // Stretch the master fader rail the same way as `strip()`.
-            // v0.4.20 — also cap the rail (was: stretch unbounded
-            // into available_h, which on tall windows produced 400+ px
-            // rails inside the strip card). Floors at FADER_H so a
-            // short deck still gets a usable fader; ceilings at
-            // FADER_H_MAX so the card stays compact.
-            let fader_h = (available_h - 110.0).clamp(FADER_H, FADER_H_MAX);
+            ui.set_width(STRIP_W + 16.0);
+            let fader_h = (available_h - 60.0).clamp(FADER_H, FADER_H_MAX);
             ui.style_mut().spacing.slider_width = fader_h;
+
             ui.horizontal(|ui| {
-                let mut gain = state.master_gain_db();
-                let resp = ui.add_sized(
-                    [STRIP_W - 30.0, fader_h],
-                    egui::Slider::new(&mut gain, -60.0..=6.0)
-                        .vertical()
-                        .show_value(false),
+                // Rotated MASTER label gutter — same shape as
+                // `strip()` (v0.4.22) but coloured yellow to mark it
+                // as the master bus.
+                let inner_h = fader_h + 60.0;
+                let (label_rect, _) = ui.allocate_exact_size(
+                    egui::vec2(STRIP_LABEL_COL_W + 2.0, inner_h),
+                    egui::Sense::hover(),
                 );
-                if resp.changed() {
-                    state.set_master_gain_db(gain);
-                    new_master_db = Some(gain);
-                }
-                ui.vertical(|ui| {
-                    draw_meter(ui, state.master_peak_left(), fader_h);
-                });
-                ui.vertical(|ui| {
-                    draw_meter(ui, state.master_peak_right(), fader_h);
-                });
-            });
-            ui.add_space(3.0);
-            ui.vertical_centered(|ui| {
-                ui.label(
-                    egui::RichText::new(format!("{:+.1} dB", state.master_gain_db()))
-                        .size(FONT_STRIP_DB)
-                        .monospace(),
+                draw_rotated_label(
+                    ui,
+                    label_rect,
+                    "MASTER",
+                    FONT_MASTER_NAME,
+                    Color32::from_rgb(230, 200, 80),
                 );
+
+                ui.vertical(|ui| {
+                    ui.horizontal(|ui| {
+                        ui.add_sized([18.0, 20.0], egui::SelectableLabel::new(false, "M"))
+                            .on_hover_text("Mute (no-op on bus)");
+                        ui.add_sized([18.0, 20.0], egui::SelectableLabel::new(false, "S"))
+                            .on_hover_text("Solo (no-op on bus)");
+                        let armed = state.master_recording_armed.load(Ordering::Relaxed);
+                        if ui
+                            .add_sized([18.0, 20.0], egui::SelectableLabel::new(armed, "R"))
+                            .on_hover_text("Arm — record master fader gestures")
+                            .clicked()
+                        {
+                            let new_armed = !armed;
+                            state
+                                .master_recording_armed
+                                .store(new_armed, Ordering::Relaxed);
+                            if !new_armed {
+                                just_disarmed = true;
+                            }
+                        }
+                    });
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        let mut gain = state.master_gain_db();
+                        let resp = ui.add_sized(
+                            [STRIP_W - STRIP_LABEL_COL_W - 30.0, fader_h],
+                            egui::Slider::new(&mut gain, -60.0..=6.0)
+                                .vertical()
+                                .show_value(false),
+                        );
+                        if resp.changed() {
+                            state.set_master_gain_db(gain);
+                            new_master_db = Some(gain);
+                        }
+                        draw_meter(ui, state.master_peak_left(), fader_h);
+                        draw_meter(ui, state.master_peak_right(), fader_h);
+                    });
+                    ui.add_space(2.0);
+                    ui.label(
+                        egui::RichText::new(format!("{:+.1} dB", state.master_gain_db()))
+                            .size(FONT_STRIP_DB)
+                            .monospace(),
+                    );
+                });
             });
         });
     if let Some(db) = new_master_db {
@@ -1123,7 +1116,9 @@ fn commit_master_automation(app: &mut TinyBoothApp) {
     }
 }
 
-fn fmt_time(secs: f32) -> String {
+/// `MM:SS` formatter — `pub` so the top-bar readings in app.rs
+/// (v0.4.22) can re-use the same shape.
+pub fn fmt_time(secs: f32) -> String {
     let total = secs.max(0.0) as u32;
     format!("{:02}:{:02}", total / 60, total % 60)
 }

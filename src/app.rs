@@ -1474,6 +1474,49 @@ impl eframe::App for TinyBoothApp {
                         self.project.name.clone()
                     };
                     ui.label(label);
+                    // v0.4.22 — playback readings (time / sample rate /
+                    // LUFS) collapsed into the top bar as a right-hand
+                    // aside next to the project name. Used to live in
+                    // the Mix tab's transport bar; moving them up
+                    // frees the transport bar to be a tight strip of
+                    // controls, and lets the readings stay visible
+                    // even when the user is on Project / Export tabs.
+                    if let Some(player) = self.player.as_ref() {
+                        ui.separator();
+                        let pos = player.state.position_secs();
+                        let dur = player.state.duration_secs();
+                        let m_lufs = player.state.master_momentary_lufs();
+                        let i_lufs = player.state.master_integrated_lufs();
+                        let m = if m_lufs.is_nan() {
+                            "—".to_string()
+                        } else {
+                            format!("{:+.1}", m_lufs)
+                        };
+                        let i = if i_lufs.is_nan() {
+                            "—".to_string()
+                        } else {
+                            format!("{:+.1}", i_lufs)
+                        };
+                        // Fixed-width readout (monospace + explicit
+                        // padding) so the eye doesn't have to chase
+                        // jittering digits.
+                        let txt = format!(
+                            "M {:>6}  I {:>6} LUFS   {} Hz   {}/{}",
+                            m,
+                            i,
+                            player.state.sample_rate,
+                            crate::ui::mix::fmt_time(pos),
+                            crate::ui::mix::fmt_time(dur),
+                        );
+                        ui.label(egui::RichText::new(txt).monospace().small())
+                            .on_hover_text(
+                                "Master-bus playback readings (Mix tab):\n\
+                                 • M / I = momentary / integrated LUFS (BS.1770-4)\n\
+                                 • Sample rate of the playback engine\n\
+                                 • Playhead position / total duration\n\
+                                 Streaming targets: Spotify −14, Apple Music −16, broadcast −23.",
+                            );
+                    }
                 });
             });
         });

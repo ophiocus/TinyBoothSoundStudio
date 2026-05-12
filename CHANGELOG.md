@@ -12,6 +12,14 @@ If the user has the app open at the moment a new release is published, the botto
 
 Proposed fix (queued for a follow-up patch): re-run the background check on a 5-minute timer while the app is idle, AND on every tab change. Both are cheap, both are bounded, and either one closes the window. ~30 LOC in `src/git_update.rs` plus a `last_check_at: Option<Instant>` field. No new deps.
 
+## [0.4.22] — 2026-05-12
+
+### Changed
+- **Strip-card name labels rotated 90° (top-to-bottom reading)**, sitting in a narrow gutter on the left edge of every card instead of a horizontal centred label across the top. Saves a full row of vertical space inside each card (the fader rail claims that height now), and matches the classic mixing-console label-runs-along-the-side aesthetic. Implemented via egui's `epaint::TextShape::angle = π/2`. Same treatment on the master strip with its existing yellow accent.
+- **Playback readings collapsed into the top bar as a right-hand aside.** Time (pos / dur), sample rate, and momentary / integrated LUFS used to live in the Mix-tab transport bar, taking up a row of horizontal space. They now sit in monospace font on the right side of the top menu bar next to the project name, visible from every tab (was Mix-only). Format: `M ±NN.N  I ±NN.N LUFS   48000 Hz   02:06/03:20`. Fixed-width per-field padding so the digits don't jitter.
+- **Transport bar slimmed.** With readings out, the bar is now a tight strip of controls: Play / Pause / Stop · Enable corrections · Disable (saves) · Reset · A/B. No more 1280-px-wide row of mixed-info-and-controls.
+- **Strip-card button row tightened**: M / S / R / Ø shrunk 22×22 → 18×20 so they fit alongside the new label gutter inside the fixed STRIP_W = 108. Inner margin tightened 8 → 6 for the same reason.
+
 ## [0.4.21] — 2026-05-12
 
 ### Fixed
