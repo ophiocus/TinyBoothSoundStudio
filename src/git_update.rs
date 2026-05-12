@@ -192,8 +192,24 @@ pub fn render(
     }
 
     let label = format!("v{}", env!("APP_VERSION"));
-    let response = ui.add(egui::Label::new(label).sense(egui::Sense::click()));
-    if response.clicked() && matches!(state, UpdateState::Idle) {
+    let response = ui
+        .add(egui::Label::new(label).sense(egui::Sense::click()))
+        .on_hover_text(
+            "Installed version. Click to re-check GitHub for a newer \
+             release — even when one is already known to be available, \
+             a fresh click always does the round trip.",
+        );
+    // v0.4.26 — click ALWAYS forces a fresh round trip, even when
+    // state == Available (was: gated on `state == Idle` so clicking
+    // the label while the "v0.4.x available — click to install"
+    // button was visible did nothing). Still skip when a check or
+    // download is in flight — kicking off a second worker mid-call
+    // would race on `*rx`.
+    let allow_recheck = !matches!(state, UpdateState::Checking | UpdateState::Downloading(_));
+    if response.clicked() && allow_recheck {
+        // Drop any in-memory "Available" badge so the user sees the
+        // round trip happen (and the newer version, if any) rather
+        // than the stale badge sticking around.
         *state = UpdateState::Checking;
         let (tx, r) = mpsc::channel();
         std::thread::spawn(move || {

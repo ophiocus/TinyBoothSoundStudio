@@ -8,6 +8,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); thi
 
 (Nothing yet — known issues all resolved as of v0.4.23.)
 
+## [0.4.26] — 2026-05-12
+
+### Changed
+- **Clicking the version label always does the round trip**, even when an update is already known to be available. Pre-v0.4.26 the click handler was gated on `state == Idle` — so once an "v0.4.x available — click to install" badge appeared next to the version label, clicking the label itself did nothing. That made the label feel half-broken: it advertised itself as click-to-refresh, but at the very moments you'd want to refresh (e.g. "is there an even newer release than the one shown?") the click was inert. Now the click forces a fresh `check_latest_release()` whenever the updater isn't in the middle of a check or a download (those two states are still guarded so we don't race on the receiver). Hover-text added to the label spelling out the behaviour.
+
 ## [0.4.25] — 2026-05-12
 
 ### Fixed
