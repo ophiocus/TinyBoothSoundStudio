@@ -39,39 +39,63 @@ jobs:
           }
           echo "Release version: $tag"
 
-      # ── Quality gates (survival-guide §12). Fail fast if any of fmt
-      #    / clippy / tests would catch a regression that's about to ship.
+      # ── Quality gates (survival-guide §12). Fail fast if fmt would
+      #    catch a regression that's about to ship.
+      #
+      # v0.4.28 — dropped `cargo clippy --release` and `cargo test
+      # --release` from this workflow. Both already run on every PR
+      # via ci.yml (in debug mode, which catches the same correctness
+      # issues at ~1/3 the build time). Running them again here in
+      # *release* mode was redundant paranoia that added 3-5 minutes
+      # to every tag-push for zero additional safety: by the time a
+      # commit lands on `main` and gets tagged, it's already been
+      # through CI. The release build below also re-uses the
+      # `Swatinem/rust-cache` cache populated by the prior build,
+      # so the release compile itself is the only remaining big
+      # chunk.
       - name: cargo fmt --check
         run: cargo fmt --check
-
-      - name: cargo clippy
-        run: cargo clippy --release --all-targets -- -D warnings
-
-      - name: cargo test
-        run: cargo test --release
 
       - name: Build release
         run: cargo build --release
 
-      - name: Bundle static ffmpeg (LGPL)
-        # v0.4.10: TinyBooth ships a statically-linked LGPL ffmpeg.exe
-        # in the install dir, so FLAC / MP3 / Ogg / M4A export Just
-        # Works without the user having to scavenge a binary off the
-        # internet. ~120 MB single .exe — bigger MSI but no DLL hell
-        # and no dependency on system PATH.
-        #
-        # Source: BtbN's well-known nightly LGPL build. Static, no
-        # shared libs, no GPL components, no patent-encumbered codecs
-        # we don't need (libfdk-aac etc.). The export tab uses native
-        # AAC via ffmpeg's built-in `aac` encoder — quality is fine
-        # for the stem-mix workflow.
-        #
-        # Attribution: TinyBooth ships an LGPL ffmpeg per the LGPL
-        # v2.1+; the Export-tab manual + README link to the FFmpeg
-        # source mirror, which is the compliance ask.
+      # ── ffmpeg bundle ───────────────────────────────────────────────
+      # v0.4.28: pinned to a specific autobuild tag (was: "latest"),
+      # AND cached. The pin makes the cache key stable across builds
+      # so we stop downloading 120 MB every release. Bump the tag
+      # below intentionally when a new ffmpeg version is wanted —
+      # don't track "latest", which silently rotated.
+      - name: Cache bundled ffmpeg
+        id: ffmpeg-cache
+        uses: actions/cache@v4
+        with:
+          path: target/release/ffmpeg.exe
+          key: ffmpeg-lgpl-${{ env.FFMPEG_PIN }}
+        env:
+          FFMPEG_PIN: autobuild-2026-05-12-13-59
+
+      - name: Download + extract ffmpeg (cache miss)
+        if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
         shell: pwsh
+        env:
+          FFMPEG_PIN: autobuild-2026-05-12-13-59
         run: |
-          $url = 'https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-lgpl.zip'
+          $tag = $env:FFMPEG_PIN
+          # BtbN's autobuild asset filename convention.
+          $asset = "ffmpeg-N-$tag-win64-lgpl.zip"
+          # Some autobuild tags use `master-latest` naming instead of N-…;
+          # the safest universal fallback is to enumerate the release's
+          # assets and pick the win64-lgpl non-shared one.
+          $api = "https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/tags/$tag"
+          $rel = Invoke-RestMethod -Uri $api -Headers @{ "User-Agent" = "tbss-ci" }
+          $dlAsset = $rel.assets |
+            Where-Object { $_.name -like '*win64-lgpl*.zip' -and $_.name -notlike '*shared*' } |
+            Select-Object -First 1
+          if (-not $dlAsset) {
+            Write-Error "no win64-lgpl asset found on BtbN release $tag"
+            exit 1
+          }
+          $url = $dlAsset.browser_download_url
           $zip = "$env:TEMP\ffmpeg-lgpl.zip"
           $extract = "$env:TEMP\ffmpeg-lgpl"
           Write-Host "Downloading $url"
@@ -83,11 +107,35 @@ jobs:
             exit 1
           }
           $dest = "target\release\ffmpeg.exe"
+          New-Item -ItemType Directory -Path (Split-Path $dest) -Force | Out-Null
           Copy-Item $exe.FullName -Destination $dest -Force
           $size = [math]::Round((Get-Item $dest).Length / 1MB, 1)
           Write-Host "Bundled ffmpeg.exe ($size MB) at $dest"
 
-      - name: Install cargo-wix
+      - name: Confirm bundled ffmpeg present
+        shell: pwsh
+        run: |
+          if (-not (Test-Path 'target\release\ffmpeg.exe')) {
+            Write-Error 'ffmpeg.exe missing from target\release\ — cache restore must have failed'
+            exit 1
+          }
+          $size = [math]::Round((Get-Item 'target\release\ffmpeg.exe').Length / 1MB, 1)
+          Write-Host "ffmpeg.exe present ($size MB)"
+
+      # ── cargo-wix (v0.4.28: cached) ────────────────────────────────
+      # cargo install cargo-wix used to recompile from source every
+      # build, eating ~1-2 min. Cache the installed binary by Rust
+      # toolchain version (which is pinned above), and skip the
+      # install step entirely on cache hit.
+      - name: Cache cargo-wix
+        id: wix-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-wix.exe
+          key: cargo-wix-${{ runner.os }}-rust-1.95.0
+
+      - name: Install cargo-wix (cache miss)
+        if: steps.wix-cache.outputs.cache-hit != 'true'
         run: cargo install cargo-wix
 
       - name: Download WiX 3.11 portable binaries

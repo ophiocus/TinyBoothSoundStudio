@@ -3643,7 +3643,7 @@ dependencies = [
 
 [[package]]
 name = "tinybooth-sound-studio"
-version = "0.4.26"
+version = "0.4.28"
 dependencies = [
  "anyhow",
  "biquad",

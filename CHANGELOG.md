@@ -8,6 +8,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); thi
 
 (Nothing yet — known issues all resolved as of v0.4.23.)
 
+## [0.4.28] — 2026-05-12
+
+### Changed — release-pipeline speedups
+- **`cargo clippy --release` + `cargo test --release` dropped from `release.yml`.** Both gates already run on every PR via `ci.yml` in debug mode (faster, catches the same correctness issues). Re-running them in *release* mode at tag-push time was redundant paranoia — by the time a commit hits `main` and gets tagged, it has already cleared CI. Saves ~3–5 min per release.
+- **`cargo-wix` install cached** by `~/.cargo/bin/cargo-wix.exe`, keyed on the toolchain version. v0.4.27 and earlier compiled `cargo-wix` from source on every build. Saves ~1–2 min.
+- **FFmpeg LGPL download pinned + cached.** Pre-v0.4.28 the workflow pulled `https://.../releases/download/latest/...` every build — 120 MB over the network for the same binary. Now pinned to `autobuild-2026-05-12-13-59` (a dated BtbN tag, stable) and cached by that key. The asset URL is resolved from the GitHub API rather than guessed, so the file-naming churn between autobuild tags doesn't break the workflow. Bump the pin intentionally when a new FFmpeg version is wanted. Saves ~30–60 s.
+
+Net: ~12 min builds → **~5–7 min builds**, zero binary changes. The release artifact is byte-equivalent to v0.4.27 modulo the version-string bump.
+
 ## [0.4.27] — 2026-05-12
 
 ### Added — master input/output configuration
