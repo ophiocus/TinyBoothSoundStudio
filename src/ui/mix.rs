@@ -200,13 +200,23 @@ pub fn show(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
     let console_h = (total * app.mix_console_fraction.clamp(0.2, 0.7)).clamp(180.0, CONSOLE_H_MAX);
     let lanes_h = (total - console_h - 8.0).max(120.0);
 
-    // Lanes panel.
-    egui::TopBottomPanel::top("mix_lanes_panel")
-        .resizable(false)
-        .exact_height(lanes_h)
-        .show_inside(ui, |ui| {
+    // v0.4.25 — lanes + console were both rendered via
+    // `TopBottomPanel::show_inside`, which positions panels using
+    // the parent's `max_rect`, IGNORING the cursor. That meant the
+    // lanes panel landed at the top of the central area, overlaying
+    // whatever the transport bar had drawn (visible as "Vocals" lane
+    // bleeding over "Mix | Pause" in the v0.4.24 screenshot). Switch
+    // to `allocate_ui` which respects the cursor — lanes start
+    // immediately below the transport bar, console immediately below
+    // the resize handle.
+    let avail_w = ui.available_width();
+    ui.allocate_ui_with_layout(
+        egui::vec2(avail_w, lanes_h),
+        egui::Layout::top_down(egui::Align::Min),
+        |ui| {
             lanes_view(app, ui);
-        });
+        },
+    );
 
     // Resize handle.
     ui.add_space(2.0);
@@ -232,8 +242,16 @@ pub fn show(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
         app.mix_console_fraction = (app.mix_console_fraction - dy).clamp(0.2, 0.7);
     }
 
-    // Console deck.
-    console_deck(app, ui);
+    // Console deck — same allocate_ui treatment so it sits cleanly
+    // below the drag handle.
+    let avail_w = ui.available_width();
+    ui.allocate_ui_with_layout(
+        egui::vec2(avail_w, console_h),
+        egui::Layout::top_down(egui::Align::Min),
+        |ui| {
+            console_deck(app, ui);
+        },
+    );
 }
 
 // ───────────────────── transport ─────────────────────

@@ -8,6 +8,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); thi
 
 (Nothing yet — known issues all resolved as of v0.4.23.)
 
+## [0.4.25] — 2026-05-12
+
+### Fixed
+- **Lanes no longer overlay the transport bar.** The Mix tab used `TopBottomPanel::top("mix_lanes_panel").show_inside(ui, ...)` for the lanes block and `TopBottomPanel::bottom(...)` for the console deck. `show_inside` positions panels using the parent ui's `max_rect`, IGNORING the current cursor — so the lanes panel landed at the absolute top of the central area, painting over whatever the `transport_bar` had drawn there. Visible in the v0.4.24 screenshot as the Vocals lane bleeding over the `Mix · Pause · Stop · Enable corrections …` row. Replaced both `TopBottomPanel::show_inside` calls with `ui.allocate_ui_with_layout(...)` — that respects the cursor, so the lanes sit cleanly below the transport bar and the console deck cleanly below the resize handle.
+
 ## [0.4.24] — 2026-05-12
 
 ### Fixed
