@@ -9,6 +9,7 @@ pub mod mix;
 pub mod profile_editor;
 pub mod project;
 pub mod record;
+pub mod spectrum_panel;
 pub mod telemetry_settings;
 pub mod trim;
 pub mod update_dialog;

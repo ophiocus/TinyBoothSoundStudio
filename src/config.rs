@@ -26,6 +26,11 @@ pub struct Config {
     /// Added in v0.2.1.
     #[serde(default)]
     pub recent_projects: Vec<PathBuf>,
+    /// Whether the Mix tab shows the full-width passive spectrum
+    /// analyzer band above the lane stack. Default `true`. Toggle
+    /// from Admin → "Show spectrum panel (Mix tab)". Added v0.4.18.
+    #[serde(default = "default_show_spectrum_panel")]
+    pub show_spectrum_panel: bool,
 }
 
 fn default_profile_name() -> String {
@@ -36,6 +41,10 @@ fn default_zoom() -> f32 {
     1.0
 }
 
+fn default_show_spectrum_panel() -> bool {
+    true
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -44,6 +53,7 @@ impl Default for Config {
             active_profile: default_profile_name(),
             last_project_path: None,
             recent_projects: Vec::new(),
+            show_spectrum_panel: default_show_spectrum_panel(),
         }
     }
 }

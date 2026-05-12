@@ -12,6 +12,15 @@ If the user has the app open at the moment a new release is published, the botto
 
 Proposed fix (queued for a follow-up patch): re-run the background check on a 5-minute timer while the app is idle, AND on every tab change. Both are cheap, both are bounded, and either one closes the window. ~30 LOC in `src/git_update.rs` plus a `last_check_at: Option<Instant>` field. No new deps.
 
+## [0.4.18] — 2026-05-11
+
+### Added
+- **Mix-tab spectrum panel** — pinned at the top of the Mix tab when enabled (default on). Live FFT of the master output bus drawn as bars on a log-frequency X axis (20 Hz → 20 kHz, with 100 Hz / 1 kHz / 10 kHz decade gridlines), normalised log-mag Y axis, plus a slow-release peak-decay trail (0.95×/frame ≈ 1 s release at 30 fps) sitting above the live spectrum. No new audio-thread plumbing — reads the same `PlayerState.output_viz` master-bus tap that v0.4.11 added for the standalone visualizer canvas. New module [src/ui/spectrum_panel.rs](src/ui/spectrum_panel.rs).
+- **Admin → Show spectrum panel (Mix tab)** checkbox toggles the panel on / off, persisted via `Config.show_spectrum_panel` (default `true`, `#[serde(default)]` so old `config.json` files don't reset). v0.4.18 adds the field; older installs gain it on first save.
+
+### Changed
+- **Mix-tab lane headers compacted from 3 rows → 2.** Pre-v0.4.18 each lane header was three rows tall (name + profile dropdown / chips / M·S·A/B·+Correction), needing `LANE_H = 72`. New layout: row 1 = track name + telemetry chips, row 2 = M / S / A/B / Cor + profile dropdown. `LANE_H` dropped 72 → 52, `ROW_GAP` 6 → 4. Net: ~28% more lanes visible per screen height. The "+ Correction" button label shortened to "Cor" / "+Cor" so the row fits inside the existing 240-px `HEADER_W` without crowding the dropdown. Hover-text on the button still carries the full explanation.
+
 ## [0.4.17] — 2026-05-11
 
 ### Fixed

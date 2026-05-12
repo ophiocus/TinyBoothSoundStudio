@@ -184,6 +184,13 @@ pub struct TinyBoothApp {
     /// Project Health panel (TBSS-FR-0005 §"Health"). Modal showing
     /// per-track telemetry weight, totals, and stale rows. v0.4.13.
     pub show_health: bool,
+
+    /// Per-bin peak-decay trail for the Mix-tab spectrum panel.
+    /// Length matches the FFT bin count. Each frame: trail[i] =
+    /// max(current_db[i], trail[i] * 0.95) — fast-attack / slow-
+    /// release peak hold. UI thread only; no audio-thread coupling.
+    /// Added v0.4.18.
+    pub spectrum_trail: Vec<f32>,
 }
 
 impl TinyBoothApp {
@@ -305,6 +312,7 @@ impl TinyBoothApp {
             show_telemetry_settings: false,
             initial_telemetry_pending: true,
             show_health: false,
+            spectrum_trail: Vec::new(),
         }
     }
 
@@ -1224,6 +1232,20 @@ impl eframe::App for TinyBoothApp {
                     if ui.button("Telemetry settings…").clicked() {
                         self.show_telemetry_settings = true;
                         ui.close_menu();
+                    }
+                    ui.separator();
+                    let mut show_spec = self.config.show_spectrum_panel;
+                    if ui
+                        .checkbox(&mut show_spec, "Show spectrum panel (Mix tab)")
+                        .on_hover_text(
+                            "Pinned at the top of the Mix tab — live FFT of the master \
+                             output bus. Log-frequency X axis, dB Y axis, with a slow-\
+                             release peak-decay trail.",
+                        )
+                        .changed()
+                    {
+                        self.config.show_spectrum_panel = show_spec;
+                        self.config.save_or_log();
                     }
                 });
                 ui.menu_button("Help", |ui| {
