@@ -8,6 +8,38 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); thi
 
 (Nothing yet — known issues all resolved as of v0.4.23.)
 
+## [0.4.29] — 2026-05-12
+
+### Changed — Mix tab GUI architecture
+Full architectural rewrite of `mix::show()`. The Mix tab now uses egui's native panel layout instead of stacked `allocate_ui_with_layout` calls, fixing three independent bugs that all traced back to that approach:
+
+```
+┌─ TopBottomPanel::top  ────── transport bar + error banner
+├─ CentralPanel        ────── lanes (the ONLY surface that takes vertical scroll)
+└─ TopBottomPanel::bottom ── spectrum + strip cards (horizontal scroll only)
+```
+
+#### Why three panels, in this order
+- Each egui panel owns its own **clip rect**, so content can no longer bleed between surfaces. The track headers / waveforms physically cannot reach into the transport bar above or the console deck below — that's been the actual bug under "headers bleeding top and bottom" since v0.4.21.
+- Each panel owns its own **scroll-event hit-testing**. Pre-v0.4.29 both the lanes and the console shared the caller's `ui`, so a wheel event in the wrong place could shift either. Manifested as "the cards jitter in place when I scroll".
+- The bottom panel claims an `exact_height(console_h)` based on `mix_console_fraction`; the CentralPanel takes whatever's left. The split no longer floats with `ui.available_height()` (which depended on whatever else the parent had drawn — including the top-bar readings changing width when a digit ticked), so the layout doesn't wobble by a px each frame.
+
+#### Sub-surface scroll lock
+- **Lanes** — `ScrollArea::vertical().auto_shrink([false; 2])`, fills the CentralPanel.
+- **Console deck** — `ScrollArea::new([true, false])` (explicit hscroll-only + vscroll-disabled) + `auto_shrink([false; 2])`. Vertical wheel events inside the deck no longer try to scroll a 0-height extent, which was the actual cause of the "jittering in place" visual.
+
+#### Code factoring
+- `show()` extracted into four cohesive helpers — `rebuild_player_if_needed`, `render_player_error_banner_if_present`, `consume_autoplay_request`, plus the three panel renderers. No more 130-line function with player-lifecycle, autoplay, layout maths, and scroll plumbing tangled together.
+- Manual drag handle for the lane↔console split removed. The split is now fully driven by `mix_console_fraction` + `CONSOLE_H_MAX`. If interactive resize comes back, it'll be via egui's native `TopBottomPanel::resizable(true)` rather than a hand-rolled `allocate_exact_size` + `drag_delta()`.
+
+#### Functional invariants preserved
+- Player lazy-rebuild + error banner + Retry button.
+- Auto-play hand-off from Record-tab ▶ clicks.
+- Automation arm / capture / commit loop on per-strip and master.
+- Spectrum panel position (top of the bottom panel, pinned above the strip cards).
+- Telemetry chips, profile dropdown, M/S/A/B/Cor row, hot-load swap, every per-track button — unchanged.
+- 75 tests still passing; clippy clean with `-D warnings`.
+
 ## [0.4.28] — 2026-05-12
 
 ### Changed — release-pipeline speedups

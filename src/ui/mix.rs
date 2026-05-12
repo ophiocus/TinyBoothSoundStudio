@@ -71,6 +71,46 @@ const FONT_STRIP_NAME: f32 = 13.0;
 const FONT_STRIP_DB: f32 = 12.0;
 const FONT_MASTER_NAME: f32 = 14.0;
 
+/// Mix-tab entry point.
+///
+/// **Architecture (v0.4.29 — clean panel layout):**
+///
+/// The Mix tab is split into three egui panels nested inside the
+/// caller's `ui`. Each panel owns its own clip rect, so content can
+/// physically never bleed between them; each panel also owns its own
+/// scroll-event capture, so the wheel doesn't shift surfaces it
+/// shouldn't.
+///
+/// ```text
+///   ┌─ TopBottomPanel::top("mix_transport") ──────────────────────┐
+///   │  transport bar  +  optional error banner                     │
+///   ├─ CentralPanel ──────────────────────────────────────────────┤
+///   │  lanes_view (the ONLY surface that accepts vertical scroll)  │
+///   │  ScrollArea::vertical, clipped to this panel                 │
+///   ├─ TopBottomPanel::bottom("mix_console") ─────────────────────┤
+///   │  spectrum panel (fixed height)                               │
+///   │  strip cards in a ScrollArea::horizontal (hscroll only)      │
+///   └──────────────────────────────────────────────────────────────┘
+/// ```
+///
+/// Ordering rule: declare Top + Bottom panels FIRST, then the
+/// CentralPanel — Central claims whatever space remains. egui
+/// enforces this; reversing the order silently overlays.
+///
+/// Why the rewrite (was: v0.4.25 used `allocate_ui_with_layout` for
+/// both lanes and console):
+///   • `allocate_ui` doesn't hard-clip — content overflow bled into
+///     adjacent areas (the user's "headers bleeding top and bottom").
+///   • Both surfaces shared the caller's ui, so scroll input could
+///     reach either — manifesting as console cards "jittering in
+///     place when I scroll" the lanes.
+///   • The lanes_h / console_h split was computed from
+///     `ui.available_height()`, which depends on whatever else had
+///     drawn into the parent. A 1-px wobble in the parent (e.g. the
+///     top-bar readings changing width when a digit ticks) would
+///     shift the entire layout by 1 px each frame.
+/// Panels fix all three: clip rects bound the content, panels own
+/// scroll-event hit-testing, and exact_height pins the split.
 pub fn show(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
     // The cleanse protocol now runs at the top of `app::update()`
     // (v0.4.8), so the Project tab + everywhere else benefits — no
@@ -83,19 +123,69 @@ pub fn show(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
         return;
     }
 
-    // Lazy-instantiate the player.
-    //   • `project_track_count` (the project's track count at build
-    //     time) catches "user added or removed a track since build".
-    //     Comparing against `state.tracks.len()` would mismatch every
-    //     frame after a tolerant load and rebuild forever.
-    //   • `player_attempt_failed_for == Some(this root)` (v0.4.9)
-    //     short-circuits the rebuild when the LAST attempt failed for
-    //     this same project. Without this guard, a missing-output-
-    //     device situation re-called `Player::new` every Mix-tab frame
-    //     — even with the output-device cheap-check at the top of
-    //     Player::new (also v0.4.9), that's wasted work + a repaint
-    //     trigger. Cleared on project change (open_project_path) or
-    //     when the user clicks Retry on the error banner.
+    // Player lazy-instantiate / lazy-rebuild. Centralised here so the
+    // panel closures below can assume a fresh `app.player` state.
+    rebuild_player_if_needed(app);
+
+    // Auto-play hand-off from Record-tab ▶ clicks. Must run before
+    // the panels render so the playing/paused state inside the
+    // transport bar reflects the autoplay decision on this same frame.
+    consume_autoplay_request(app);
+
+    // Capture armed-strip fader values for the recorder lane while
+    // playing. Runs once per frame regardless of which panel the
+    // pointer is over.
+    capture_automation(app);
+
+    // Compute console-deck height ONCE here. The bottom panel claims
+    // exactly this height (via `exact_height`); the CentralPanel
+    // gets the remainder. `app.mix_console_fraction` survives the
+    // session via Config; CONSOLE_H_MAX prevents tall windows from
+    // ballooning the deck.
+    let total_h = ui.available_height().max(200.0);
+    let console_h =
+        (total_h * app.mix_console_fraction.clamp(0.2, 0.7)).clamp(180.0, CONSOLE_H_MAX);
+
+    // ── Panel 1: transport bar (top, natural height) ───────────────
+    egui::TopBottomPanel::top("mix_transport_panel")
+        .resizable(false)
+        .show_inside(ui, |ui| {
+            transport_bar(app, ui);
+            render_player_error_banner_if_present(app, ui);
+        });
+
+    // Early-return path: error banner is up, no player to drive the
+    // remaining panels. The transport panel above already gave the
+    // user the Retry button.
+    if app.player.is_none() {
+        return;
+    }
+
+    // ── Panel 2: console deck (bottom, fixed height) ───────────────
+    // Declare BEFORE the CentralPanel — egui's panel layout assigns
+    // space top-to-bottom, and CentralPanel takes whatever's left.
+    egui::TopBottomPanel::bottom("mix_console_panel")
+        .resizable(false)
+        .exact_height(console_h)
+        .show_inside(ui, |ui| {
+            console_deck(app, ui);
+        });
+
+    // ── Panel 3: lanes (central, fills the rest) ───────────────────
+    // The ONLY surface that accepts vertical scroll input. egui's
+    // CentralPanel gives it a hard clip rect, so the lane content
+    // can never bleed up into the transport bar or down into the
+    // console deck no matter how many rows are in the scroll area.
+    egui::CentralPanel::default().show_inside(ui, |ui| {
+        lanes_view(app, ui);
+    });
+}
+
+/// Lazy-rebuild the player when needed (project changed shape OR
+/// player is None and the last attempt didn't fail for this project).
+/// Extracted out of `show()` for readability — same logic as v0.4.27
+/// for output-device-aware Player::new.
+fn rebuild_player_if_needed(app: &mut TinyBoothApp) {
     let attempt_already_failed = app
         .player_attempt_failed_for
         .as_ref()
@@ -105,157 +195,70 @@ pub fn show(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
         None => !attempt_already_failed,
         Some(p) => p.project_track_count != app.project.tracks.len(),
     };
-    if need_rebuild {
-        app.player = None;
-        app.player_error = None;
-        match Player::new(
-            &app.project,
-            app.audio_err_tx.clone(),
-            app.config.output_device.as_deref(),
-        ) {
-            Ok(p) => {
-                app.player = Some(p);
-                app.player_attempt_failed_for = None;
-            }
-            // {:#} renders the full anyhow context chain — top-level
-            // wrapper plus every `with_context` and underlying I/O
-            // error. Without it the user sees "reading track foo.wav"
-            // and has no clue whether the file is missing, the WAV
-            // header is corrupt, or the path got mangled.
-            Err(e) => {
-                app.player_error = Some(format!("{e:#}"));
-                app.player_attempt_failed_for = Some(app.project.root.clone());
-            }
-        }
-    }
-
-    transport_bar(app, ui);
-
-    // Show any player-load error as a banner above the console — but
-    // do NOT early-return if a partial player got built. v0.4.4 makes
-    // Player::new tolerant, so even after one bad track we may still
-    // have a working console with the surviving tracks.
-    if let Some(err) = app.player_error.clone() {
-        ui.horizontal_wrapped(|ui| {
-            ui.colored_label(Color32::LIGHT_RED, &err);
-            // Retry button (v0.4.9): clears the failed-attempt cache
-            // so the next frame re-runs Player::new. The natural
-            // recovery path when the user plugs in headphones / fixes
-            // their audio device after seeing this banner.
-            if app.player.is_none()
-                && app.player_attempt_failed_for.is_some()
-                && ui
-                    .button("↻ Retry")
-                    .on_hover_text(
-                        "Try to rebuild the player — useful after plugging in audio hardware.",
-                    )
-                    .clicked()
-            {
-                app.player_attempt_failed_for = None;
-                app.player_error = None;
-            }
-        });
-    }
-    if app.player.is_none() {
+    if !need_rebuild {
         return;
     }
-
-    // Auto-play hand-off from the Record-tab "▶" buttons. The Record
-    // tab swaps `app.project` to the recordings project and sets
-    // these flags; we consume them here once the player has rebuilt
-    // for the new project. Solo-and-play is the natural mode for
-    // "audition this single take through the main mixer".
-    if app.mix_autoplay_pending {
-        if let Some(player) = app.player.as_ref() {
-            if let Some(idx) = app.mix_autoplay_solo_idx.take() {
-                for (i, t) in player.state.tracks.iter().enumerate() {
-                    t.solo.store(i == idx, std::sync::atomic::Ordering::Relaxed);
-                }
-            }
-            // Position 0 on the freshly-loaded project.
-            player
-                .state
-                .position_frames
-                .store(0, std::sync::atomic::Ordering::Release);
-            player.state.set_play_state(PlayState::Playing);
+    app.player = None;
+    app.player_error = None;
+    match Player::new(
+        &app.project,
+        app.audio_err_tx.clone(),
+        app.config.output_device.as_deref(),
+    ) {
+        Ok(p) => {
+            app.player = Some(p);
+            app.player_attempt_failed_for = None;
         }
-        app.mix_autoplay_pending = false;
+        Err(e) => {
+            app.player_error = Some(format!("{e:#}"));
+            app.player_attempt_failed_for = Some(app.project.root.clone());
+        }
     }
+}
 
-    ui.separator();
+/// Player-load error banner — rendered inside the top panel so it
+/// shares the transport bar's clip rect. Retry button clears the
+/// failed-attempt cache so the next frame retries `Player::new`.
+fn render_player_error_banner_if_present(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
+    let Some(err) = app.player_error.clone() else {
+        return;
+    };
+    ui.horizontal_wrapped(|ui| {
+        ui.colored_label(Color32::LIGHT_RED, &err);
+        if app.player.is_none()
+            && app.player_attempt_failed_for.is_some()
+            && ui
+                .button("↻ Retry")
+                .on_hover_text(
+                    "Try to rebuild the player — useful after plugging in audio hardware.",
+                )
+                .clicked()
+        {
+            app.player_attempt_failed_for = None;
+            app.player_error = None;
+        }
+    });
+}
 
-    // v0.4.19: the master-bus spectrum panel used to sit above the
-    // lanes, which (a) ate vertical space that was better given to
-    // the waveforms and (b) made the meter ↔ spectrum comparison
-    // awkward because they were a screenful apart. It's now drawn
-    // at the top of the console deck below — see `console_deck()`.
-
-    // Capture fader values for any armed strips while playing.
-    capture_automation(app);
-
-    // Split the remaining vertical space between lanes (top) and
-    // console deck (bottom). The split is user-resizable via a dragger
-    // between them.
-    let total = ui.available_height().max(200.0);
-    // v0.4.20 — cap the console deck at `CONSOLE_H_MAX` regardless
-    // of `mix_console_fraction` so tall windows don't balloon the
-    // strip cards. The drag handle below still adjusts the fraction;
-    // the cap just stops the cards from getting absurd.
-    let console_h = (total * app.mix_console_fraction.clamp(0.2, 0.7)).clamp(180.0, CONSOLE_H_MAX);
-    let lanes_h = (total - console_h - 8.0).max(120.0);
-
-    // v0.4.25 — lanes + console were both rendered via
-    // `TopBottomPanel::show_inside`, which positions panels using
-    // the parent's `max_rect`, IGNORING the cursor. That meant the
-    // lanes panel landed at the top of the central area, overlaying
-    // whatever the transport bar had drawn (visible as "Vocals" lane
-    // bleeding over "Mix | Pause" in the v0.4.24 screenshot). Switch
-    // to `allocate_ui` which respects the cursor — lanes start
-    // immediately below the transport bar, console immediately below
-    // the resize handle.
-    let avail_w = ui.available_width();
-    ui.allocate_ui_with_layout(
-        egui::vec2(avail_w, lanes_h),
-        egui::Layout::top_down(egui::Align::Min),
-        |ui| {
-            lanes_view(app, ui);
-        },
-    );
-
-    // Resize handle.
-    ui.add_space(2.0);
-    let (drag_rect, drag_resp) =
-        ui.allocate_exact_size(egui::vec2(ui.available_width(), 6.0), egui::Sense::drag());
-    let painter = ui.painter_at(drag_rect);
-    painter.line_segment(
-        [
-            Pos2::new(drag_rect.min.x + 60.0, drag_rect.center().y),
-            Pos2::new(drag_rect.max.x - 60.0, drag_rect.center().y),
-        ],
-        Stroke::new(
-            2.0,
-            if drag_resp.hovered() {
-                Color32::from_gray(120)
-            } else {
-                Color32::from_gray(60)
-            },
-        ),
-    );
-    if drag_resp.dragged() {
-        let dy = drag_resp.drag_delta().y / total;
-        app.mix_console_fraction = (app.mix_console_fraction - dy).clamp(0.2, 0.7);
+/// Consume any pending auto-play request from the Record-tab "▶"
+/// buttons. Solo'd the chosen take, positioned to 0, started playback.
+fn consume_autoplay_request(app: &mut TinyBoothApp) {
+    if !app.mix_autoplay_pending {
+        return;
     }
-
-    // Console deck — same allocate_ui treatment so it sits cleanly
-    // below the drag handle.
-    let avail_w = ui.available_width();
-    ui.allocate_ui_with_layout(
-        egui::vec2(avail_w, console_h),
-        egui::Layout::top_down(egui::Align::Min),
-        |ui| {
-            console_deck(app, ui);
-        },
-    );
+    if let Some(player) = app.player.as_ref() {
+        if let Some(idx) = app.mix_autoplay_solo_idx.take() {
+            for (i, t) in player.state.tracks.iter().enumerate() {
+                t.solo.store(i == idx, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        player
+            .state
+            .position_frames
+            .store(0, std::sync::atomic::Ordering::Release);
+        player.state.set_play_state(PlayState::Playing);
+    }
+    app.mix_autoplay_pending = false;
 }
 
 // ───────────────────── transport ─────────────────────
@@ -421,144 +424,160 @@ fn lanes_view(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
     let mut requested_correction: Option<usize> = None;
     let mut requested_profile_change: Option<(usize, crate::telemetry::TelemetryProfile)> = None;
 
-    egui::ScrollArea::vertical().show(ui, |ui| {
-        // v0.4.24 — small top padding so the first row's name label
-        // doesn't kiss the bottom edge of the transport bar above.
-        ui.add_space(4.0);
-        for (idx, track) in player.state.tracks.iter().enumerate() {
-            // v0.4.24 — wrap each lane in `Frame::group` so each row
-            // gets a visibly bounded card with its own border. Pre-
-            // v0.4.24 had only a 1-px divider line that wasn't strong
-            // enough to break the eye-fuse between adjacent rows
-            // (the "header overlap" issue in the user screenshot).
-            egui::Frame::group(ui.style())
-                .fill(egui::Color32::from_rgb(14, 14, 18))
-                .inner_margin(egui::Margin::symmetric(4.0, 2.0))
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        // ── Header column ─────────────────────────────────
-                        // `allocate_exact_size` (not `allocate_ui_with_layout`)
-                        // is critical: the latter is a *suggested* size — if
-                        // the inner content's natural width exceeds HEADER_W
-                        // (e.g. a wide chip strip), it grows the box and
-                        // pushes the next allocation (the lane) right. That
-                        // made every row's waveform start at a slightly
-                        // different X — the "tracks aren't trimmed to the
-                        // same start" bug visible in v0.4.15. `allocate_exact_size`
-                        // reserves precisely HEADER_W × LANE_H and any inner
-                        // overflow gets clipped, so every lane shares the
-                        // same X. v0.4.16.
-                        let (header_rect, _) = ui.allocate_exact_size(
-                            egui::vec2(HEADER_W, LANE_H),
-                            egui::Sense::hover(),
-                        );
-                        let mut hui = ui.child_ui(
-                            header_rect,
-                            egui::Layout::top_down(egui::Align::Min),
-                            None,
-                        );
-                        hui.set_clip_rect(header_rect);
-                        {
-                            let ui = &mut hui;
-                            // Two-row compact layout (v0.4.18):
-                            //   Row 1 — track name + telemetry chips
-                            //   Row 2 — M / S / A/B / Cor + profile dropdown
-                            // Drops a row vs v0.4.13–17 (was name / chips / buttons),
-                            // so LANE_H fits in 52 px instead of 72 — ~28% more
-                            // lanes visible per screen height.
-                            ui.add_space(1.0);
+    // v0.4.29 — explicit single-axis scroll. `auto_shrink([false; 2])`
+    // makes the area fill the CentralPanel's full extent so the lane
+    // rows always render against a stable rect, never the natural
+    // size of the content. Combined with the panel's clip rect, this
+    // guarantees the rows never bleed past the lane area.
+    egui::ScrollArea::vertical()
+        .auto_shrink([false; 2])
+        .show(ui, |ui| {
+            // v0.4.24 — small top padding so the first row's name label
+            // doesn't kiss the bottom edge of the transport bar above.
+            ui.add_space(4.0);
+            for (idx, track) in player.state.tracks.iter().enumerate() {
+                // v0.4.24 — wrap each lane in `Frame::group` so each row
+                // gets a visibly bounded card with its own border. Pre-
+                // v0.4.24 had only a 1-px divider line that wasn't strong
+                // enough to break the eye-fuse between adjacent rows
+                // (the "header overlap" issue in the user screenshot).
+                egui::Frame::group(ui.style())
+                    .fill(egui::Color32::from_rgb(14, 14, 18))
+                    .inner_margin(egui::Margin::symmetric(4.0, 2.0))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            // ── Header column ─────────────────────────────────
+                            // `allocate_exact_size` (not `allocate_ui_with_layout`)
+                            // is critical: the latter is a *suggested* size — if
+                            // the inner content's natural width exceeds HEADER_W
+                            // (e.g. a wide chip strip), it grows the box and
+                            // pushes the next allocation (the lane) right. That
+                            // made every row's waveform start at a slightly
+                            // different X — the "tracks aren't trimmed to the
+                            // same start" bug visible in v0.4.15. `allocate_exact_size`
+                            // reserves precisely HEADER_W × LANE_H and any inner
+                            // overflow gets clipped, so every lane shares the
+                            // same X. v0.4.16.
+                            let (header_rect, _) = ui.allocate_exact_size(
+                                egui::vec2(HEADER_W, LANE_H),
+                                egui::Sense::hover(),
+                            );
+                            let mut hui = ui.child_ui(
+                                header_rect,
+                                egui::Layout::top_down(egui::Align::Min),
+                                None,
+                            );
+                            hui.set_clip_rect(header_rect);
+                            {
+                                let ui = &mut hui;
+                                // Two-row compact layout (v0.4.18):
+                                //   Row 1 — track name + telemetry chips
+                                //   Row 2 — M / S / A/B / Cor + profile dropdown
+                                // Drops a row vs v0.4.13–17 (was name / chips / buttons),
+                                // so LANE_H fits in 52 px instead of 72 — ~28% more
+                                // lanes visible per screen height.
+                                ui.add_space(1.0);
 
-                            // Row 1: name (strong, leftmost) + telemetry chips.
-                            ui.horizontal(|ui| {
-                                ui.label(egui::RichText::new(&track.name).strong());
-                                if let Some(t) = app.project.tracks.get(idx) {
-                                    telemetry_chips(ui, t);
-                                }
-                            });
+                                // Row 1: name (strong, leftmost) + telemetry chips.
+                                ui.horizontal(|ui| {
+                                    ui.label(egui::RichText::new(&track.name).strong());
+                                    if let Some(t) = app.project.tracks.get(idx) {
+                                        telemetry_chips(ui, t);
+                                    }
+                                });
 
-                            // Row 2: control cluster (M / S / A/B / Cor) +
-                            // profile dropdown to the right of the buttons.
-                            ui.horizontal(|ui| {
-                                // Per-channel mute (v0.4.16) — mirrors the
-                                // console-deck strip's mute toggle. The atomic
-                                // is shared, so flipping here is reflected on
-                                // the strip + audio thread immediately.
-                                let mute = track.mute.load(Ordering::Relaxed);
-                                if ui
-                                    .add_sized([20.0, 18.0], egui::SelectableLabel::new(mute, "M"))
-                                    .on_hover_text(if mute {
-                                        "Muted — click to unmute"
-                                    } else {
-                                        "Mute this track"
-                                    })
-                                    .clicked()
-                                {
-                                    track.mute.store(!mute, Ordering::Relaxed);
-                                }
-                                // Per-channel solo (v0.4.16).
-                                let solo = track.solo.load(Ordering::Relaxed);
-                                if ui
-                                    .add_sized([20.0, 18.0], egui::SelectableLabel::new(solo, "S"))
-                                    .on_hover_text(if solo {
-                                        "Solo'd — click to clear"
-                                    } else {
-                                        "Solo this track (silences others)"
-                                    })
-                                    .clicked()
-                                {
-                                    track.solo.store(!solo, Ordering::Relaxed);
-                                }
-                                // v0.4.7 perf: atomic-bool mirror avoids a
-                                // Mutex+clone of the whole Profile every frame.
-                                let mut bypass = track.bypass_correction.load(Ordering::Relaxed);
-                                let has_corr = track.has_correction();
-                                ui.add_enabled_ui(has_corr, |ui| {
+                                // Row 2: control cluster (M / S / A/B / Cor) +
+                                // profile dropdown to the right of the buttons.
+                                ui.horizontal(|ui| {
+                                    // Per-channel mute (v0.4.16) — mirrors the
+                                    // console-deck strip's mute toggle. The atomic
+                                    // is shared, so flipping here is reflected on
+                                    // the strip + audio thread immediately.
+                                    let mute = track.mute.load(Ordering::Relaxed);
                                     if ui
                                         .add_sized(
-                                            [26.0, 18.0],
-                                            egui::SelectableLabel::new(bypass, "A/B"),
+                                            [20.0, 18.0],
+                                            egui::SelectableLabel::new(mute, "M"),
                                         )
-                                        .on_hover_text(if bypass {
-                                            "Bypassed (original)"
+                                        .on_hover_text(if mute {
+                                            "Muted — click to unmute"
                                         } else {
-                                            "Correction active"
+                                            "Mute this track"
                                         })
                                         .clicked()
                                     {
-                                        bypass = !bypass;
-                                        track.bypass_correction.store(bypass, Ordering::Relaxed);
+                                        track.mute.store(!mute, Ordering::Relaxed);
                                     }
-                                });
-                                // Compact label "Cor" / "+Cor" fits in the
-                                // 240-px header alongside M/S/A/B + dropdown.
-                                // Full hover-text preserves the explanation.
-                                let label = if has_corr { "Cor" } else { "+Cor" };
-                                let corr_tip = if has_corr {
-                                    "Open the per-track correction chain editor \
+                                    // Per-channel solo (v0.4.16).
+                                    let solo = track.solo.load(Ordering::Relaxed);
+                                    if ui
+                                        .add_sized(
+                                            [20.0, 18.0],
+                                            egui::SelectableLabel::new(solo, "S"),
+                                        )
+                                        .on_hover_text(if solo {
+                                            "Solo'd — click to clear"
+                                        } else {
+                                            "Solo this track (silences others)"
+                                        })
+                                        .clicked()
+                                    {
+                                        track.solo.store(!solo, Ordering::Relaxed);
+                                    }
+                                    // v0.4.7 perf: atomic-bool mirror avoids a
+                                    // Mutex+clone of the whole Profile every frame.
+                                    let mut bypass =
+                                        track.bypass_correction.load(Ordering::Relaxed);
+                                    let has_corr = track.has_correction();
+                                    ui.add_enabled_ui(has_corr, |ui| {
+                                        if ui
+                                            .add_sized(
+                                                [26.0, 18.0],
+                                                egui::SelectableLabel::new(bypass, "A/B"),
+                                            )
+                                            .on_hover_text(if bypass {
+                                                "Bypassed (original)"
+                                            } else {
+                                                "Correction active"
+                                            })
+                                            .clicked()
+                                        {
+                                            bypass = !bypass;
+                                            track
+                                                .bypass_correction
+                                                .store(bypass, Ordering::Relaxed);
+                                        }
+                                    });
+                                    // Compact label "Cor" / "+Cor" fits in the
+                                    // 240-px header alongside M/S/A/B + dropdown.
+                                    // Full hover-text preserves the explanation.
+                                    let label = if has_corr { "Cor" } else { "+Cor" };
+                                    let corr_tip = if has_corr {
+                                        "Open the per-track correction chain editor \
                              (HPF / EQ / de-esser / gate / compressor / makeup) \
                              — applied at playback and export."
-                                } else {
-                                    "Attach a correction chain to this track. Seeded from \
+                                    } else {
+                                        "Attach a correction chain to this track. Seeded from \
                              the project default if set, else from the Suno-Clean \
                              preset. Edit at any time; takes effect on next playback."
-                                };
-                                if ui
-                                    .add_sized([34.0, 18.0], egui::Button::new(label))
-                                    .on_hover_text(corr_tip)
-                                    .clicked()
-                                {
-                                    requested_correction = Some(idx);
-                                }
+                                    };
+                                    if ui
+                                        .add_sized([34.0, 18.0], egui::Button::new(label))
+                                        .on_hover_text(corr_tip)
+                                        .clicked()
+                                    {
+                                        requested_correction = Some(idx);
+                                    }
 
-                                // Profile dropdown — pushed to the right of
-                                // the button cluster so the row reads as
-                                // "controls (left) → analyzer (right)".
-                                if let Some(t) = app.project.tracks.get(idx) {
-                                    let cur = t.telemetry_profile;
-                                    let resolved = cur.resolve(&t.source);
-                                    let label = format!("▾ {}", cur.label());
-                                    let tip = format!(
-                                        "Telemetry analyzer profile.\n\
+                                    // Profile dropdown — pushed to the right of
+                                    // the button cluster so the row reads as
+                                    // "controls (left) → analyzer (right)".
+                                    if let Some(t) = app.project.tracks.get(idx) {
+                                        let cur = t.telemetry_profile;
+                                        let resolved = cur.resolve(&t.source);
+                                        let label = format!("▾ {}", cur.label());
+                                        let tip = format!(
+                                            "Telemetry analyzer profile.\n\
                                  Currently: {} (running as: {})\n\
                                  \n\
                                  • Auto — infer from track role (drums → drum kit, \
@@ -570,62 +589,65 @@ fn lanes_view(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
                                  • Off — skip analysis for this track.\n\
                                  \n\
                                  Changing this re-runs the analyzer.",
-                                        cur.label(),
-                                        resolved_short(resolved),
-                                    );
-                                    egui::ComboBox::from_id_source(("tel_prof", idx))
-                                        .selected_text(
-                                            egui::RichText::new(label)
-                                                .size(11.0)
-                                                .color(egui::Color32::from_gray(160)),
-                                        )
-                                        .width(88.0)
-                                        .show_ui(ui, |ui| {
-                                            let mut sel = cur;
-                                            for &p in crate::telemetry::TelemetryProfile::all() {
-                                                ui.selectable_value(&mut sel, p, p.label());
-                                            }
-                                            if sel != cur {
-                                                // Defer — `player` borrow blocks
-                                                // mutation of app.project here.
-                                                requested_profile_change = Some((idx, sel));
-                                            }
-                                        })
-                                        .response
-                                        .on_hover_text(tip);
-                                }
-                            });
-                        }
+                                            cur.label(),
+                                            resolved_short(resolved),
+                                        );
+                                        egui::ComboBox::from_id_source(("tel_prof", idx))
+                                            .selected_text(
+                                                egui::RichText::new(label)
+                                                    .size(11.0)
+                                                    .color(egui::Color32::from_gray(160)),
+                                            )
+                                            .width(88.0)
+                                            .show_ui(ui, |ui| {
+                                                let mut sel = cur;
+                                                for &p in crate::telemetry::TelemetryProfile::all()
+                                                {
+                                                    ui.selectable_value(&mut sel, p, p.label());
+                                                }
+                                                if sel != cur {
+                                                    // Defer — `player` borrow blocks
+                                                    // mutation of app.project here.
+                                                    requested_profile_change = Some((idx, sel));
+                                                }
+                                            })
+                                            .response
+                                            .on_hover_text(tip);
+                                    }
+                                });
+                            }
 
-                        // ── Lane (waveform) ───────────────────────────────
-                        let avail = ui.available_size().x.max(200.0);
-                        let (rect, _) =
-                            ui.allocate_exact_size(egui::vec2(avail, LANE_H), egui::Sense::hover());
-                        // v0.4.7 perf: was `track.automation().as_ref()` — that
-                        // cloned the Vec<AutomationPoint> only to take a reference
-                        // to the clone for the draw call. Borrow via callback so
-                        // the lock is held briefly during draw_lane (microseconds)
-                        // with no allocation.
-                        track.with_automation(|auto| {
-                            draw_lane(
-                                ui,
-                                rect,
-                                &track.peaks,
-                                dur,
-                                pos,
-                                track.frame_count,
-                                track.sample_rate,
-                                auto,
+                            // ── Lane (waveform) ───────────────────────────────
+                            let avail = ui.available_size().x.max(200.0);
+                            let (rect, _) = ui.allocate_exact_size(
+                                egui::vec2(avail, LANE_H),
+                                egui::Sense::hover(),
                             );
+                            // v0.4.7 perf: was `track.automation().as_ref()` — that
+                            // cloned the Vec<AutomationPoint> only to take a reference
+                            // to the clone for the draw call. Borrow via callback so
+                            // the lock is held briefly during draw_lane (microseconds)
+                            // with no allocation.
+                            track.with_automation(|auto| {
+                                draw_lane(
+                                    ui,
+                                    rect,
+                                    &track.peaks,
+                                    dur,
+                                    pos,
+                                    track.frame_count,
+                                    track.sample_rate,
+                                    auto,
+                                );
+                            });
                         });
-                    });
-                }); // close Frame::group inner closure
-                    // v0.4.24 — Frame::group above gives each row its own
-                    // bordered card, so the previous 1-px line divider is
-                    // gone. A small gap below keeps cards from touching.
-            ui.add_space(ROW_GAP);
-        }
-    });
+                    }); // close Frame::group inner closure
+                        // v0.4.24 — Frame::group above gives each row its own
+                        // bordered card, so the previous 1-px line divider is
+                        // gone. A small gap below keeps cards from touching.
+                ui.add_space(ROW_GAP);
+            }
+        });
 
     if let Some(i) = requested_correction {
         if app.project.tracks[i].correction.is_none() {
@@ -756,26 +778,37 @@ fn console_deck(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
         strip_h = (strip_h - SPECTRUM_H - 2.0).max(140.0);
     }
 
-    egui::ScrollArea::horizontal().show(ui, |ui| {
-        // v0.4.24 — explicit `Align::Min` on the cross axis (top
-        // alignment for left-to-right). Plain `ui.horizontal` uses
-        // `Align::Center`, which staircase-shifted cards down as soon
-        // as any two cards had even slightly different effective
-        // heights. With Align::Min every card's top edge sits on the
-        // same y baseline.
-        ui.with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
-            for idx in 0..n_tracks {
-                if strip(app, ui, idx, strip_h) {
-                    commit_track = Some(idx);
+    // v0.4.29 — explicit single-axis scroll. `hscroll(true)` +
+    // `vscroll(false)` makes the wheel passthrough — vertical wheel
+    // events inside the console deck don't shift the strips. That's
+    // why pre-v0.4.29 "the cards jittered in place when I scroll":
+    // egui was scrolling a 0-height vertical extent because
+    // ScrollArea::horizontal silently still accepted wheel input on
+    // the cross axis. `auto_shrink` set so the bar always claims the
+    // panel's full extent — strip rows don't drift around as the
+    // user adds / removes tracks.
+    egui::ScrollArea::new([true, false])
+        .auto_shrink([false; 2])
+        .show(ui, |ui| {
+            // v0.4.24 — explicit `Align::Min` on the cross axis (top
+            // alignment for left-to-right). Plain `ui.horizontal` uses
+            // `Align::Center`, which staircase-shifted cards down as soon
+            // as any two cards had even slightly different effective
+            // heights. With Align::Min every card's top edge sits on the
+            // same y baseline.
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
+                for idx in 0..n_tracks {
+                    if strip(app, ui, idx, strip_h) {
+                        commit_track = Some(idx);
+                    }
+                    ui.add_space(STRIP_GAP);
                 }
-                ui.add_space(STRIP_GAP);
-            }
-            ui.add_space(STRIP_GAP * 2.0);
-            if master_strip(app, ui, strip_h) {
-                commit_master = true;
-            }
+                ui.add_space(STRIP_GAP * 2.0);
+                if master_strip(app, ui, strip_h) {
+                    commit_master = true;
+                }
+            });
         });
-    });
 
     if let Some(i) = commit_track {
         commit_track_automation(app, i);
