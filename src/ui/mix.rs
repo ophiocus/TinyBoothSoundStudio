@@ -19,8 +19,8 @@ use eframe::egui;
 use egui::{Color32, Pos2, Rect, Stroke};
 use std::sync::atomic::Ordering;
 
-const HEADER_W: f32 = 220.0;
-const LANE_H: f32 = 60.0;
+const HEADER_W: f32 = 240.0;
+const LANE_H: f32 = 72.0;
 const ROW_GAP: f32 = 6.0;
 
 const STRIP_W: f32 = 108.0;
@@ -394,111 +394,154 @@ fn lanes_view(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
     egui::ScrollArea::vertical().show(ui, |ui| {
         for (idx, track) in player.state.tracks.iter().enumerate() {
             ui.horizontal(|ui| {
-                ui.allocate_ui_with_layout(
-                    egui::vec2(HEADER_W, LANE_H),
-                    egui::Layout::top_down(egui::Align::Min),
-                    |ui| {
-                        ui.add_space(2.0);
-                        ui.horizontal(|ui| {
-                            ui.label(egui::RichText::new(&track.name).strong());
-                            // Telemetry profile dropdown (v0.4.14).
-                            // Compact "▾ Auto" / "▾ Guitar" etc. selector
-                            // to the right of the name. Changing it
-                            // schedules a re-analysis.
-                            if let Some(t) = app.project.tracks.get(idx) {
-                                let cur = t.telemetry_profile;
-                                let resolved = cur.resolve(&t.source);
-                                let label = format!("▾ {}", cur.label());
-                                let tip = format!(
-                                    "Telemetry analyzer profile.\n\
-                                     Currently: {} (running as: {})\n\
-                                     \n\
-                                     • Auto — infer from track role (drums → drum kit, \
-                                     guitar/bass → pitch tracker, else universal-only).\n\
-                                     • Universal only — basic features only.\n\
-                                     • Drums — kick / snare / hat / tom / cymbal.\n\
-                                     • Guitar — pick detection + YIN pitch + key.\n\
-                                     • Bass — same, biased toward low strings.\n\
-                                     • Off — skip analysis for this track.\n\
-                                     \n\
-                                     Changing this re-runs the analyzer.",
-                                    cur.label(),
-                                    resolved_short(resolved),
-                                );
-                                egui::ComboBox::from_id_source(("tel_prof", idx))
-                                    .selected_text(
-                                        egui::RichText::new(label)
-                                            .size(11.0)
-                                            .color(egui::Color32::from_gray(160)),
-                                    )
-                                    .width(96.0)
-                                    .show_ui(ui, |ui| {
-                                        let mut sel = cur;
-                                        for &p in crate::telemetry::TelemetryProfile::all() {
-                                            ui.selectable_value(&mut sel, p, p.label());
-                                        }
-                                        if sel != cur {
-                                            // Defer — `player` borrow blocks
-                                            // mutation of app.project here.
-                                            requested_profile_change = Some((idx, sel));
-                                        }
-                                    })
-                                    .response
-                                    .on_hover_text(tip);
-                            }
-                        });
-                        // Telemetry chips — pulled from the manifest
-                        // (app.project.tracks), not the player's
-                        // LiveTrack. The lane row is by-index aligned
-                        // with the project tracks list. v0.4.13.
+                // ── Header column ─────────────────────────────────
+                // `allocate_exact_size` (not `allocate_ui_with_layout`)
+                // is critical: the latter is a *suggested* size — if
+                // the inner content's natural width exceeds HEADER_W
+                // (e.g. a wide chip strip), it grows the box and
+                // pushes the next allocation (the lane) right. That
+                // made every row's waveform start at a slightly
+                // different X — the "tracks aren't trimmed to the
+                // same start" bug visible in v0.4.15. `allocate_exact_size`
+                // reserves precisely HEADER_W × LANE_H and any inner
+                // overflow gets clipped, so every lane shares the
+                // same X. v0.4.16.
+                let (header_rect, _) =
+                    ui.allocate_exact_size(egui::vec2(HEADER_W, LANE_H), egui::Sense::hover());
+                let mut hui =
+                    ui.child_ui(header_rect, egui::Layout::top_down(egui::Align::Min), None);
+                hui.set_clip_rect(header_rect);
+                {
+                    let ui = &mut hui;
+                    ui.add_space(2.0);
+                    // Row 1: name + profile dropdown.
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(&track.name).strong());
                         if let Some(t) = app.project.tracks.get(idx) {
-                            telemetry_chips(ui, t);
+                            let cur = t.telemetry_profile;
+                            let resolved = cur.resolve(&t.source);
+                            let label = format!("▾ {}", cur.label());
+                            let tip = format!(
+                                "Telemetry analyzer profile.\n\
+                                 Currently: {} (running as: {})\n\
+                                 \n\
+                                 • Auto — infer from track role (drums → drum kit, \
+                                 guitar/bass → pitch tracker, else universal-only).\n\
+                                 • Universal only — basic features only.\n\
+                                 • Drums — kick / snare / hat / tom / cymbal.\n\
+                                 • Guitar — pick detection + YIN pitch + key.\n\
+                                 • Bass — same, biased toward low strings.\n\
+                                 • Off — skip analysis for this track.\n\
+                                 \n\
+                                 Changing this re-runs the analyzer.",
+                                cur.label(),
+                                resolved_short(resolved),
+                            );
+                            egui::ComboBox::from_id_source(("tel_prof", idx))
+                                .selected_text(
+                                    egui::RichText::new(label)
+                                        .size(11.0)
+                                        .color(egui::Color32::from_gray(160)),
+                                )
+                                .width(96.0)
+                                .show_ui(ui, |ui| {
+                                    let mut sel = cur;
+                                    for &p in crate::telemetry::TelemetryProfile::all() {
+                                        ui.selectable_value(&mut sel, p, p.label());
+                                    }
+                                    if sel != cur {
+                                        // Defer — `player` borrow blocks
+                                        // mutation of app.project here.
+                                        requested_profile_change = Some((idx, sel));
+                                    }
+                                })
+                                .response
+                                .on_hover_text(tip);
                         }
-                        ui.horizontal(|ui| {
-                            let mut bypass = track.bypass_correction.load(Ordering::Relaxed);
-                            // v0.4.7 perf: was `track.correction().is_some()` —
-                            // that took the Mutex and cloned the entire Profile
-                            // (Strings + EQ array + de-ess) every frame, every
-                            // track. Atomic-bool mirror set in lockstep with
-                            // `set_correction` is sufficient for "should the
-                            // A/B button be enabled?" / "show '+ Correction'
-                            // or 'Correction'?".
-                            let has_corr = track.has_correction();
-                            ui.add_enabled_ui(has_corr, |ui| {
-                                if ui
-                                    .add(egui::SelectableLabel::new(bypass, "A/B"))
-                                    .on_hover_text(if bypass {
-                                        "Bypassed (original)"
-                                    } else {
-                                        "Correction active"
-                                    })
-                                    .clicked()
-                                {
-                                    bypass = !bypass;
-                                    track.bypass_correction.store(bypass, Ordering::Relaxed);
-                                }
-                            });
-                            let label = if has_corr {
-                                "Correction"
+                    });
+                    // Row 2: telemetry chips (always one line — see
+                    // `telemetry_chips`).
+                    if let Some(t) = app.project.tracks.get(idx) {
+                        telemetry_chips(ui, t);
+                    }
+                    // Row 3: M / S / A/B / +Correction.
+                    ui.horizontal(|ui| {
+                        // Per-channel mute (v0.4.16) — mirrors the
+                        // console-deck strip's mute toggle. The atomic
+                        // is shared, so flipping here is reflected on
+                        // the strip + audio thread immediately.
+                        let mute = track.mute.load(Ordering::Relaxed);
+                        if ui
+                            .add_sized([22.0, 20.0], egui::SelectableLabel::new(mute, "M"))
+                            .on_hover_text(if mute {
+                                "Muted — click to unmute"
                             } else {
-                                "+ Correction"
-                            };
-                            let corr_tip = if has_corr {
-                                "Open the per-track correction chain editor \
-                                 (HPF / EQ / de-esser / gate / compressor / makeup) \
-                                 — applied at playback and export."
+                                "Mute this track"
+                            })
+                            .clicked()
+                        {
+                            track.mute.store(!mute, Ordering::Relaxed);
+                        }
+                        // Per-channel solo (v0.4.16). Solo logic on
+                        // the audio thread: if any track is solo'd,
+                        // non-solo tracks are silenced. Multiple
+                        // solos additive.
+                        let solo = track.solo.load(Ordering::Relaxed);
+                        if ui
+                            .add_sized([22.0, 20.0], egui::SelectableLabel::new(solo, "S"))
+                            .on_hover_text(if solo {
+                                "Solo'd — click to clear"
                             } else {
-                                "Attach a correction chain to this track. Seeded from \
-                                 the project default if set, else from the Suno-Clean \
-                                 preset. Edit at any time; takes effect on next playback."
-                            };
-                            if ui.button(label).on_hover_text(corr_tip).clicked() {
-                                requested_correction = Some(idx);
+                                "Solo this track (silences others)"
+                            })
+                            .clicked()
+                        {
+                            track.solo.store(!solo, Ordering::Relaxed);
+                        }
+                        // v0.4.7 perf: was `track.correction().is_some()` —
+                        // that took the Mutex and cloned the entire Profile
+                        // (Strings + EQ array + de-ess) every frame, every
+                        // track. Atomic-bool mirror set in lockstep with
+                        // `set_correction` is sufficient for "should the
+                        // A/B button be enabled?" / "show '+ Correction'
+                        // or 'Correction'?".
+                        let mut bypass = track.bypass_correction.load(Ordering::Relaxed);
+                        let has_corr = track.has_correction();
+                        ui.add_enabled_ui(has_corr, |ui| {
+                            if ui
+                                .add_sized([26.0, 20.0], egui::SelectableLabel::new(bypass, "A/B"))
+                                .on_hover_text(if bypass {
+                                    "Bypassed (original)"
+                                } else {
+                                    "Correction active"
+                                })
+                                .clicked()
+                            {
+                                bypass = !bypass;
+                                track.bypass_correction.store(bypass, Ordering::Relaxed);
                             }
                         });
-                    },
-                );
+                        let label = if has_corr {
+                            "Correction"
+                        } else {
+                            "+ Correction"
+                        };
+                        let corr_tip = if has_corr {
+                            "Open the per-track correction chain editor \
+                             (HPF / EQ / de-esser / gate / compressor / makeup) \
+                             — applied at playback and export."
+                        } else {
+                            "Attach a correction chain to this track. Seeded from \
+                             the project default if set, else from the Suno-Clean \
+                             preset. Edit at any time; takes effect on next playback."
+                        };
+                        if ui.button(label).on_hover_text(corr_tip).clicked() {
+                            requested_correction = Some(idx);
+                        }
+                    });
+                }
 
+                // ── Lane (waveform) ───────────────────────────────
                 let avail = ui.available_size().x.max(200.0);
                 let (rect, _) =
                     ui.allocate_exact_size(egui::vec2(avail, LANE_H), egui::Sense::hover());

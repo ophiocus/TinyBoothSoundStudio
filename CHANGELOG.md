@@ -12,6 +12,15 @@ If the user has the app open at the moment a new release is published, the botto
 
 Proposed fix (queued for a follow-up patch): re-run the background check on a 5-minute timer while the app is idle, AND on every tab change. Both are cheap, both are bounded, and either one closes the window. ~30 LOC in `src/git_update.rs` plus a `last_check_at: Option<Instant>` field. No new deps.
 
+## [0.4.16] — 2026-05-08
+
+### Added
+- **Per-channel `M` (mute) and `S` (solo) buttons on every Mix-tab lane header.** Previously only available in the console deck strips at the bottom of the tab — invisible while working in the lane view. Now mirrored at the lane level next to `A/B` and `+ Correction`. The atomic flags (`track.mute`, `track.solo`) are shared with the console-deck strip + the audio thread, so flipping in one place reflects everywhere immediately.
+
+### Fixed
+- **Lane waveforms now share a common X-start across every row.** v0.4.15's `allocate_ui_with_layout(vec2(HEADER_W, LANE_H), …)` was a *suggested* size — when the inner content's natural width exceeded HEADER_W (chip strip, profile dropdown text), it grew the box and pushed the lane allocation right by a handful of pixels. Every row's waveform / playhead landed at a slightly different X. Replaced with `allocate_exact_size(…)` + a `child_ui` whose clip-rect is set to the header rect, so any inner overflow is hard-clipped and the lane allocation begins at exactly `HEADER_W` past the row's start regardless of telemetry density.
+- **`HEADER_W` bumped 220 → 240** and **`LANE_H` bumped 60 → 72** to give the new third row of buttons (M / S / A/B / +Correction) breathing room without crowding the profile dropdown above.
+
 ## [0.4.15] — 2026-05-08
 
 ### Changed
