@@ -151,6 +151,16 @@ pub struct TinyBoothApp {
     pub update_state: UpdateState,
     pub update_error: Option<String>,
     pub update_rx: Option<mpsc::Receiver<Option<UpdateAvailable>>>,
+    /// Last time we kicked off a background release check. The
+    /// auto-recheck logic compares this against
+    /// `git_update::RECHECK_INTERVAL` each frame; on overshoot
+    /// (and idle state + no pending rx) a fresh check is dispatched.
+    /// Added v0.4.23. `None` at startup so the very first frame after
+    /// `new()` doesn't double-fire (the constructor already spawns one).
+    pub last_update_check_at: Option<std::time::Instant>,
+    /// Tab as of the previous frame — used to detect tab transitions
+    /// and force an immediate re-check on the next frame. v0.4.23.
+    pub last_tab_seen: Option<Tab>,
 
     // Audio-thread error channel. cpal's err_fn closures get a Sender;
     // every frame the UI thread drains the Receiver and surfaces the
@@ -305,6 +315,8 @@ impl TinyBoothApp {
             update_state: UpdateState::Checking,
             update_error: None,
             update_rx: Some(rx),
+            last_update_check_at: Some(std::time::Instant::now()),
+            last_tab_seen: None,
             audio_err_tx,
             audio_err_rx,
             telemetry: crate::telemetry::TelemetryService::spawn(),
@@ -1257,6 +1269,29 @@ impl eframe::App for TinyBoothApp {
         // matching tracks get their `telemetry` field populated and
         // the manifest is saved once per drain.
         self.drain_telemetry_results();
+
+        // Update-recheck heartbeat (v0.4.23). Closes the long-standing
+        // known issue where the bottom-bar version label stayed stale
+        // for the entire session because `check_latest_release` only
+        // fired once at startup. Two triggers, rate-limited via
+        // `git_update::RECHECK_INTERVAL = 300 s`:
+        //   • A 5-minute idle timer.
+        //   • Every tab transition — by the time the user switches
+        //     between Record / Project / Mix / Export the API call is
+        //     cheap relative to all the UI rebuild work, and "I just
+        //     came back to the app" usually coincides with a tab click.
+        let tab_changed = self.last_tab_seen != Some(self.tab);
+        self.last_tab_seen = Some(self.tab);
+        if let Some(rx) = crate::git_update::maybe_spawn_recheck(
+            &self.update_state,
+            &self.update_rx,
+            self.last_update_check_at,
+            tab_changed,
+        ) {
+            self.update_state = crate::git_update::UpdateState::Checking;
+            self.update_rx = Some(rx);
+            self.last_update_check_at = Some(std::time::Instant::now());
+        }
 
         // Repaint continuously while recording so the visualizer animates.
         if self.session.is_some() {

@@ -6,11 +6,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); thi
 
 ## [Unreleased]
 
-### Known issue — in-app updater / CI sync window
+(Nothing yet — known issues all resolved as of v0.4.23.)
 
-If the user has the app open at the moment a new release is published, the bottom-bar version label keeps showing the current install indefinitely — `git_update::check_latest_release` only fires **once at app startup**, not periodically. Workaround today: click the version label in the bottom-left to retrigger the check, or restart the app. Manifested concretely on the v0.4.12 release: CI completed at 16:06:50Z and the GitHub release went live, but a session opened before that timestamp didn't see the new version until the user clicked the label.
+## [0.4.23] — 2026-05-12
 
-Proposed fix (queued for a follow-up patch): re-run the background check on a 5-minute timer while the app is idle, AND on every tab change. Both are cheap, both are bounded, and either one closes the window. ~30 LOC in `src/git_update.rs` plus a `last_check_at: Option<Instant>` field. No new deps.
+### Fixed
+- **In-app updater no longer goes stale for the session.** The long-standing known issue tracked since v0.4.12 — bottom-bar version label showing the install version indefinitely because `check_latest_release` fired only once at app startup — is closed. New `git_update::maybe_spawn_recheck` runs every frame, rate-limited at `RECHECK_INTERVAL = 300 s`, gated on `state == Idle && rx == None`. Two triggers force a non-rate-limited recheck: (a) the 5-minute timer expiring, (b) any tab transition (Record ↔ Project ↔ Mix ↔ Export). The check itself is a single small JSON GET, so the work is bounded; the gate guarantees we don't fire while a previous check is still in flight or while the user is mid-update. ~25 LOC in `src/git_update.rs` plus two new fields on `TinyBoothApp` (`last_update_check_at: Option<Instant>`, `last_tab_seen: Option<Tab>`). No new dependencies.
+
+### Added — ship-flow tooling
+- **`scripts/ship.ps1`** — PowerShell script that owns the full "tag pushed → MSI downloadable" arc, not just the push. Pushes main + the tag, then **blocks** polling `gh release view <tag>` every 15 s until `publishedAt` becomes a real ISO timestamp, then prints the asset SHA-256 fingerprints and download URLs. Hard 30-min timeout so a stuck CI run can't hang the script forever. Closes the operator-side half of the same gap the updater fix closes on the app side: before today, "ship" was `git push --tags` plus a vibe — no signal that the release-build pipeline was healthy and the artifact was actually downloadable. Usage: `.\scripts\ship.ps1 -Tag v0.4.24`.
 
 ## [0.4.22] — 2026-05-12
 

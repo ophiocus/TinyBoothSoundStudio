@@ -14,6 +14,20 @@ use anyhow::{Context, Result};
 use eframe::egui;
 use std::path::PathBuf;
 use std::sync::mpsc;
+use std::time::{Duration, Instant};
+
+/// Minimum gap between background re-checks of the GitHub releases
+/// endpoint. The check itself is a single small JSON GET, but we
+/// don't want to hammer the API or burn the user's bandwidth.
+/// 5 min matches the documented "CI sync window" of the build
+/// pipeline — by the time this interval elapses, a tag pushed at
+/// the moment the app was opened should have produced an MSI and
+/// updated `releases/latest`.
+///
+/// Added v0.4.23 — fixes the long-standing known issue where the
+/// version label could go stale for the entire session because
+/// the check only fired once at startup.
+pub const RECHECK_INTERVAL: Duration = Duration::from_secs(300);
 
 #[derive(Debug, Clone)]
 pub struct UpdateAvailable {
@@ -38,6 +52,41 @@ fn is_newer(latest: &str, current: &str) -> bool {
         (a, b, c, d)
     };
     parse(latest) > parse(current)
+}
+
+/// Fire a background `check_latest_release()` thread iff:
+///   • the updater isn't already busy (state is Idle, no in-flight rx)
+///   • `force_now` is set OR `last_check_at` is older than
+///     [`RECHECK_INTERVAL`] (or has never run).
+///
+/// Caller updates `last_check_at = Some(Instant::now())` when this
+/// returns `true`. Cheap on the rate-limited path — one
+/// `Instant::elapsed()` per frame.
+///
+/// Added v0.4.23 to close the "version label stays stale because the
+/// check fires only at startup" gap.
+pub fn maybe_spawn_recheck(
+    state: &UpdateState,
+    rx: &Option<mpsc::Receiver<Option<UpdateAvailable>>>,
+    last_check_at: Option<Instant>,
+    force_now: bool,
+) -> Option<mpsc::Receiver<Option<UpdateAvailable>>> {
+    if !matches!(state, UpdateState::Idle) || rx.is_some() {
+        return None;
+    }
+    let should_run = force_now
+        || match last_check_at {
+            None => true,
+            Some(t) => t.elapsed() >= RECHECK_INTERVAL,
+        };
+    if !should_run {
+        return None;
+    }
+    let (tx, r) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(check_latest_release());
+    });
+    Some(r)
 }
 
 pub fn check_latest_release() -> Option<UpdateAvailable> {
