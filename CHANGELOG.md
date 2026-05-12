@@ -12,6 +12,16 @@ If the user has the app open at the moment a new release is published, the botto
 
 Proposed fix (queued for a follow-up patch): re-run the background check on a 5-minute timer while the app is idle, AND on every tab change. Both are cheap, both are bounded, and either one closes the window. ~30 LOC in `src/git_update.rs` plus a `last_check_at: Option<Instant>` field. No new deps.
 
+## [0.4.19] — 2026-05-11
+
+### Changed
+- **Spectrum panel relocated from top-of-Mix-tab to top-of-console-deck.** Sits directly above the fader strips now, so the meter ↔ spectrum comparison happens in one glance instead of being a screenful apart. The console deck's vertical budget grew as a result — see strip redesign below. Toggle remains under Admin → Show spectrum panel (Mix tab).
+- **Strip cards now stretch the fader rail into their full vertical space.** Pre-v0.4.19 the fader was pinned at `FADER_H = 130` regardless of how tall the console-deck region was, leaving a wide blank zone below the dB readout on tall windows. The strip (and the master strip) now compute `fader_h = available_h − 110` so the rail + peak meter fill whatever's left after the label / button-row / dB-readout claim their fixed share. Floors at the old `FADER_H = 130` so a too-short console deck still shows a usable fader. The peak meter scales with it so a louder signal now sweeps the full height of the card, matching the recalibrated spectrum panel.
+
+### Fixed
+- **Spectrum panel was completely saturated all the time.** Root cause in `analysis::spectrum`: the FFT bin magnitude wasn't window-corrected. For a 0 dBFS sine at FFT bin centre, the raw Hann-windowed bin reads as `N/4 ≈ 1024` (at `N = 4096`), and `20·log10(1024) ≈ +60 dB`. The old `((db + 80) / 80)` mapping clamped that to `1.0` immediately, so any real music content pinned every bar at the top. Two-line fix: multiply the magnitude by `4 / N` (Hann amplitude-coherent-gain inverse) so a 0 dBFS sine actually reads as 0 dBFS, then map `((db + 90) / 100)` for the bars — `-90 dB → 0`, `0 dB → 0.9` (10% headroom at the top for transient overshoots). Existing spectrum-floor and peak-bin-position tests still pass.
+- **Strip-card bottom space no longer wasted.** Same issue as above — fader was fixed-height inside a taller frame. Fixed by the fader-stretch change.
+
 ## [0.4.18] — 2026-05-11
 
 ### Added

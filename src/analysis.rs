@@ -32,13 +32,27 @@ pub fn spectrum(samples: &[f32]) -> Vec<f32> {
     fft.process(&mut buf);
 
     // Log-magnitude, normalised. Drop the DC bin and the upper mirror half.
+    //
+    // Window correction (v0.4.19): the raw FFT bin magnitude for a
+    // unit-amplitude sine at one of the analysis bins is `N/2` times
+    // the window's amplitude-coherent gain (0.5 for Hann), i.e.
+    // `N/4`. Without correcting for this, a 0 dBFS sine reads as
+    // `20·log10(N/4)` — at N=4096 that's +60 dB, which the old
+    // `((db + 80) / 80)` mapping saturated to 1.0. The Mix-tab
+    // spectrum bars sat permanently pinned. Multiplying by `4/N`
+    // brings the bin magnitude back to a "0 dBFS sine peaks at
+    // 0 dBFS" calibration, and a more generous `-90..0 dB` mapping
+    // gives broadband content (where per-bin energy is dB-spread
+    // across thousands of bins) headroom to actually render.
     let n = fft_size / 2;
+    let scale = 4.0 / fft_size as f32; // Hann coherent gain inverse
     let mut out = Vec::with_capacity(n);
     for bin in &buf[..n] {
-        let mag = (bin.re * bin.re + bin.im * bin.im).sqrt();
-        // 20 * log10(mag) roughly, with a floor, mapped to [0, 1].
-        let db = 20.0 * (mag + 1e-6).log10();
-        let norm = ((db + 80.0) / 80.0).clamp(0.0, 1.0);
+        let mag = (bin.re * bin.re + bin.im * bin.im).sqrt() * scale;
+        let db = 20.0 * (mag + 1e-9).log10();
+        // -90 dB → 0, 0 dB → 0.9 (10% headroom reserved at the top
+        // so a brief over-shoot still has somewhere to go visually).
+        let norm = ((db + 90.0) / 100.0).clamp(0.0, 1.0);
         out.push(norm);
     }
     out

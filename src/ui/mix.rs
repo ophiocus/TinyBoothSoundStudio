@@ -157,14 +157,11 @@ pub fn show(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
 
     ui.separator();
 
-    // Optional master-bus spectrum panel — pinned above the lane
-    // stack when enabled in Admin → Show spectrum panel (Mix tab).
-    // Reads the same `output_viz` tap the standalone visualizer
-    // canvas uses, so no new audio-thread plumbing. v0.4.18.
-    if app.config.show_spectrum_panel {
-        crate::ui::spectrum_panel::show(app, ui, SPECTRUM_H);
-        ui.add_space(2.0);
-    }
+    // v0.4.19: the master-bus spectrum panel used to sit above the
+    // lanes, which (a) ate vertical space that was better given to
+    // the waveforms and (b) made the meter ↔ spectrum comparison
+    // awkward because they were a screenful apart. It's now drawn
+    // at the top of the console deck below — see `console_deck()`.
 
     // Capture fader values for any armed strips while playing.
     capture_automation(app);
@@ -709,16 +706,29 @@ fn console_deck(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
     let mut commit_track: Option<usize> = None;
     let mut commit_master = false;
 
+    // v0.4.19: spectrum panel relocated to the top of the console
+    // deck (was: top of the Mix tab). Pinned at the bottom of the
+    // screen so the meter ↔ spectrum comparison happens in one
+    // glance. Compute it now so the strip area below can use the
+    // remaining height — that gives the fader rail room to stretch
+    // into what used to be wasted bottom space inside each card.
+    let mut strip_h = ui.available_height().max(160.0);
+    if app.config.show_spectrum_panel {
+        crate::ui::spectrum_panel::show(app, ui, SPECTRUM_H);
+        ui.add_space(2.0);
+        strip_h = (strip_h - SPECTRUM_H - 2.0).max(140.0);
+    }
+
     egui::ScrollArea::horizontal().show(ui, |ui| {
         ui.horizontal(|ui| {
             for idx in 0..n_tracks {
-                if strip(app, ui, idx) {
+                if strip(app, ui, idx, strip_h) {
                     commit_track = Some(idx);
                 }
                 ui.add_space(STRIP_GAP);
             }
             ui.add_space(STRIP_GAP * 2.0);
-            if master_strip(app, ui) {
+            if master_strip(app, ui, strip_h) {
                 commit_master = true;
             }
         });
@@ -734,7 +744,12 @@ fn console_deck(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
 
 /// Returns true if the strip's R toggle was just turned OFF (caller
 /// should commit the recorder's scratch lane for this track).
-fn strip(app: &mut TinyBoothApp, ui: &mut egui::Ui, idx: usize) -> bool {
+///
+/// `available_h` is the height of the console-deck region we should
+/// fill (v0.4.19). The fader rail stretches into whatever's left
+/// after the labels / button rows / dB readout claim their share —
+/// no more wasted vertical space inside the card.
+fn strip(app: &mut TinyBoothApp, ui: &mut egui::Ui, idx: usize, available_h: f32) -> bool {
     // Clone the Arc so we can drop the immutable borrow on app before
     // any mutation. Cheap — Arc clone is two atomic ops.
     let track = match app.player.as_ref() {
@@ -758,15 +773,10 @@ fn strip(app: &mut TinyBoothApp, ui: &mut egui::Ui, idx: usize) -> bool {
         .inner_margin(egui::Margin::same(8.0))
         .show(ui, |ui| {
             ui.set_width(STRIP_W);
-            // For a *vertical* slider, `spacing.slider_width` is the
-            // main-axis (rail) length, not the thickness. Pin it to
-            // FADER_H so the rail fills the bounding box `add_sized`
-            // allocates below, instead of egui's default 100 px stub
-            // floating in a 130 px box. Rail thickness comes from the
-            // cross-axis allocation (rect.width() / 4 in egui), which
-            // is already substantial at the current STRIP_W.
+            // `spacing.slider_width` (the *main-axis rail length* for
+            // vertical sliders, not thickness) is set just before the
+            // fader is drawn — once we know the stretched height.
             // Scoped to this strip — sliders elsewhere keep defaults.
-            ui.style_mut().spacing.slider_width = FADER_H;
             ui.vertical_centered(|ui| {
                 let name = ellipsize(&track.name, STRIP_NAME_CHARS);
                 ui.label(egui::RichText::new(name).size(FONT_STRIP_NAME).strong());
@@ -829,10 +839,18 @@ fn strip(app: &mut TinyBoothApp, ui: &mut egui::Ui, idx: usize) -> bool {
                 });
             });
             ui.add_space(6.0);
+            // v0.4.19 — stretch the fader rail to fill the card.
+            // `available_h` is the height the console deck gave us;
+            // subtract the rough overhead of label + button row +
+            // dB readout + frame margins to leave that much rail.
+            // Floors at FADER_H so a too-small console deck still
+            // shows a usable fader.
+            let fader_h = (available_h - 110.0).max(FADER_H);
+            ui.style_mut().spacing.slider_width = fader_h;
             ui.horizontal(|ui| {
                 let mut gain = track.gain_db();
                 let resp = ui.add_sized(
-                    [STRIP_W - 30.0, FADER_H],
+                    [STRIP_W - 30.0, fader_h],
                     egui::Slider::new(&mut gain, -60.0..=6.0)
                         .vertical()
                         .show_value(false),
@@ -840,7 +858,7 @@ fn strip(app: &mut TinyBoothApp, ui: &mut egui::Ui, idx: usize) -> bool {
                 if resp.changed() {
                     track.set_gain_db(gain);
                 }
-                draw_meter(ui, track.peak(), FADER_H);
+                draw_meter(ui, track.peak(), fader_h);
             });
             ui.add_space(3.0);
             ui.vertical_centered(|ui| {
@@ -856,7 +874,10 @@ fn strip(app: &mut TinyBoothApp, ui: &mut egui::Ui, idx: usize) -> bool {
 }
 
 /// Returns true if the master strip's R toggle was just turned OFF.
-fn master_strip(app: &mut TinyBoothApp, ui: &mut egui::Ui) -> bool {
+///
+/// `available_h` follows the same shape as `strip()` — fader rail
+/// stretches into the console-deck height instead of staying fixed.
+fn master_strip(app: &mut TinyBoothApp, ui: &mut egui::Ui, available_h: f32) -> bool {
     // Clone the Arc<PlayerState> so we drop the immutable borrow on app
     // before any project-level mutation.
     let state = match app.player.as_ref() {
@@ -876,9 +897,8 @@ fn master_strip(app: &mut TinyBoothApp, ui: &mut egui::Ui) -> bool {
         .inner_margin(egui::Margin::same(8.0))
         .show(ui, |ui| {
             ui.set_width(STRIP_W + 12.0);
-            // See the matching comment in `strip()`: this is rail length
-            // for vertical sliders, not thickness.
-            ui.style_mut().spacing.slider_width = FADER_H;
+            // slider_width set just before the fader is drawn — once
+            // we know the stretched height from `available_h`.
             ui.vertical_centered(|ui| {
                 ui.label(
                     egui::RichText::new("MASTER")
@@ -911,10 +931,13 @@ fn master_strip(app: &mut TinyBoothApp, ui: &mut egui::Ui) -> bool {
                 });
             });
             ui.add_space(6.0);
+            // Stretch the master fader rail the same way as `strip()`.
+            let fader_h = (available_h - 110.0).max(FADER_H);
+            ui.style_mut().spacing.slider_width = fader_h;
             ui.horizontal(|ui| {
                 let mut gain = state.master_gain_db();
                 let resp = ui.add_sized(
-                    [STRIP_W - 30.0, FADER_H],
+                    [STRIP_W - 30.0, fader_h],
                     egui::Slider::new(&mut gain, -60.0..=6.0)
                         .vertical()
                         .show_value(false),
@@ -924,10 +947,10 @@ fn master_strip(app: &mut TinyBoothApp, ui: &mut egui::Ui) -> bool {
                     new_master_db = Some(gain);
                 }
                 ui.vertical(|ui| {
-                    draw_meter(ui, state.master_peak_left(), FADER_H);
+                    draw_meter(ui, state.master_peak_left(), fader_h);
                 });
                 ui.vertical(|ui| {
-                    draw_meter(ui, state.master_peak_right(), FADER_H);
+                    draw_meter(ui, state.master_peak_right(), fader_h);
                 });
             });
             ui.add_space(3.0);
