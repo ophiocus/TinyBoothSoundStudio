@@ -108,7 +108,11 @@ pub fn show(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
     if need_rebuild {
         app.player = None;
         app.player_error = None;
-        match Player::new(&app.project, app.audio_err_tx.clone()) {
+        match Player::new(
+            &app.project,
+            app.audio_err_tx.clone(),
+            app.config.output_device.as_deref(),
+        ) {
             Ok(p) => {
                 app.player = Some(p);
                 app.player_attempt_failed_for = None;

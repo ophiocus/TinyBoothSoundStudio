@@ -18,7 +18,7 @@
 //! synchronized playhead. Position is sample-accurate.
 
 use anyhow::{anyhow, Context, Result};
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::traits::{DeviceTrait, StreamTrait};
 use cpal::{Stream, StreamConfig};
 use parking_lot::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
@@ -306,7 +306,11 @@ impl Player {
     /// `error_tx` is a clone of the app's audio-error channel; cpal's
     /// output-stream err_fn pushes through it so the UI surfaces the
     /// failure instead of locking stderr from the audio thread.
-    pub fn new(project: &Project, error_tx: std::sync::mpsc::Sender<String>) -> Result<Self> {
+    pub fn new(
+        project: &Project,
+        error_tx: std::sync::mpsc::Sender<String>,
+        output_device_name: Option<&str>,
+    ) -> Result<Self> {
         if project.tracks.is_empty() {
             return Err(anyhow!("project has no tracks"));
         }
@@ -317,14 +321,13 @@ impl Player {
         // output device (no headphones, sound card disabled) caused
         // the whole 600+ MB of WAV samples to be loaded into memory
         // first, then thrown away when stream construction failed.
-        // Combined with the per-frame retry from the Mix-tab lazy-
-        // rebuild loop, that produced massive allocator pressure +
-        // frozen UI + fans-on-full. The fix is structural: probe the
-        // device first, cheap-fail immediately, no wasted work.
-        if cpal::default_host().default_output_device().is_none() {
+        // The fix is structural: probe the device first, cheap-fail
+        // immediately, no wasted work. v0.4.27: probe the *user-chosen*
+        // device when one is set (with graceful fallback to default).
+        if crate::audio::output_device_by_name(output_device_name).is_none() {
             return Err(anyhow!(
-                "no default output device — connect headphones or speakers \
-                 (or check Windows sound settings) and click Retry above"
+                "no audio output device — pick one in Admin → Audio devices… \
+                 or connect headphones/speakers and click Retry above"
             ));
         }
 
@@ -418,7 +421,7 @@ impl Player {
             output_viz: Mutex::new(std::collections::VecDeque::with_capacity(OUTPUT_VIZ_LEN)),
         });
 
-        let stream = build_output_stream(state.clone(), error_tx)?;
+        let stream = build_output_stream(state.clone(), error_tx, output_device_name)?;
         stream.play().context("starting cpal output stream")?;
 
         Ok(Self {
@@ -532,11 +535,10 @@ fn compute_peaks(samples: &[i16], channels: usize, bin: usize) -> Vec<f32> {
 fn build_output_stream(
     state: Arc<PlayerState>,
     error_tx: std::sync::mpsc::Sender<String>,
+    output_device_name: Option<&str>,
 ) -> Result<Stream> {
-    let host = cpal::default_host();
-    let dev = host
-        .default_output_device()
-        .ok_or_else(|| anyhow!("no default output device"))?;
+    let dev = crate::audio::output_device_by_name(output_device_name)
+        .ok_or_else(|| anyhow!("no output device available"))?;
 
     // Try to match the project's sample rate exactly. Fall back to the
     // device's default config if unsupported (Phase 2 doesn't resample —

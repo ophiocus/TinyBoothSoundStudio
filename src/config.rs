@@ -31,6 +31,23 @@ pub struct Config {
     /// from Admin → "Show spectrum panel (Mix tab)". Added v0.4.18.
     #[serde(default = "default_show_spectrum_panel")]
     pub show_spectrum_panel: bool,
+
+    /// Preferred input device name (cpal device name). `None` =
+    /// follow the platform default. Set from Admin → Audio devices…
+    /// or inline on the Record tab. Resolved at start-of-recording
+    /// time via [`crate::audio::input_device_by_name`]; falls back
+    /// to the default when the saved name doesn't match a currently-
+    /// enumerated device (the hardware was unplugged, etc.).
+    /// Added v0.4.27.
+    #[serde(default)]
+    pub input_device: Option<String>,
+
+    /// Preferred output device name (cpal device name). Same shape
+    /// as `input_device`. Resolved at `Player::new` time via
+    /// [`crate::audio::output_device_by_name`]; falls back to the
+    /// default when the saved name doesn't match. Added v0.4.27.
+    #[serde(default)]
+    pub output_device: Option<String>,
 }
 
 fn default_profile_name() -> String {
@@ -54,6 +71,8 @@ impl Default for Config {
             last_project_path: None,
             recent_projects: Vec::new(),
             show_spectrum_panel: default_show_spectrum_panel(),
+            input_device: None,
+            output_device: None,
         }
     }
 }

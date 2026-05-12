@@ -8,6 +8,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); thi
 
 (Nothing yet — known issues all resolved as of v0.4.23.)
 
+## [0.4.27] — 2026-05-12
+
+### Added — master input/output configuration
+- **Admin → Audio devices…** modal. Picks both the master input device (used by the Record tab) and the master output device (used by Mix-tab playback) from cpal-enumerated lists. Each pick shows the device name plus its native channel count and sample rate. Empty pick = "follow the platform default" — useful when the user wants to track Windows' active default rather than pinning a specific device.
+- **`Config.input_device` / `Config.output_device`** (`Option<String>`, both `#[serde(default)]`). Both persist to `config.json` so the picks survive app restarts. Older configs auto-migrate to `None` (= follow platform default), which preserves v0.4.26 behaviour exactly for everyone who hasn't touched the new panel.
+- **Graceful fallback when a saved device disappears.** When `Config.input_device` or `output_device` references a name that no longer matches any enumerated device (user unplugged the USB mic between sessions, switched ports, etc.), the resolver falls through to the platform default rather than erroring out. New helpers `audio::input_device_by_name(Option<&str>)` and `audio::output_device_by_name(Option<&str>)` centralise this lookup.
+- **Rescan button** in the panel — re-enumerates cpal's device list mid-session. Plug in a USB mic, click Rescan, the dropdowns update without an app restart.
+
+### Changed
+- **`Player::new` signature gains `output_device_name: Option<&str>`.** Threads through to `build_output_stream`, which now calls `audio::output_device_by_name` instead of the hard-wired `default_host().default_output_device()`. Same fast-fail probe at the top of `Player::new` so a missing chosen device still cheap-errors before the WAV-loading phase.
+- **Mix-tab player rebuild** triggered automatically when the output device is changed mid-session — drops `app.player` so the next Mix-tab frame rebuilds with the new device. Playback stops; user hits Play to resume.
+- **Record tab's input-device dropdown** now restores its previous selection from `Config.input_device` at startup, falling back to the platform default if the saved device is no longer enumerated.
+
 ## [0.4.26] — 2026-05-12
 
 ### Changed

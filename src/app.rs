@@ -184,6 +184,10 @@ pub struct TinyBoothApp {
     pub telemetry_settings: crate::telemetry::TelemetrySettings,
     pub show_telemetry_settings: bool,
 
+    /// Admin → Audio devices… modal. Lets the user pick the master
+    /// input / output device. Added v0.4.27.
+    pub show_audio_devices: bool,
+
     /// Set to `true` at construction; cleared on first `update()`
     /// frame after dispatching the initial backfill scan over the
     /// auto-restored project. Without this, the auto-restored
@@ -224,8 +228,17 @@ impl TinyBoothApp {
         let (audio_err_tx, audio_err_rx) = mpsc::channel::<String>();
 
         // Enumerate input devices once at startup; user can refresh later.
+        // v0.4.27 — restore the persisted device pick from Config if its
+        // name still matches a currently-enumerated device. Otherwise
+        // fall through to the platform default (= first in the list,
+        // since list_input_devices puts the default at index 0).
         let devices = audio::list_input_devices();
-        let selected_device = devices.first().map(|d| d.name.clone());
+        let selected_device = config
+            .input_device
+            .as_deref()
+            .filter(|saved| devices.iter().any(|d| d.name == *saved))
+            .map(|s| s.to_string())
+            .or_else(|| devices.first().map(|d| d.name.clone()));
 
         // Default scratch project in %APPDATA%\TinyBooth Sound Studio\sessions\unnamed.
         let default_root = Config::dir()
@@ -322,6 +335,7 @@ impl TinyBoothApp {
             telemetry: crate::telemetry::TelemetryService::spawn(),
             telemetry_settings: crate::telemetry::TelemetrySettings::load(),
             show_telemetry_settings: false,
+            show_audio_devices: false,
             initial_telemetry_pending: true,
             show_health: false,
             spectrum_trail: Vec::new(),
@@ -1457,6 +1471,18 @@ impl eframe::App for TinyBoothApp {
                         self.show_telemetry_settings = true;
                         ui.close_menu();
                     }
+                    if ui
+                        .button("Audio devices…")
+                        .on_hover_text(
+                            "Pick the master input device (recording) and output \
+                             device (Mix-tab playback). Persists across app \
+                             restarts.",
+                        )
+                        .clicked()
+                    {
+                        self.show_audio_devices = true;
+                        ui.close_menu();
+                    }
                     ui.separator();
                     let mut show_spec = self.config.show_spectrum_panel;
                     if ui
@@ -1681,6 +1707,11 @@ impl eframe::App for TinyBoothApp {
         // Telemetry settings modal (Admin → Telemetry settings…).
         if self.show_telemetry_settings {
             ui::telemetry_settings::show(self, ctx);
+        }
+
+        // Audio devices modal (Admin → Audio devices…). v0.4.27.
+        if self.show_audio_devices {
+            ui::audio_devices::show(self, ctx);
         }
     }
 

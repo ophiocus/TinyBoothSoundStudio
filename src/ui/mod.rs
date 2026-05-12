@@ -1,4 +1,5 @@
 pub mod admin;
+pub mod audio_devices;
 pub mod correction;
 pub mod export;
 pub mod health;

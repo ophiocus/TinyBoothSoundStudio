@@ -59,6 +59,77 @@ pub fn list_input_devices() -> Vec<DeviceInfo> {
     out
 }
 
+/// Enumerate output devices — same shape as `list_input_devices`.
+/// v0.4.27 — needed so the Mix tab can let the user pick which
+/// output the master bus plays through. Pre-v0.4.27 the Player
+/// hard-wired `default_output_device()` with no override path.
+pub fn list_output_devices() -> Vec<DeviceInfo> {
+    let host = cpal::default_host();
+    let default_name = host
+        .default_output_device()
+        .and_then(|d| d.name().ok())
+        .unwrap_or_default();
+    let mut out = Vec::new();
+    let Ok(devices) = host.output_devices() else {
+        return out;
+    };
+    for dev in devices {
+        let name = match dev.name() {
+            Ok(n) => n,
+            Err(_) => continue,
+        };
+        let Ok(cfg) = dev.default_output_config() else {
+            continue;
+        };
+        out.push(DeviceInfo {
+            name,
+            channels: cfg.channels(),
+            sample_rate: cfg.sample_rate().0,
+        });
+    }
+    out.sort_by_key(|d| d.name != default_name);
+    out
+}
+
+/// Resolve a saved input-device name back into a live cpal `Device`,
+/// falling back to the platform default when the name doesn't match
+/// any currently-enumerated device (the user unplugged the
+/// hardware, switched USB ports, etc.). v0.4.27. Currently a
+/// reserved API — recording today goes through `start_recording`
+/// which does its own strict lookup; this helper is here for the
+/// upcoming "resolve once at app start so the Record tab knows
+/// whether the saved pick is still alive" surface.
+#[allow(dead_code)]
+pub fn input_device_by_name(name: Option<&str>) -> Option<cpal::Device> {
+    let host = cpal::default_host();
+    if let Some(target) = name {
+        if let Ok(devices) = host.input_devices() {
+            for dev in devices {
+                if dev.name().ok().as_deref() == Some(target) {
+                    return Some(dev);
+                }
+            }
+        }
+    }
+    host.default_input_device()
+}
+
+/// Resolve a saved output-device name back into a live cpal `Device`,
+/// or fall back to the platform default. v0.4.27.
+pub fn output_device_by_name(name: Option<&str>) -> Option<cpal::Device> {
+    let host = cpal::default_host();
+    if let Some(target) = name {
+        if let Ok(devices) = host.output_devices() {
+            for dev in devices {
+                if dev.name().ok().as_deref() == Some(target) {
+                    return Some(dev);
+                }
+            }
+        }
+    }
+    host.default_output_device()
+}
+
 /// Shared live-audio state for the visualiser.
 ///
 /// Carries two ring buffers (`left` always populated; `right` only in stereo
