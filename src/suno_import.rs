@@ -775,6 +775,7 @@ fn build_project(
         name: name.to_string(),
         created: Utc::now(),
         tracks: Vec::with_capacity(detected.len()),
+        kind: crate::project::ProjectKind::Standard,
         master_gain_db: 0.0,
         master_gain_automation: None,
         next_suno_ordinal: 1,

@@ -19,6 +19,7 @@ mod suno_meta;
 mod telemetry;
 mod trim;
 mod ui;
+mod wav_meta;
 
 use eframe::egui;
 use std::sync::Arc;

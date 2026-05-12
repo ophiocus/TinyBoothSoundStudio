@@ -351,14 +351,25 @@ impl TinyBoothApp {
         let Some(dev) = self.selected_device.clone() else {
             anyhow::bail!("select an input device first");
         };
-        // Recordings ALWAYS land in the persistent recordings project
-        // at %APPDATA%\TinyBooth Sound Studio\recordings\ — never in
-        // the user's active project (which might be a Suno import or
-        // any other stem-mixing context). This is enforced here, not
-        // by convention: take metadata is registered against the
-        // recordings project on stop_take and the active `app.project`
-        // is never touched by the Record tab.
-        let rec = Project::open_or_create_recordings().context("opening recordings project")?;
+        // Routing rule (v0.4.20): TinyDAW projects capture into their
+        // own filespace; everything else (Suno imports, untitled
+        // scratch sessions, the Recordings filespace itself) routes
+        // to the canonical recordings project at
+        // %APPDATA%\TinyBooth Sound Studio\recordings\. The
+        // segregation rule for stem-mixing projects (don't
+        // contaminate a Suno project with the user's takes) still
+        // holds — TinyDAW projects opt INTO receiving takes, Suno
+        // projects opt OUT by default.
+        let rec = if self.project.captures_own_recordings()
+            && !matches!(self.project.kind, crate::project::ProjectKind::Recordings)
+        {
+            // TinyDAW path — re-load the active project from disk so
+            // we get a fresh snapshot for the take-slot allocation.
+            let manifest = self.project.manifest_path();
+            Project::load(&manifest).context("re-loading TinyDAW project for take capture")?
+        } else {
+            Project::open_or_create_recordings().context("opening recordings project")?
+        };
         let (id, abs) = rec.new_track_slot();
         let name = if self.pending_track_name.trim().is_empty() {
             id.clone()
@@ -416,16 +427,35 @@ impl TinyBoothApp {
             );
             return;
         };
-        // Re-load the recordings project from disk, append the take,
-        // save. Loading fresh (rather than carrying a Project struct
-        // across the recording's lifetime) keeps the recordings
-        // filespace as the single source of truth — no in-memory dual
-        // state to drift.
-        let mut rec = match Project::open_or_create_recordings() {
-            Ok(p) => p,
-            Err(e) => {
-                self.status = Some(format!("could not open recordings project: {e:#}"));
-                return;
+        // Re-load the target-of-record project from disk, append the
+        // take, save. Loading fresh (rather than carrying a Project
+        // struct across the recording's lifetime) keeps disk as the
+        // single source of truth. v0.4.20: this can be either the
+        // canonical recordings filespace (default) or the active
+        // TinyDAW project — `pt.target_root` was set at start_take
+        // to whichever was the routing target at that moment.
+        let mut rec = if self.project.root == pt.target_root
+            && self.project.captures_own_recordings()
+            && !matches!(self.project.kind, crate::project::ProjectKind::Recordings)
+        {
+            // TinyDAW path — re-load the active project's manifest.
+            let manifest = pt.target_root.join(crate::project::MANIFEST_NAME);
+            match Project::load(&manifest) {
+                Ok(p) => p,
+                Err(e) => {
+                    self.status = Some(format!(
+                        "could not re-load TinyDAW project to register take: {e:#}"
+                    ));
+                    return;
+                }
+            }
+        } else {
+            match Project::open_or_create_recordings() {
+                Ok(p) => p,
+                Err(e) => {
+                    self.status = Some(format!("could not open recordings project: {e:#}"));
+                    return;
+                }
             }
         };
         // Sanity check: the recordings root we recorded under should
@@ -471,23 +501,28 @@ impl TinyBoothApp {
                     profile,
                     settings: self.telemetry_settings.clone(),
                 });
-                // If the user has the recordings project open as the
-                // active project (via File → Open Recordings), keep
+                // If the take landed in the currently-active project
+                // (Open Recordings OR an active TinyDAW project), keep
                 // `app.project` in sync so the new take appears in
-                // their Project / Mix views without a manual reopen.
-                // Drop the player so it rebuilds with the new track
-                // count on the next Mix-tab visit.
-                if Config::recordings_root()
-                    .map(|root| self.project.root == root)
-                    .unwrap_or(false)
-                {
+                // Project / Mix views without a manual reopen. Drop
+                // the player so it rebuilds with the new track count
+                // on the next Mix-tab visit.
+                if self.project.root == rec.root {
                     self.project.tracks.push(new_track);
                     self.project_dirty = false; // disk already up to date
                     self.player = None;
                 }
-                self.status = Some(
-                    "Saved take to Recordings — File → Open Recordings to review / mix.".into(),
-                );
+                let was_tinydaw = matches!(rec.kind, crate::project::ProjectKind::TinyDAW);
+                self.status = Some(if was_tinydaw {
+                    format!(
+                        "Saved take into TinyDAW project '{}' ({} track{}).",
+                        rec.name,
+                        rec.tracks.len(),
+                        if rec.tracks.len() == 1 { "" } else { "s" }
+                    )
+                } else {
+                    "Saved take to Recordings — File → Open Recordings to review / mix.".into()
+                });
             }
             Err(e) => {
                 self.status = Some(format!("recordings save error: {e:#}"));
@@ -627,6 +662,31 @@ impl TinyBoothApp {
     pub fn set_project_root(&mut self, root: PathBuf, name: String) {
         self.project = Project::new(name, root);
         self.project_dirty = true;
+    }
+
+    /// Create a new TinyDAW project at `root` and switch to it.
+    /// Saves the empty manifest so the folder is a valid project
+    /// immediately (the Record tab can start writing takes into it
+    /// without a manual Save first). v0.4.20.
+    pub fn create_tinydaw_project(&mut self, root: PathBuf, name: String) {
+        let project = Project::new_tinydaw(name, root);
+        match project.save() {
+            Ok(()) => {
+                let manifest = project.manifest_path();
+                self.config.record_project(&manifest);
+                self.project = project;
+                self.project_dirty = false;
+                self.player = None;
+                self.tab = Tab::Record;
+                self.status = Some(format!(
+                    "TinyDAW project ready — recordings will land in {}",
+                    self.project.root.display()
+                ));
+            }
+            Err(e) => {
+                self.status = Some(format!("could not create TinyDAW project: {e:#}"));
+            }
+        }
     }
 
     pub fn save_project(&mut self) {
@@ -924,6 +984,111 @@ impl TinyBoothApp {
     /// `None` is persisted — otherwise the user could close the
     /// app between profile-change and analysis-completion and the
     /// stale telemetry would still be on disk.
+    /// Hot-load a fresh WAV into an existing track, keeping every
+    /// other field of the manifest (gain, correction, automation,
+    /// telemetry_profile, polarity_inverted, name, role). The on-disk
+    /// audio is overwritten via an atomic copy, TBSS metadata is
+    /// injected into the new file, telemetry is invalidated and
+    /// re-dispatched, and the project is auto-saved. The player
+    /// drops itself so the next Mix-tab frame rebuilds with the new
+    /// audio in its in-memory cache.
+    ///
+    /// Refuses the swap when the new WAV's sample rate doesn't match
+    /// the project's existing rate (other tracks share a rate; we
+    /// have no resampler) — caller gets a clear status message and
+    /// nothing on disk changes. v0.4.20.
+    pub fn hot_load_swap(&mut self, idx: usize, source: &Path) -> anyhow::Result<()> {
+        let track = self
+            .project
+            .tracks
+            .get(idx)
+            .ok_or_else(|| anyhow::anyhow!("no track at index {idx}"))?;
+
+        // Probe the source WAV header — sample rate, channels, duration.
+        let reader = hound::WavReader::open(source)
+            .with_context(|| format!("opening source {}", source.display()))?;
+        let spec = reader.spec();
+        let frames = reader.duration() as u64;
+        let new_sr = spec.sample_rate;
+        let new_channels = spec.channels;
+        let new_duration_secs = frames as f32 / new_sr.max(1) as f32;
+        drop(reader);
+
+        // Sample-rate enforcement: every track in a project must share
+        // a rate (no resampler yet — TBSS-FR-0002 §6). Check against
+        // the OTHER tracks (skip ours since we're replacing it).
+        let project_rate = self
+            .project
+            .tracks
+            .iter()
+            .enumerate()
+            .find(|(i, _)| *i != idx)
+            .map(|(_, t)| t.sample_rate);
+        if let Some(rate) = project_rate {
+            if rate != new_sr {
+                anyhow::bail!(
+                    "sample-rate mismatch: project is at {} Hz, new file is {} Hz. \
+                     Re-export the file at {} Hz and try again.",
+                    rate,
+                    new_sr,
+                    rate
+                );
+            }
+        }
+
+        // Compute destination — keep the existing relative path so
+        // the manifest doesn't change, just the bytes.
+        let dest_abs = self.project.root.join(&track.file);
+        if let Some(parent) = dest_abs.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+
+        // Atomic-style copy: write source bytes to a `.swap-tmp`
+        // sibling, then rename over the live file. Same shape as
+        // `Project::save` and `trim::trim_project` so a process
+        // crash mid-swap can never leave us with a half-written WAV.
+        let tmp = dest_abs.with_extension("wav.swap-tmp");
+        std::fs::copy(source, &tmp)
+            .with_context(|| format!("copying {} → {}", source.display(), tmp.display()))?;
+
+        // Inject TBSS metadata into the temp copy BEFORE renaming —
+        // so even if rename fails, the live file is untouched.
+        let meta = crate::wav_meta::TbssWavMeta::from_track(&self.project, track);
+        crate::wav_meta::inject_tbss_meta(&tmp, &meta)
+            .with_context(|| format!("injecting TBSS metadata into {}", tmp.display()))?;
+
+        std::fs::rename(&tmp, &dest_abs)
+            .with_context(|| format!("renaming {} → {}", tmp.display(), dest_abs.display()))?;
+
+        // Patch the manifest fields that depend on the audio: new
+        // duration, sample rate (we already verified match — store
+        // it anyway in case this is the first track in an empty
+        // project), stereo flag. Telemetry zeroed; the worker
+        // re-runs below.
+        let track_mut = &mut self.project.tracks[idx];
+        track_mut.duration_secs = new_duration_secs;
+        track_mut.sample_rate = new_sr;
+        track_mut.stereo = new_channels >= 2;
+        track_mut.telemetry = None;
+
+        // Drop the player — next Mix render rebuilds with the new WAV.
+        self.player = None;
+        self.player_error = None;
+        self.player_attempt_failed_for = None;
+
+        // Autosave (v0.4.20 — the whole point of "auto save on swap").
+        self.project.save().context("saving project after swap")?;
+
+        // Re-dispatch telemetry for the new audio.
+        self.invalidate_telemetry_for_track(idx);
+
+        // Recompute song key — old key estimate was derived from the
+        // previous audio's events.
+        self.project.song_key_estimate = crate::telemetry::estimate_song_key(&self.project.tracks);
+
+        Ok(())
+    }
+
     pub fn invalidate_telemetry_for_track(&mut self, idx: usize) {
         let Some(track) = self.project.tracks.get_mut(idx) else {
             return;
@@ -1114,6 +1279,30 @@ impl eframe::App for TinyBoothApp {
                                 .map(|n| n.to_string_lossy().to_string())
                                 .unwrap_or_else(|| "Session".into());
                             self.set_project_root(dir, name);
+                            ui.close_menu();
+                        }
+                    }
+                    if ui
+                        .button("New TinyDAW project…")
+                        .on_hover_text(
+                            "Create a new non-Suno, recording-centric project. \
+                             Takes captured from the Record tab land directly \
+                             inside this project's filespace instead of the \
+                             shared recordings filespace. Same Mix tab, same \
+                             Export, no Suno context (mixdown reference, \
+                             coherence check, role-driven correction chains).",
+                        )
+                        .clicked()
+                    {
+                        if let Some(dir) = rfd::FileDialog::new()
+                            .set_title("Pick a folder for the TinyDAW project")
+                            .pick_folder()
+                        {
+                            let name = dir
+                                .file_name()
+                                .map(|n| n.to_string_lossy().to_string())
+                                .unwrap_or_else(|| "TinyDAW session".into());
+                            self.create_tinydaw_project(dir, name);
                             ui.close_menu();
                         }
                     }

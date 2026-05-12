@@ -91,7 +91,7 @@ pub fn show(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
 
     // Track table.
     egui::Grid::new("tracks_grid")
-        .num_columns(7)
+        .num_columns(8)
         .striped(true)
         .spacing([10.0, 6.0])
         .show(ui, |ui| {
@@ -102,9 +102,11 @@ pub fn show(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
             ui.strong("Gain (dB)");
             ui.strong("Duration");
             ui.strong("");
+            ui.strong("");
             ui.end_row();
 
             let mut to_delete: Option<usize> = None;
+            let mut to_swap: Option<usize> = None;
             for (idx, t) in app.project.tracks.iter_mut().enumerate() {
                 if ui.checkbox(&mut t.mute, "").on_hover_text("mute").changed() {
                     app.project_dirty = true;
@@ -167,6 +169,20 @@ pub fn show(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
                     app.project_dirty = true;
                 }
                 ui.label(format!("{:.1}s", t.duration_secs));
+                if ui
+                    .button("↔ Swap…")
+                    .on_hover_text(
+                        "Hot-load a different WAV into this track. The new \
+                         audio replaces the file in-place; the track keeps \
+                         its name, role, correction chain, automation, \
+                         polarity, and telemetry profile. The project saves \
+                         automatically; telemetry re-runs in the background. \
+                         New WAV must match the project's sample rate.",
+                    )
+                    .clicked()
+                {
+                    to_swap = Some(idx);
+                }
                 if ui.button("✖").on_hover_text("remove track").clicked() {
                     to_delete = Some(idx);
                 }
@@ -178,6 +194,28 @@ pub fn show(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
                 let abs = app.project.root.join(&t.file);
                 let _ = std::fs::remove_file(&abs);
                 app.project_dirty = true;
+            }
+            if let Some(i) = to_swap {
+                if let Some(src) = rfd::FileDialog::new()
+                    .set_title("Pick a WAV to hot-load into this track")
+                    .add_filter("WAV", &["wav"])
+                    .pick_file()
+                {
+                    match app.hot_load_swap(i, &src) {
+                        Ok(()) => {
+                            app.status = Some(format!(
+                                "Swapped: {} → track #{}",
+                                src.file_name()
+                                    .map(|s| s.to_string_lossy().into_owned())
+                                    .unwrap_or_else(|| "(unnamed)".into()),
+                                i + 1
+                            ));
+                        }
+                        Err(e) => {
+                            app.status = Some(format!("Swap failed: {e:#}"));
+                        }
+                    }
+                }
             }
         });
 }

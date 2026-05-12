@@ -270,12 +270,34 @@ pub struct Track {
     pub telemetry_profile: crate::telemetry::TelemetryProfile,
 }
 
+/// What kind of project this is. Drives the Record-tab routing rule:
+/// `Standard` projects (Suno imports, untitled scratch) push captured
+/// takes to the dedicated recordings filespace at
+/// `%APPDATA%\TinyBooth Sound Studio\recordings\`; `TinyDAW` projects
+/// receive their own takes directly; `Recordings` is the filespace
+/// itself (rendered with the same UI but flagged so we don't loop).
+/// Older manifests default to `Standard`. Added v0.4.20.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ProjectKind {
+    #[default]
+    Standard,
+    /// The app-owned recordings project at the canonical filespace.
+    Recordings,
+    /// Non-Suno, recording-centric project — Record tab writes here.
+    TinyDAW,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Project {
     pub version: u32,
     pub name: String,
     pub created: DateTime<Utc>,
     pub tracks: Vec<Track>,
+
+    /// What flavour of project this is (Standard / Recordings /
+    /// TinyDAW). Added v0.4.20; older manifests default to Standard.
+    #[serde(default)]
+    pub kind: ProjectKind,
 
     /// Master bus gain in dB, applied after the bus sum and before the
     /// soft-limit at both playback and export. Added v0.3; older
@@ -353,6 +375,7 @@ impl Project {
             name: name.into(),
             created: Utc::now(),
             tracks: Vec::new(),
+            kind: ProjectKind::Standard,
             master_gain_db: 0.0,
             master_gain_automation: None,
             next_suno_ordinal: 1,
@@ -363,6 +386,20 @@ impl Project {
             song_key_estimate: None,
             root,
         }
+    }
+
+    /// Mint a fresh TinyDAW project — non-Suno, recording-centric,
+    /// Record tab writes directly into this project's filespace.
+    pub fn new_tinydaw(name: impl Into<String>, root: PathBuf) -> Self {
+        let mut p = Self::new(name, root);
+        p.kind = ProjectKind::TinyDAW;
+        p
+    }
+
+    /// True when captured takes should land in this project's own
+    /// filespace rather than the canonical recordings filespace.
+    pub fn captures_own_recordings(&self) -> bool {
+        matches!(self.kind, ProjectKind::TinyDAW | ProjectKind::Recordings)
     }
 
     pub fn manifest_path(&self) -> PathBuf {
@@ -404,11 +441,20 @@ impl Project {
             .ok_or_else(|| anyhow::anyhow!("no platform config dir for recordings"))?;
         let manifest = root.join(MANIFEST_NAME);
         if manifest.is_file() {
-            return Self::load(&manifest);
+            let mut p = Self::load(&manifest)?;
+            // Old manifests (pre-v0.4.20) deserialise with the default
+            // ProjectKind::Standard; tag this canonical filespace as
+            // Recordings if it's at the expected location.
+            if p.kind == ProjectKind::Standard {
+                p.kind = ProjectKind::Recordings;
+                let _ = p.save();
+            }
+            return Ok(p);
         }
         std::fs::create_dir_all(&root)
             .with_context(|| format!("creating recordings dir {}", root.display()))?;
-        let p = Project::new("Recordings", root);
+        let mut p = Project::new("Recordings", root);
+        p.kind = ProjectKind::Recordings;
         p.save()?;
         Ok(p)
     }
@@ -482,6 +528,7 @@ mod tests {
             name: "test session".into(),
             created: chrono::Utc::now(),
             tracks: vec![fixture_track()],
+            kind: ProjectKind::Standard,
             master_gain_db: -1.5,
             master_gain_automation: None,
             next_suno_ordinal: 2,

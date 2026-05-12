@@ -12,6 +12,23 @@ If the user has the app open at the moment a new release is published, the botto
 
 Proposed fix (queued for a follow-up patch): re-run the background check on a 5-minute timer while the app is idle, AND on every tab change. Both are cheap, both are bounded, and either one closes the window. ~30 LOC in `src/git_update.rs` plus a `last_check_at: Option<Instant>` field. No new deps.
 
+## [0.4.20] — 2026-05-12
+
+### Added — advanced stem-project management
+- **Hot-load: ↔ Swap audio.** New button on every Project-tab track row. Pick a WAV; the bytes replace the track's audio in-place, preserving every other field on the manifest — track name, role, correction chain, volume automation, polarity flip, telemetry profile. Sample-rate enforcement: the new file has to match the project's existing rate (TBSS still has no resampler; mismatched rates would break the Mix tab silently). On mismatch the swap is refused with a clear status, nothing on disk changes. On success the project is **auto-saved**, the player drops itself so the next Mix-tab frame rebuilds with the new audio, telemetry is invalidated and re-dispatched, and the project-level Krumhansl-Schmuckler key estimate is recomputed because old pitch histograms no longer apply.
+- **Transparent TinyBooth metadata injection** — every hot-loaded WAV gets a TBSS JSON blob written into its standard RIFF `LIST/INFO/ICMT` (comment) field before the file goes live. The blob carries: project name, source classification (Suno role / Recorded / TinyDAW take), polarity-inversion flag, active correction-profile name, telemetry profile, and a `tinybooth-sound-studio v0.4.20` produced-by string. Any RIFF-aware reader (exiftool, foobar2000, our own `suno_meta::read_wav_session`) sees a standard comment; TBSS sees a structured record it can round-trip. New module `src/wav_meta.rs` with `inject_tbss_meta` (write side) + `read_tbss_meta` (read side, reserved for the upcoming "drop a WAV onto the Project tab → mint a track preserving TBSS context" feature).
+- **Atomic on-disk writes.** Hot-load swap and metadata injection both write to a `.swap-tmp` / `.tbss-tmp` sibling then rename over the live file, so a process crash mid-swap can never leave a half-written WAV in the project folder.
+
+### Added — TinyDAW project template
+- **File → New TinyDAW project…** — creates a non-Suno, recording-centric project. The Mix tab, Export, Health panel, telemetry, automation, correction-chain UX are all identical; what changes is the routing rule: a Suno / untitled project sends captured takes to the canonical recordings filespace at `%APPDATA%\TinyBooth Sound Studio\recordings\`, while a TinyDAW project receives its takes directly into its own folder. Switches to the Record tab on creation so the next click ⏺ goes into the new project.
+- **New `Project.kind` field** — `ProjectKind { Standard, Recordings, TinyDAW }`. `Standard` (default) preserves v0.4.19 behaviour for every existing manifest. The canonical Recordings filespace gets tagged as `Recordings` on its next open (one-time migration via the existing `open_or_create_recordings` path; the field is `#[serde(default)]` so older manifests don't reset).
+
+### Added — advanced non-stem project management
+- Both **hot-load swap** and **transparent TBSS metadata injection** apply identically to TinyDAW projects — they're per-track operations that don't care about Suno context. A TinyDAW user can swap any recorded take with a different WAV (e.g. replace take 3 with the cleaner take 5, keeping its correction chain), and every WAV the project produces carries the project provenance in its RIFF comment.
+
+### Tests
+- 3 new unit tests in `src/wav_meta.rs`: inject+read round-trip (with hound reopening the file to prove the WAV is still valid), repeated injection replaces the previous blob (no unbounded file growth), `read_tbss_meta` returns `None` on a plain WAV. Total suite: 72 → **75 passing**.
+
 ## [0.4.19] — 2026-05-11
 
 ### Changed
