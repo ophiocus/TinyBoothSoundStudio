@@ -8,6 +8,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); thi
 
 (Nothing yet — known issues all resolved as of v0.4.23.)
 
+## [0.4.24] — 2026-05-12
+
+### Fixed
+- **Strip cards no longer staircase diagonally** in the console deck. `ui.horizontal` defaults to `Align::Center` on the cross axis, so cards with even slightly different effective heights drifted down each step (visible as a Vocals → Backing Vocals → Drums → Bass cascade in the v0.4.23 screenshot). Switched to `ui.with_layout(Layout::left_to_right(Align::Min), ...)` — every card's top edge now sits on the same y baseline.
+- **Lane header bleed killed**. v0.4.21's 1-px line divider between rows was too subtle to break the eye-fuse between adjacent headers. Each lane is now wrapped in its own `Frame::group` with a dark fill, so every row is a visibly bounded card with a clear border on all sides. Removed the redundant divider.
+- **First lane no longer kisses the transport bar above it** — added 4 px of explicit top padding inside the lanes ScrollArea so the Vocals row's name has breathing room from the controls row above.
+- **`scripts/ship.ps1` poll fixed.** v0.4.23's first run sat polling for 14 minutes on a release that had been published 6 minutes earlier. Two bugs: (a) `gh release view --json publishedAt, assets` was being parsed by PowerShell as two arguments, and `gh` rejected the second one (`Unknown JSON field: " assets"`) with a non-zero exit code that the script swallowed via `2>$null`. Fixed by quoting the field list as a single token (`'publishedAt,assets'`) and gating on `$LASTEXITCODE`. (b) The published-detection check used a regex `^20\d\d-` against `$pubAt`, but PowerShell 7's `ConvertFrom-Json` auto-parses ISO 8601 strings into `[DateTime]` objects whose `ToString` produces `MM/dd/yyyy …` in US locales — the regex never matched. Replaced with a non-null check.
+
 ## [0.4.23] — 2026-05-12
 
 ### Fixed

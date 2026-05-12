@@ -85,18 +85,31 @@ while ($true) {
         throw "Timed out after ${TimeoutSeconds}s waiting for $Tag to be published. Check: gh run list --workflow=release.yml --limit 3"
     }
 
+    # v0.4.24 — the JSON field list must be a single token with no
+    # whitespace. PowerShell would otherwise parse `--json publishedAt,
+    # assets` as TWO arguments (`publishedAt,` and `assets`), and gh
+    # rejects the second one with `Unknown JSON field: " assets"`.
+    # That silently failed the v0.4.23 poll for 14+ minutes.
     $json = $null
-    try {
-        $json = gh release view $Tag --json publishedAt, assets 2>$null | ConvertFrom-Json
-    } catch {
-        # Release stub may not exist yet — CI creates it partway in.
-        $json = $null
+    $raw = (gh release view $Tag --json 'publishedAt,assets' 2>$null | Out-String).Trim()
+    if ($LASTEXITCODE -eq 0 -and $raw) {
+        try {
+            $json = $raw | ConvertFrom-Json
+        } catch {
+            $json = $null
+        }
     }
 
     $pubAt = if ($json) { $json.publishedAt } else { $null }
-    $assetCount = if ($json -and $json.assets) { $json.assets.Count } else { 0 }
+    $assetCount = if ($json -and $json.assets) { @($json.assets).Count } else { 0 }
 
-    if ($pubAt -and $pubAt -match '^20\d\d-') {
+    # `$pubAt` is either `$null` (release stub not published yet) or a
+    # `[DateTime]` parsed by ConvertFrom-Json from the ISO string the
+    # API returned. PowerShell 7's auto-parse means a regex match
+    # against `^20\d\d-` would miss every published release (the
+    # DateTime's ToString is `MM/dd/yyyy …` in US locales). Just test
+    # for non-null instead.
+    if ($pubAt) {
         Write-Host "  ✓ published at $pubAt (${assetCount} asset(s)) after ${elapsed}s" -ForegroundColor Green
         break
     }
@@ -108,7 +121,7 @@ while ($true) {
 # ── 4. Report ──────────────────────────────────────────────────────
 Write-Host ''
 Write-Host '─── release artifacts ──────────────────────' -ForegroundColor Cyan
-$final = gh release view $Tag --json name, publishedAt, url, assets | ConvertFrom-Json
+$final = gh release view $Tag --json 'name,publishedAt,url,assets' | ConvertFrom-Json
 Write-Host ('  name       : {0}' -f $final.name)
 Write-Host ('  published  : {0}' -f $final.publishedAt)
 Write-Host ('  url        : {0}' -f $final.url)
