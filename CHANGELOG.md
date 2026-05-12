@@ -12,6 +12,12 @@ If the user has the app open at the moment a new release is published, the botto
 
 Proposed fix (queued for a follow-up patch): re-run the background check on a 5-minute timer while the app is idle, AND on every tab change. Both are cheap, both are bounded, and either one closes the window. ~30 LOC in `src/git_update.rs` plus a `last_check_at: Option<Instant>` field. No new deps.
 
+## [0.4.21] — 2026-05-12
+
+### Fixed
+- **Strip cards no longer balloon on tall windows.** v0.4.19's "stretch fader rail to fill available height" change ran unbounded — on a window where the console-deck pane was 500+ px, each strip's fader rail grew to 400+ px and the cards became "gigantic" (user screenshot). Added two hard caps: `FADER_H_MAX = 200` (rail max) and `CONSOLE_H_MAX = 340` (whole deck max). The drag handle between lanes and deck still adjusts `mix_console_fraction`; the caps just prevent the deck from eating the screen. Net effect: tall windows get more vertical space for the lane stack (which is where you actually mix), less for the strips (which don't need 400 px of rail).
+- **Lane headers stop bleeding into each other.** v0.4.18's `LANE_H = 52` was a hair too tight for the 2-row header (name + chips above, M / S / A/B / Cor + profile dropdown below), so adjacent rows visually fused with no clear boundary. Bumped `LANE_H` 52 → 62 and `ROW_GAP` 4 → 8, and added a 1-px horizontal divider centred in the row gap. Each lane is now a clearly bounded card with comfortable padding.
+
 ## [0.4.20] — 2026-05-12
 
 ### Added — advanced stem-project management

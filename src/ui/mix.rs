@@ -20,23 +20,38 @@ use egui::{Color32, Pos2, Rect, Stroke};
 use std::sync::atomic::Ordering;
 
 const HEADER_W: f32 = 240.0;
-/// Lane height in px. v0.4.18 dropped 72 → 52 after collapsing the
-/// 3-row header (name / chips / buttons) into 2 (name+chips on top,
-/// controls on bottom). 52 = 22 (top row text) + 20 (button row) +
-/// ~10 of vertical padding — fits without crowding.
-const LANE_H: f32 = 52.0;
-/// Vertical gap between lanes. v0.4.18 tightened 6 → 4 to amplify
-/// the visible-tracks-per-screen win from the LANE_H reduction.
-const ROW_GAP: f32 = 4.0;
-/// Height of the optional Mix-tab spectrum panel (above the lanes
-/// when `Config.show_spectrum_panel` is true). Set equal to LANE_H
-/// per the design discussion: "split one height at the top of the
-/// panel for a full spectrum EQ panel". v0.4.18.
-const SPECTRUM_H: f32 = LANE_H;
+/// Lane height in px. v0.4.20 bumped 52 → 62 — v0.4.18's tight 52
+/// was a hair too short to fit the 2-row header cleanly, leaving
+/// rows visually bleeding into each other. 62 = 24 (top row, name +
+/// chips) + 22 (button row, M·S·A/B·Cor + dropdown) + 16 of vertical
+/// padding — comfortable margin so the row divider sits cleanly
+/// between lanes.
+const LANE_H: f32 = 62.0;
+/// Vertical gap between lanes. v0.4.20 bumped 4 → 8 + a row divider
+/// to make the boundaries visually unambiguous (was: "headers
+/// bleed top and bottom" in v0.4.19's screenshot).
+const ROW_GAP: f32 = 8.0;
+/// Height of the optional Mix-tab spectrum panel — capped at 80px
+/// regardless of `LANE_H` so the spectrum stays a useful size when
+/// lanes shrink for compactness.
+const SPECTRUM_H: f32 = 80.0;
 
 const STRIP_W: f32 = 108.0;
 const STRIP_GAP: f32 = 4.0;
 const FADER_H: f32 = 130.0;
+/// Hard cap on fader rail height. v0.4.19 made the rail stretch into
+/// the console-deck's full available height — which on tall windows
+/// ballooned each strip card to 400+ px and made the deck "gigantic"
+/// (per user screenshot). The fix is to stretch up to a sensible
+/// maximum and stop. 200 px ≈ enough rail for fine-grained gain
+/// control without dominating the screen.
+const FADER_H_MAX: f32 = 200.0;
+/// Hard cap on console-deck height. Same motivation as
+/// `FADER_H_MAX` — on tall windows the `mix_console_fraction`
+/// (0.2..0.7) put 400+ px in the deck, leaving the user with one
+/// strip occupying half their screen. 340 px ≈ spectrum panel
+/// (80) + strip natural height (~230) + a touch of margin.
+const CONSOLE_H_MAX: f32 = 340.0;
 const METER_W: f32 = 6.0;
 /// Cap on track-name characters before we ellipsise. Tuned so Latin-script
 /// names like "Backing Vocals" / "Electric Guitar" / "Synth / Lead" fit
@@ -170,7 +185,11 @@ pub fn show(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
     // console deck (bottom). The split is user-resizable via a dragger
     // between them.
     let total = ui.available_height().max(200.0);
-    let console_h = (total * app.mix_console_fraction.clamp(0.2, 0.7)).max(180.0);
+    // v0.4.20 — cap the console deck at `CONSOLE_H_MAX` regardless
+    // of `mix_console_fraction` so tall windows don't balloon the
+    // strip cards. The drag handle below still adjusts the fraction;
+    // the cap just stops the cards from getting absurd.
+    let console_h = (total * app.mix_console_fraction.clamp(0.2, 0.7)).clamp(180.0, CONSOLE_H_MAX);
     let lanes_h = (total - console_h - 8.0).max(120.0);
 
     // Lanes panel.
@@ -586,7 +605,23 @@ fn lanes_view(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
                     );
                 });
             });
-            ui.add_space(ROW_GAP);
+            // v0.4.20 — visible row divider. Pre-v0.4.20 the only
+            // separation between lane headers was empty padding,
+            // which let the eye fuse adjacent rows together (the
+            // "headers bleed top and bottom" issue in the v0.4.19
+            // screenshot). A 1-px line at ROW_GAP/2 makes each row
+            // visually distinct without eating much vertical space.
+            ui.add_space(ROW_GAP * 0.5);
+            let (divider_rect, _) =
+                ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover());
+            ui.painter().line_segment(
+                [
+                    Pos2::new(divider_rect.min.x, divider_rect.center().y),
+                    Pos2::new(divider_rect.max.x, divider_rect.center().y),
+                ],
+                Stroke::new(1.0, Color32::from_gray(38)),
+            );
+            ui.add_space(ROW_GAP * 0.5);
         }
     });
 
@@ -845,7 +880,12 @@ fn strip(app: &mut TinyBoothApp, ui: &mut egui::Ui, idx: usize, available_h: f32
             // dB readout + frame margins to leave that much rail.
             // Floors at FADER_H so a too-small console deck still
             // shows a usable fader.
-            let fader_h = (available_h - 110.0).max(FADER_H);
+            // v0.4.20 — also cap the rail (was: stretch unbounded
+            // into available_h, which on tall windows produced 400+ px
+            // rails inside the strip card). Floors at FADER_H so a
+            // short deck still gets a usable fader; ceilings at
+            // FADER_H_MAX so the card stays compact.
+            let fader_h = (available_h - 110.0).clamp(FADER_H, FADER_H_MAX);
             ui.style_mut().spacing.slider_width = fader_h;
             ui.horizontal(|ui| {
                 let mut gain = track.gain_db();
@@ -932,7 +972,12 @@ fn master_strip(app: &mut TinyBoothApp, ui: &mut egui::Ui, available_h: f32) -> 
             });
             ui.add_space(6.0);
             // Stretch the master fader rail the same way as `strip()`.
-            let fader_h = (available_h - 110.0).max(FADER_H);
+            // v0.4.20 — also cap the rail (was: stretch unbounded
+            // into available_h, which on tall windows produced 400+ px
+            // rails inside the strip card). Floors at FADER_H so a
+            // short deck still gets a usable fader; ceilings at
+            // FADER_H_MAX so the card stays compact.
+            let fader_h = (available_h - 110.0).clamp(FADER_H, FADER_H_MAX);
             ui.style_mut().spacing.slider_width = fader_h;
             ui.horizontal(|ui| {
                 let mut gain = state.master_gain_db();
