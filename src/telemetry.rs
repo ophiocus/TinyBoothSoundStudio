@@ -38,7 +38,11 @@ use std::path::Path;
 ///   v1 (0.4.13): universal features + drum-kit detection.
 ///   v2 (0.4.14): + guitar/bass pick analyzer (YIN), key estimation
 ///                  (Krumhansl-Schmuckler), user-selectable profile.
-pub const ANALYZER_VERSION: u32 = 2;
+///   v3 (0.4.17): drum classifier dedupes across bands with dominant-
+///                  flux arbitration. Pre-v3 manifests over-counted
+///                  drum events ~3-6× (one snare hit produced separate
+///                  Snare + Cymbal + HiHat events).
+pub const ANALYZER_VERSION: u32 = 3;
 
 /// FFT window size for spectral analysis. Power of two for rustfft.
 const FFT_SIZE: usize = 2048;
@@ -822,27 +826,75 @@ fn classify_drum_events(
 
     let frame_secs = FFT_HOP as f32 / sr as f32;
 
-    // Flatten + classify all per-band onsets. We classify each band's
-    // events on its own to avoid the matching-merge problem; events
-    // from different bands at the same frame count as separate hits
-    // (kick + hat on a downbeat = 2 events).
-    let mut events: Vec<DrumEvent> = Vec::new();
+    // Pre-compute each band's flux max — used to derive a per-event
+    // normalised "velocity" in [0, 1] for the persisted DrumEvent
+    // (the existing chip strip + project-health panel expect that
+    // shape; we don't want to break the visual scale).
+    let band_flux_max: Vec<f32> = band_flux
+        .iter()
+        .map(|f| f.iter().cloned().fold(0.0_f32, f32::max).max(1e-9))
+        .collect();
 
-    let normalise_flux_peak = |flux: &[f32], frame: usize| -> f32 {
-        let v = flux[frame];
-        let max = flux.iter().cloned().fold(0.0_f32, f32::max);
-        if max < 1e-6 {
-            0.0
-        } else {
-            (v / max).clamp(0.0, 1.0)
+    // Flatten every (frame, band, raw-flux) onset into one list. The
+    // raw flux is what arbitrates the dominant band within a cluster:
+    // for a single physical hit landing in multiple bands (snare →
+    // MID + HIGH_MID + HIGH), the band with the largest *absolute*
+    // energy rise is the one that physically owns the event. Comparing
+    // raw flux works because all candidates inside one cluster come
+    // from the same source event — cross-cluster scale differences
+    // don't matter (clusters are picked one at a time, never against
+    // each other).
+    struct Candidate {
+        frame: usize,
+        band: usize,
+        raw_flux: f32,
+    }
+    let mut candidates: Vec<Candidate> = Vec::new();
+    for (band, onsets) in per_band_onsets.iter().enumerate() {
+        for &frame in onsets {
+            let raw = band_flux[band].get(frame).copied().unwrap_or(0.0);
+            candidates.push(Candidate {
+                frame,
+                band,
+                raw_flux: raw,
+            });
         }
-    };
+    }
+    candidates.sort_unstable_by_key(|c| c.frame);
+
+    // Cluster candidates within ±3 frames of the previous cluster
+    // member (sliding-window collapse, same shape as the universal
+    // `all_onset_frames` dedup in `analyze_wav` but slightly looser
+    // — `<= 3` instead of `< 3` — because cross-band peak pickers
+    // can disagree on the exact frame by a hop or two even for a
+    // single physical event). A snare hit produces flux peaks in
+    // MID + HIGH_MID + HIGH within a frame or two; without clustering
+    // we'd emit one Snare + one Cymbal + one HiHat for a single
+    // physical hit (the v0.4.13–16 over-counting bug).
+    let mut clusters: Vec<Vec<Candidate>> = Vec::new();
+    let mut current: Vec<Candidate> = Vec::new();
+    for c in candidates {
+        let join = current
+            .last()
+            .map(|last| c.frame.abs_diff(last.frame) <= 3)
+            .unwrap_or(false);
+        if join {
+            current.push(c);
+        } else {
+            if !current.is_empty() {
+                clusters.push(std::mem::take(&mut current));
+            }
+            current.push(c);
+        }
+    }
+    if !current.is_empty() {
+        clusters.push(current);
+    }
 
     let decay_ms_for = |energy: &[f32], onset_frame: usize| -> f32 {
-        if onset_frame >= energy.len() - 1 {
+        if onset_frame >= energy.len().saturating_sub(1) {
             return 0.0;
         }
-        // Find peak after onset (small look-ahead).
         let look_ahead = 10.min(energy.len() - onset_frame - 1);
         let mut peak_idx = onset_frame;
         let mut peak_val = energy[onset_frame];
@@ -861,15 +913,63 @@ fn classify_drum_events(
         (energy.len() - peak_idx) as f32 * frame_secs * 1000.0
     };
 
-    // Classify SUB-band onsets as Kick or low-Tom (harmonic test).
-    for &frame in &per_band_onsets[SUB] {
-        let velocity = normalise_flux_peak(&band_flux[SUB], frame);
-        let decay = decay_ms_for(&band_energy[SUB], frame);
-        // Harmonic test: HNR in 100ms post-onset window.
-        let class = if is_harmonic_after_onset(stft, frame, sr) {
-            DrumClass::Tom
-        } else {
-            DrumClass::Kick
+    // Per cluster: the dominant band (largest absolute flux at the
+    // cluster's frame) wins and decides the class. One event per
+    // cluster, never more — that's the whole point of clustering.
+    let mut events: Vec<DrumEvent> = Vec::with_capacity(clusters.len());
+    for cluster in &clusters {
+        let winner = cluster
+            .iter()
+            .max_by(|a, b| {
+                a.raw_flux
+                    .partial_cmp(&b.raw_flux)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .expect("cluster is non-empty by construction");
+        let frame = winner.frame;
+        let band = winner.band;
+        // Velocity: winner's flux normalised against its band's all-
+        // time max. Same shape as the pre-v3 `normalise_flux_peak`
+        // output (in [0, 1]) — preserves chip-strip / health-panel scale.
+        let velocity = (winner.raw_flux / band_flux_max[band]).clamp(0.0, 1.0);
+        let decay = decay_ms_for(&band_energy[band], frame);
+        let class = match band {
+            SUB => {
+                // Harmonic test: HNR in 100ms post-onset window.
+                if is_harmonic_after_onset(stft, frame, sr) {
+                    DrumClass::Tom
+                } else {
+                    DrumClass::Kick
+                }
+            }
+            LOW_MID => {
+                // Pre-v3 dropped non-harmonic LOW_MID as cymbal bleed,
+                // but post-clustering a LOW_MID-dominant cluster is by
+                // definition not bleed (would have been beaten by
+                // HIGH_MID/HIGH). Keep the harmonic→Tom rule, fall to
+                // Other for the rest rather than discarding the event.
+                if is_harmonic_after_onset(stft, frame, sr) {
+                    DrumClass::Tom
+                } else {
+                    DrumClass::Other
+                }
+            }
+            MID => DrumClass::Snare,
+            HIGH_MID => {
+                if decay > 800.0 {
+                    DrumClass::Cymbal
+                } else {
+                    DrumClass::Other
+                }
+            }
+            HIGH => {
+                if decay > 800.0 {
+                    DrumClass::Cymbal
+                } else {
+                    DrumClass::HiHat
+                }
+            }
+            _ => DrumClass::Other,
         };
         events.push(DrumEvent {
             time_secs: frame as f32 * frame_secs,
@@ -879,80 +979,8 @@ fn classify_drum_events(
         });
     }
 
-    // LOW_MID onsets: Tom (harmonic) or pass — most LOW_MID activity
-    // is co-incident with SUB or HIGH_MID, so we only fire here for
-    // events that have NO SUB onset within ±3 frames AND have a
-    // discernible harmonic structure (rules out cymbal bleed).
-    for &frame in &per_band_onsets[LOW_MID] {
-        let near_sub = per_band_onsets[SUB].iter().any(|&f| frame.abs_diff(f) <= 3);
-        if near_sub {
-            continue;
-        }
-        if !is_harmonic_after_onset(stft, frame, sr) {
-            continue;
-        }
-        let velocity = normalise_flux_peak(&band_flux[LOW_MID], frame);
-        let decay = decay_ms_for(&band_energy[LOW_MID], frame);
-        events.push(DrumEvent {
-            time_secs: frame as f32 * frame_secs,
-            class: DrumClass::Tom,
-            velocity,
-            decay_ms: decay,
-        });
-    }
-
-    // MID + HIGH_MID together = Snare. Snare has body in MID and
-    // wires in HIGH_MID; we fire when EITHER band detects an onset
-    // and the other shows a co-incident energy bump.
-    for &frame in &per_band_onsets[MID] {
-        let velocity = normalise_flux_peak(&band_flux[MID], frame);
-        let decay = decay_ms_for(&band_energy[MID], frame);
-        events.push(DrumEvent {
-            time_secs: frame as f32 * frame_secs,
-            class: DrumClass::Snare,
-            velocity,
-            decay_ms: decay,
-        });
-    }
-    for &frame in &per_band_onsets[HIGH_MID] {
-        let near_mid = per_band_onsets[MID].iter().any(|&f| frame.abs_diff(f) <= 3);
-        if near_mid {
-            continue; // counted as snare via MID detector
-        }
-        let velocity = normalise_flux_peak(&band_flux[HIGH_MID], frame);
-        let decay = decay_ms_for(&band_energy[HIGH_MID], frame);
-        // Long decay + HIGH_MID dominant + no MID burst = cymbal.
-        let class = if decay > 800.0 {
-            DrumClass::Cymbal
-        } else {
-            DrumClass::Other
-        };
-        events.push(DrumEvent {
-            time_secs: frame as f32 * frame_secs,
-            class,
-            velocity,
-            decay_ms: decay,
-        });
-    }
-
-    // HIGH onsets: Hi-hat (short decay) or Cymbal (long decay).
-    for &frame in &per_band_onsets[HIGH] {
-        let velocity = normalise_flux_peak(&band_flux[HIGH], frame);
-        let decay = decay_ms_for(&band_energy[HIGH], frame);
-        let class = if decay > 800.0 {
-            DrumClass::Cymbal
-        } else {
-            DrumClass::HiHat
-        };
-        events.push(DrumEvent {
-            time_secs: frame as f32 * frame_secs,
-            class,
-            velocity,
-            decay_ms: decay,
-        });
-    }
-
-    // Sort by time (we appended per-band; merge for clean ordering).
+    // Defensive sort — clusters were already sorted by their first
+    // frame, but the dominant winner can sit at frame+1 or +2.
     events.sort_by(|a, b| {
         a.time_secs
             .partial_cmp(&b.time_secs)
@@ -2112,5 +2140,119 @@ mod tests {
         // At least one event should have a pitched read.
         let pitched = g.events.iter().filter(|e| e.pitch_hz.is_some()).count();
         assert!(pitched >= 1, "no pitched events recovered");
+    }
+
+    /// Drum classifier must collapse multi-band flux peaks from a
+    /// single physical hit into one event. Pre-v3, a snare hit
+    /// produced separate Snare + Cymbal + HiHat events because each
+    /// per-band onset list was walked independently — total drum
+    /// counts on a 3:20 Suno stem ran ~5,300 events (≈ 27/sec,
+    /// physically impossible).
+    ///
+    /// We exercise `classify_drum_events` directly with hand-built
+    /// per-band onset lists rather than via `analyze_wav` — the
+    /// latter's median+k·MAD threshold collapses to zero on near-
+    /// silent synthetic input and fires on statistical bumps,
+    /// confounding the dedup invariant we want to lock in.
+    ///
+    /// Setup: two physical hits modeled as two onset clusters:
+    ///   - "Kick" at frame 100, fires SUB only.
+    ///   - "Snare" at frame 200, fires MID + HIGH_MID + HIGH within
+    ///     a 2-frame window — the exact multi-band scenario that
+    ///     pre-v3 over-counted as Snare + Other + HiHat.
+    ///
+    /// Expected: exactly 2 events out, regardless of how the four
+    /// per-band onsets are arranged within their cluster windows.
+    #[test]
+    fn drum_classifier_dedupes_per_hit_no_double_count() {
+        // 5 bands, ~250 frames of timeline. Need flux + energy curves
+        // long enough that `decay_ms_for` and `is_harmonic_after_onset`
+        // don't run off the end — pad to 300 frames.
+        let frames = 300usize;
+        let mut band_flux: Vec<Vec<f32>> = (0..5).map(|_| vec![0.0_f32; frames]).collect();
+        let mut band_energy: Vec<Vec<f32>> = (0..5).map(|_| vec![0.0_f32; frames]).collect();
+
+        // SUB band sees the kick at frame 100.
+        band_flux[0][100] = 1.0;
+        for i in 0..15 {
+            band_energy[0][100 + i] = (-(i as f32) / 5.0).exp();
+        }
+
+        // MID + HIGH_MID + HIGH all see the snare around frame 200,
+        // landing on slightly different frames (199/200/201) the way
+        // real per-band peak pickers disagree on the exact onset frame
+        // for a single physical hit.
+        band_flux[2][200] = 0.9; // MID strongest → cluster classifies as Snare
+        band_flux[3][199] = 0.6;
+        band_flux[4][201] = 0.5;
+        for i in 0..15 {
+            let env = (-(i as f32) / 5.0).exp();
+            band_energy[2][200 + i] = env;
+            band_energy[3][199 + i] = env;
+            band_energy[4][201 + i] = env;
+        }
+
+        // Per-band onset lists — exactly what the peak picker would
+        // produce for the energy/flux curves above.
+        let per_band_onsets: Vec<Vec<usize>> =
+            vec![vec![100], vec![], vec![200], vec![199], vec![201]];
+
+        // Stft must be present for `is_harmonic_after_onset` — give it
+        // a minimal flat-spectrum stand-in (peak/mean ratio < 15 →
+        // SUB classifies as Kick rather than Tom).
+        let stft: Vec<Vec<f32>> = (0..frames).map(|_| vec![1.0_f32; 32]).collect();
+        let band_names = ["sub_low", "low_mid", "mid", "high_mid", "high"];
+
+        let kit = classify_drum_events(
+            &per_band_onsets,
+            &band_flux,
+            &band_energy,
+            &stft,
+            &band_names,
+            48_000,
+        );
+        let total = kit.kick_count
+            + kit.snare_count
+            + kit.hihat_count
+            + kit.tom_count
+            + kit.cymbal_count
+            + kit.other_count;
+        assert_eq!(
+            total, 2,
+            "expected exactly 2 events (1 kick cluster + 1 snare cluster), got {} (k={} s={} h={} t={} c={} o={}) events={:?}",
+            total,
+            kit.kick_count,
+            kit.snare_count,
+            kit.hihat_count,
+            kit.tom_count,
+            kit.cymbal_count,
+            kit.other_count,
+            kit.events.iter().map(|e| (e.time_secs, e.class)).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            kit.events.len(),
+            2,
+            "events list length must match the per-class total"
+        );
+        // Sanity: dominant band of the snare cluster was MID (highest
+        // normalised flux in {MID 0.9, HIGH_MID 0.6, HIGH 0.5}) → Snare.
+        assert!(
+            kit.snare_count == 1,
+            "snare cluster should classify as Snare via MID-band winner; events={:?}",
+            kit.events
+                .iter()
+                .map(|e| (e.time_secs, e.class))
+                .collect::<Vec<_>>()
+        );
+        // And the kick cluster (SUB only) should classify as Kick
+        // because the flat synthetic STFT yields no harmonic peak.
+        assert!(
+            kit.kick_count == 1,
+            "kick cluster should classify as Kick on a flat (non-harmonic) spectrum; events={:?}",
+            kit.events
+                .iter()
+                .map(|e| (e.time_secs, e.class))
+                .collect::<Vec<_>>()
+        );
     }
 }

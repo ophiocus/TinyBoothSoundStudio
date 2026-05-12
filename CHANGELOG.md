@@ -12,6 +12,16 @@ If the user has the app open at the moment a new release is published, the botto
 
 Proposed fix (queued for a follow-up patch): re-run the background check on a 5-minute timer while the app is idle, AND on every tab change. Both are cheap, both are bounded, and either one closes the window. ~30 LOC in `src/git_update.rs` plus a `last_check_at: Option<Instant>` field. No new deps.
 
+## [0.4.17] — 2026-05-11
+
+### Fixed
+- **Drum classifier no longer over-counts events ~3-6×.** The v0.4.13 multi-band onset detector emitted one event per (band, frame) pair — so a single snare hit, which produces real flux peaks in MID + HIGH_MID + HIGH simultaneously, generated separate Snare + Cymbal + HiHat events. Real-world numbers on a 3:20 Suno drum stem: ~5,300 total drum events ≈ 27/sec (physically impossible — sane rate is 3–8/sec). `classify_drum_events` now flattens every per-band onset into a single time-sorted candidate list, clusters candidates whose frames fall within 3 of each other (the same `< 3` window the universal `all_onset_frames` dedup already uses in `analyze_wav`), and per cluster picks the dominant band by **normalised flux strength** (raw flux / band's flux max — the only fair cross-band comparison since absolute flux magnitudes vary wildly between low and high frequencies). The dominant band's frame alone runs through the existing kick/snare/hat/tom/cymbal classification. Total drum-event count on a typical 3-minute stem now lands in the 500–1500 range, distributed across classes — the same order of magnitude as the (correctly deduplicated) universal `tel.onset_count`.
+- **`ANALYZER_VERSION` bumped 2 → 3.** Existing v0.4.13–16 manifests are treated as stale and re-analyzed on next project open. Migration is invisible — the dispatcher already skips up-to-date rows. Drum-event chips and Project Health rolls-ups will repopulate with sane counts after the first re-analysis pass.
+
+### Tests
+- New unit test `drum_classifier_dedupes_per_hit_no_double_count`: synthesises a 1-second WAV with one kick (60 Hz sine, 50 ms decay, sub-band only) at 0.2 s and one snare (broadband xorshift noise burst, 40 ms decay, fires MID + HIGH_MID + HIGH simultaneously) at 0.6 s. Asserts the drum classifier produces exactly 2 events total — the snare cluster collapses correctly. Pre-v3 this test would have failed with 4–6 events.
+- Total suite: 69 → **70 passing**.
+
 ## [0.4.16] — 2026-05-08
 
 ### Added
