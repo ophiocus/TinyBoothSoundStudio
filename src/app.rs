@@ -1318,6 +1318,30 @@ impl eframe::App for TinyBoothApp {
             self.show_manual = !self.show_manual;
         }
 
+        // v0.4.32 — egui requires panels to be declared in a strict
+        // order: ALL `TopBottomPanel::top` first, ALL
+        // `TopBottomPanel::bottom` second, `CentralPanel` last. The
+        // Mix tab's three panels (transport / console / lanes) live
+        // alongside the app's global menu + status bars, so we have
+        // to interleave their declarations across this function:
+        //   1. top_bar (menu)            ← here, line 1321
+        //   2. mix_transport_panel       ← just after, conditional
+        //   3. bottom_bar (status)       ← below, line ~1591
+        //   4. mix_console_panel         ← just after, conditional
+        //   5. CentralPanel (tab body)   ← bottom of function
+        // v0.4.31 collapsed (2) and (4) into a single `ctx_panels`
+        // call placed AFTER bottom_bar — that broke egui's space
+        // accounting because the bottom panel claimed before all
+        // tops were declared. Hence the lane overlap bug.
+        let mix_active = matches!(self.tab, Tab::Mix)
+            && !self.show_visualizer
+            && !self.project.tracks.is_empty();
+        if mix_active {
+            // Player rebuild / autoplay / automation capture must
+            // happen before the transport panel reads player state.
+            ui::mix::pre_render(self);
+        }
+
         egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
                 ui.menu_button("File", |ui| {
@@ -1582,6 +1606,17 @@ impl eframe::App for TinyBoothApp {
             });
         });
 
+        // ── Mix tab: top panel ─ slot 2 of the panel order ────────
+        // Declared immediately after `top_bar` so all tops sit at
+        // the top of the screen before any bottom is claimed.
+        if mix_active {
+            egui::TopBottomPanel::top("mix_transport_panel")
+                .resizable(false)
+                .show(ctx, |ui| {
+                    ui::mix::render_transport(self, ui);
+                });
+        }
+
         // Drain any audio-thread errors into the status bar.
         while let Ok(msg) = self.audio_err_rx.try_recv() {
             self.status = Some(format!("audio: {msg}"));
@@ -1617,6 +1652,20 @@ impl eframe::App for TinyBoothApp {
             });
         });
 
+        // ── Mix tab: bottom panel ─ slot 4 of the panel order ────
+        // Declared immediately after `bottom_bar` so all bottoms
+        // sit at the bottom of the screen before `CentralPanel`
+        // claims what's left.
+        if mix_active && self.player.is_some() {
+            let console_h = ui::mix::compute_console_h(self, ctx);
+            egui::TopBottomPanel::bottom("mix_console_panel")
+                .resizable(false)
+                .exact_height(console_h)
+                .show(ctx, |ui| {
+                    ui::mix::render_console(self, ui);
+                });
+        }
+
         // Modal overlay during the MSI download. The bundled ffmpeg
         // (~120 MB) made the download big enough to warrant a real
         // dialog with rotating tips instead of a tiny "downloading…"
@@ -1642,41 +1691,28 @@ impl eframe::App for TinyBoothApp {
             return;
         }
 
-        // v0.4.31 — Mix tab is special. When active (and not in
-        // Visualizer mode, and the project has tracks), it declares
-        // its own three panels (transport / console / lanes) at ctx
-        // level directly, as siblings of the app's global menu and
-        // status bars. This is the egui-blessed pattern for a multi-
-        // pane workspace; nesting `TopBottomPanel::show_inside` or
-        // `child_ui` inside the global `CentralPanel::show(ctx, ...)`
-        // doesn't propagate clip rects to all painter layers
-        // (ComboBox popups, ScrollArea viewports, tooltip layer),
-        // which manifested as lanes / button text overlapping the
-        // global menu bar in v0.4.29 / v0.4.30.
-        let use_mix_ctx_panels = matches!(self.tab, Tab::Mix)
-            && !self.show_visualizer
-            && !self.project.tracks.is_empty();
-
-        if use_mix_ctx_panels {
-            ui::mix::ctx_panels(self, ctx);
-        } else {
-            egui::CentralPanel::default().show(ctx, |ui| {
-                // Visualizer takes over the central panel when toggled on.
-                // The user closes via the ✖ button inside the canvas, the
-                // 🌀 menu icon, or by switching tabs (we keep the active
-                // tab so they return to where they were).
-                if self.show_visualizer {
-                    ui::visualizer::show(self, ui);
-                    return;
-                }
-                match self.tab {
-                    Tab::Record => ui::record::show(self, ui),
-                    Tab::Project => ui::project::show(self, ui),
-                    Tab::Mix => ui::mix::show(self, ui),
-                    Tab::Export => ui::export::show(self, ui),
-                }
-            });
-        }
+        // ── CentralPanel ─ slot 5 (last) of the panel order ─────
+        // ALWAYS declared, regardless of which tab is active. When
+        // the Mix tab is active and populated, the CentralPanel
+        // hosts the lane stack (with the Mix transport/console
+        // already claimed by the top/bottom panels above). Other
+        // tabs render their full body here.
+        egui::CentralPanel::default().show(ctx, |ui| {
+            if self.show_visualizer {
+                ui::visualizer::show(self, ui);
+                return;
+            }
+            if mix_active {
+                ui::mix::render_lanes(self, ui);
+                return;
+            }
+            match self.tab {
+                Tab::Record => ui::record::show(self, ui),
+                Tab::Project => ui::project::show(self, ui),
+                Tab::Mix => ui::mix::show(self, ui),
+                Tab::Export => ui::export::show(self, ui),
+            }
+        });
 
         // Mix-tab transport runs continuously while playing — repaint so
         // the playhead animates.

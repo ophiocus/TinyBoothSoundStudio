@@ -8,6 +8,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); thi
 
 (Nothing yet — known issues all resolved as of v0.4.23.)
 
+## [0.4.32] — 2026-05-13
+
+### Fixed
+- **The Mix-tab lane overlap is finally fixed for real this time.** v0.4.31 moved the Mix-tab panels to ctx level but bundled all three (`mix_transport_panel` top, `mix_console_panel` bottom, lanes `CentralPanel`) into a single `mix::ctx_panels(app, ctx)` call placed AFTER the global `bottom_bar` panel declaration. That violated egui's strict panel-order requirement: **all `TopBottomPanel::top` calls must precede all `TopBottomPanel::bottom` calls, which must precede the `CentralPanel`**. With `bottom_bar` declared before `mix_transport_panel`, the bottom-of-screen space was claimed before the Mix-tab top was, scrambling egui's space accounting — visible as the Vocals lane content rendering at the same Y as the transport bar.
+- The fix interleaves Mix-tab panel declarations across `app.rs::update()` in the correct order:
+  1. `top_bar` (menu) — line ~1321
+  2. `mix_transport_panel` (Mix-tab top) — immediately after, when `mix_active`
+  3. `bottom_bar` (status) — line ~1591
+  4. `mix_console_panel` (Mix-tab bottom) — immediately after, when `mix_active`
+  5. `CentralPanel` (tab body) — always last; hosts lane stack for Mix or the tab body for everything else
+- `mix.rs` now exposes the helper API the new layout needs: `pre_render(app)`, `compute_console_h(app, ctx)`, `render_transport(app, ui)`, `render_console(app, ui)`, `render_lanes(app, ui)`. The previous `ctx_panels(app, ctx)` wrapper is gone — it was the wrong abstraction (couldn't be placed correctly relative to the global panels).
+
 ## [0.4.31] — 2026-05-13
 
 ### Fixed

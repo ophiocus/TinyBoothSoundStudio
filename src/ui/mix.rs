@@ -97,70 +97,46 @@ pub fn show(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
     let _ = app; // suppress unused-mut on the empty path
 }
 
-/// Mix-tab entry point at **ctx level** — declares its own
-/// `TopBottomPanel::top` (transport), `TopBottomPanel::bottom`
-/// (console deck), and `CentralPanel` (lanes) directly on `ctx`,
-/// as siblings of the app's global menu + status bars. Called from
-/// `app.rs` instead of `mix::show` when the Mix tab is active and
-/// the project has tracks.
-///
-/// **Why ctx-level (v0.4.31):** Pre-v0.4.31 the Mix tab nested
-/// these three panels inside the app's global `CentralPanel::show`
-/// via `show_inside`, `allocate_ui_with_layout`, then explicit
-/// `child_ui` + `set_clip_rect`. Each approach had a different
-/// failure mode (lanes overlaying transport, content bleeding past
-/// clip rects, widget text rendering at the wrong y-coord while
-/// the surrounding `Frame::group` border was correctly placed).
-/// The root cause across all of them: egui's painter has multiple
-/// layers (Foreground for widgets, Background for panel fills,
-/// Tooltip for popups), and nested `child_ui` + `set_clip_rect`
-/// only constrains the layer the immediate child is drawing to —
-/// `ComboBox` popups, `ScrollArea` viewports, tooltips all bypass
-/// it. Ctx-level panels claim space at the proper layer and egui
-/// composites them cleanly. This is the egui-blessed pattern.
-pub fn ctx_panels(app: &mut TinyBoothApp, ctx: &egui::Context) {
+/// Run once per frame BEFORE any Mix-tab panel is declared. Bundles
+/// player lazy-rebuild, autoplay hand-off, and the automation-
+/// capture sample. v0.4.32 split this out of `ctx_panels` because
+/// `app.rs` now interleaves the Mix-tab panel declarations with the
+/// global ones (`top_bar`, `bottom_bar`) — egui needs all tops
+/// declared first, all bottoms second, central last, and the only
+/// way to honour that order across two modules is to expose the
+/// pre-render side-effects as a separate call.
+pub fn pre_render(app: &mut TinyBoothApp) {
     rebuild_player_if_needed(app);
     consume_autoplay_request(app);
     capture_automation(app);
+}
 
-    // Compute console height for this frame. The bottom panel
-    // claims exactly this; the central panel takes whatever's left.
-    let console_h = {
-        let screen_h = ctx.screen_rect().height().max(200.0);
-        (screen_h * app.mix_console_fraction.clamp(0.2, 0.7)).clamp(180.0, CONSOLE_H_MAX)
-    };
+/// Compute the height the Mix-tab console deck wants to claim this
+/// frame. `app.rs` reads this so it can pass `exact_height` to the
+/// `TopBottomPanel::bottom` declaration. Pure read; no mutation.
+pub fn compute_console_h(app: &TinyBoothApp, ctx: &egui::Context) -> f32 {
+    let screen_h = ctx.screen_rect().height().max(200.0);
+    (screen_h * app.mix_console_fraction.clamp(0.2, 0.7)).clamp(180.0, CONSOLE_H_MAX)
+}
 
-    // ── Top: transport ───────────────────────────────────────────
-    egui::TopBottomPanel::top("mix_transport_panel")
-        .resizable(false)
-        .show(ctx, |ui| {
-            transport_bar(app, ui);
-            render_player_error_banner_if_present(app, ui);
-        });
+/// Render the transport bar + optional error banner. Pub so
+/// `app.rs` can drop it into its own `TopBottomPanel::top("mix_
+/// transport_panel")`.
+pub fn render_transport(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
+    transport_bar(app, ui);
+    render_player_error_banner_if_present(app, ui);
+}
 
-    // Error-banner early return — player isn't ready, skip the
-    // bottom panel and the lanes. egui will render the rest of
-    // the app (other panels) normally.
-    if app.player.is_none() {
-        // Render an empty central panel so the visualizer / other
-        // surface state stays consistent. Otherwise egui complains
-        // about a missing CentralPanel for this frame.
-        egui::CentralPanel::default().show(ctx, |_ui| {});
-        return;
-    }
+/// Render the console deck. Pub so `app.rs` can drop it into its
+/// own `TopBottomPanel::bottom("mix_console_panel")`.
+pub fn render_console(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
+    console_deck(app, ui);
+}
 
-    // ── Bottom: console deck (fixed height) ──────────────────────
-    egui::TopBottomPanel::bottom("mix_console_panel")
-        .resizable(false)
-        .exact_height(console_h)
-        .show(ctx, |ui| {
-            console_deck(app, ui);
-        });
-
-    // ── Central: lanes ───────────────────────────────────────────
-    egui::CentralPanel::default().show(ctx, |ui| {
-        lanes_view(app, ui);
-    });
+/// Render the lane stack. Pub so `app.rs` can drop it into its own
+/// `CentralPanel`.
+pub fn render_lanes(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
+    lanes_view(app, ui);
 }
 
 /// Lazy-rebuild the player when needed (project changed shape OR
