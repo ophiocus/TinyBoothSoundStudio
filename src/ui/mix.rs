@@ -60,6 +60,13 @@ const FADER_H_MAX: f32 = 200.0;
 /// strip occupying half their screen. 340 px ≈ spectrum panel
 /// (80) + strip natural height (~230) + a touch of margin.
 const CONSOLE_H_MAX: f32 = 340.0;
+/// Fixed height for the transport bar region (v0.4.30). The
+/// previous nested-panel layout let it claim its natural size, but
+/// when content overflowed (long status, error banner) it'd push
+/// everything below it. With a fixed height the lanes / console
+/// regions don't shift; the transport itself self-clips if its
+/// content is taller (rare — only the error banner can grow).
+const TRANSPORT_BAR_H: f32 = 56.0;
 const METER_W: f32 = 6.0;
 /// Cap on track-name characters before we ellipsise. Tuned so Latin-script
 /// names like "Backing Vocals" / "Electric Guitar" / "Synth / Lead" fit
@@ -73,49 +80,39 @@ const FONT_MASTER_NAME: f32 = 14.0;
 
 /// Mix-tab entry point.
 ///
-/// **Architecture (v0.4.29 — clean panel layout):**
+/// **Architecture (v0.4.30 — explicit clipped child_ui layout):**
 ///
-/// The Mix tab is split into three egui panels nested inside the
-/// caller's `ui`. Each panel owns its own clip rect, so content can
-/// physically never bleed between them; each panel also owns its own
-/// scroll-event capture, so the wheel doesn't shift surfaces it
-/// shouldn't.
+/// The Mix tab is split into three vertically-stacked regions
+/// rendered as `child_ui`s with **explicitly-set `clip_rect`s**. Pre-
+/// v0.4.30 we used egui's nested `TopBottomPanel::show_inside` +
+/// `CentralPanel::show_inside`, but that combination misbehaves when
+/// the outer surface is itself an app-level `CentralPanel::show(ctx,
+/// ...)`: lane rows would render *above* their host area, visible as
+/// the first lane spilling up into the global menu bar.
+///
+/// The new layout is explicit and predictable:
 ///
 /// ```text
-///   ┌─ TopBottomPanel::top("mix_transport") ──────────────────────┐
+///   ┌─ transport_rect  (natural height, ~50 px) ──────────────────┐
 ///   │  transport bar  +  optional error banner                     │
-///   ├─ CentralPanel ──────────────────────────────────────────────┤
-///   │  lanes_view (the ONLY surface that accepts vertical scroll)  │
-///   │  ScrollArea::vertical, clipped to this panel                 │
-///   ├─ TopBottomPanel::bottom("mix_console") ─────────────────────┤
-///   │  spectrum panel (fixed height)                               │
-///   │  strip cards in a ScrollArea::horizontal (hscroll only)      │
+///   ├─ lanes_rect (fills the middle, clip_rect set) ──────────────┤
+///   │  lanes_view (vertical ScrollArea, only scrollable surface)   │
+///   ├─ console_rect (exact_height = CONSOLE_H, clip_rect set) ────┤
+///   │  spectrum panel + strip cards (horizontal scroll only)       │
 ///   └──────────────────────────────────────────────────────────────┘
 /// ```
 ///
-/// Ordering rule: declare Top + Bottom panels FIRST, then the
-/// CentralPanel — Central claims whatever space remains. egui
-/// enforces this; reversing the order silently overlays.
-///
-/// Why the rewrite (was: v0.4.25 used `allocate_ui_with_layout` for
-/// both lanes and console):
-///   • `allocate_ui` doesn't hard-clip — content overflow bled into
-///     adjacent areas (the user's "headers bleeding top and bottom").
-///   • Both surfaces shared the caller's ui, so scroll input could
-///     reach either — manifesting as console cards "jittering in
-///     place when I scroll" the lanes.
-///   • The lanes_h / console_h split was computed from
-///     `ui.available_height()`, which depends on whatever else had
-///     drawn into the parent. A 1-px wobble in the parent (e.g. the
-///     top-bar readings changing width when a digit ticks) would
-///     shift the entire layout by 1 px each frame.
-/// Panels fix all three: clip rects bound the content, panels own
-/// scroll-event hit-testing, and exact_height pins the split.
+/// Each region:
+///   • Has its rect computed up-front from `ui.max_rect()`, not
+///     incrementally from the cursor — so a 1-px wobble in any
+///     surface's content can't shift the others by a px each frame.
+///   • Gets a child `Ui` with its `clip_rect` set to its own rect,
+///     hard-bounding all drawing. Content overflow is physically
+///     impossible.
+///   • Owns its own scroll-event hit-testing because the child Ui's
+///     interact_rect is its clip_rect — wheel events outside a
+///     scroll area's rect are ignored.
 pub fn show(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
-    // The cleanse protocol now runs at the top of `app::update()`
-    // (v0.4.8), so the Project tab + everywhere else benefits — no
-    // longer Mix-tab-only.
-
     if app.project.tracks.is_empty() {
         ui.heading("Mix");
         ui.separator();
@@ -123,62 +120,88 @@ pub fn show(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
         return;
     }
 
-    // Player lazy-instantiate / lazy-rebuild. Centralised here so the
-    // panel closures below can assume a fresh `app.player` state.
     rebuild_player_if_needed(app);
-
-    // Auto-play hand-off from Record-tab ▶ clicks. Must run before
-    // the panels render so the playing/paused state inside the
-    // transport bar reflects the autoplay decision on this same frame.
     consume_autoplay_request(app);
-
-    // Capture armed-strip fader values for the recorder lane while
-    // playing. Runs once per frame regardless of which panel the
-    // pointer is over.
     capture_automation(app);
 
-    // Compute console-deck height ONCE here. The bottom panel claims
-    // exactly this height (via `exact_height`); the CentralPanel
-    // gets the remainder. `app.mix_console_fraction` survives the
-    // session via Config; CONSOLE_H_MAX prevents tall windows from
-    // ballooning the deck.
-    let total_h = ui.available_height().max(200.0);
+    // Total area available to the Mix tab — taken from the host
+    // CentralPanel's max_rect, NOT from cursor-based available_height
+    // which can wobble with sibling widgets.
+    let outer = ui.max_rect();
+    let outer_w = outer.width();
+    let total_h = outer.height().max(200.0);
+
+    // Heights: transport claims its natural needs (fixed estimate);
+    // console claims a fraction (clamped); lanes get whatever's left.
+    let transport_h = TRANSPORT_BAR_H;
     let console_h =
         (total_h * app.mix_console_fraction.clamp(0.2, 0.7)).clamp(180.0, CONSOLE_H_MAX);
+    let lanes_h = (total_h - transport_h - console_h).max(120.0);
 
-    // ── Panel 1: transport bar (top, natural height) ───────────────
-    egui::TopBottomPanel::top("mix_transport_panel")
-        .resizable(false)
-        .show_inside(ui, |ui| {
-            transport_bar(app, ui);
-            render_player_error_banner_if_present(app, ui);
-        });
+    let top_y = outer.min.y;
+    let transport_rect = Rect::from_min_size(
+        Pos2::new(outer.min.x, top_y),
+        egui::vec2(outer_w, transport_h),
+    );
+    let lanes_rect = Rect::from_min_size(
+        Pos2::new(outer.min.x, top_y + transport_h),
+        egui::vec2(outer_w, lanes_h),
+    );
+    let console_rect = Rect::from_min_size(
+        Pos2::new(outer.min.x, top_y + transport_h + lanes_h),
+        egui::vec2(outer_w, console_h),
+    );
 
-    // Early-return path: error banner is up, no player to drive the
-    // remaining panels. The transport panel above already gave the
-    // user the Retry button.
+    // ── Region 1: transport ───────────────────────────────────────
+    render_clipped(ui, transport_rect, "mix_transport", |ui| {
+        transport_bar(app, ui);
+        render_player_error_banner_if_present(app, ui);
+    });
+
+    // Early-return path: error banner up, no player. Transport
+    // already drew the Retry button above.
     if app.player.is_none() {
         return;
     }
 
-    // ── Panel 2: console deck (bottom, fixed height) ───────────────
-    // Declare BEFORE the CentralPanel — egui's panel layout assigns
-    // space top-to-bottom, and CentralPanel takes whatever's left.
-    egui::TopBottomPanel::bottom("mix_console_panel")
-        .resizable(false)
-        .exact_height(console_h)
-        .show_inside(ui, |ui| {
-            console_deck(app, ui);
-        });
-
-    // ── Panel 3: lanes (central, fills the rest) ───────────────────
-    // The ONLY surface that accepts vertical scroll input. egui's
-    // CentralPanel gives it a hard clip rect, so the lane content
-    // can never bleed up into the transport bar or down into the
-    // console deck no matter how many rows are in the scroll area.
-    egui::CentralPanel::default().show_inside(ui, |ui| {
+    // ── Region 2: lanes (the only vertical-scroll surface) ───────
+    render_clipped(ui, lanes_rect, "mix_lanes", |ui| {
         lanes_view(app, ui);
     });
+
+    // ── Region 3: console deck (horizontal-scroll only) ──────────
+    render_clipped(ui, console_rect, "mix_console", |ui| {
+        console_deck(app, ui);
+    });
+
+    // Tell the parent ui we consumed the whole outer rect so it
+    // doesn't think the cursor is back at the top — keeps any
+    // sibling layout (none today, but defensively) honest.
+    ui.allocate_rect(outer, egui::Sense::hover());
+}
+
+/// Build a `child_ui` clamped to `rect`, with `clip_rect = rect` set
+/// so any content drawn beyond the boundary is physically hard-
+/// clipped. v0.4.30 — replaces the previous nested-`show_inside`
+/// approach which leaked the first lane row above the host area
+/// when egui's CentralPanel-inside-CentralPanel interaction
+/// misfired.
+fn render_clipped<R>(
+    parent: &mut egui::Ui,
+    rect: Rect,
+    id_source: &str,
+    add_contents: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    let mut child = parent.child_ui_with_id_source(
+        rect,
+        egui::Layout::top_down(egui::Align::Min),
+        id_source,
+        None,
+    );
+    child.set_clip_rect(rect);
+    // `set_max_size` so any ScrollArea inside knows its viewport.
+    child.set_max_size(rect.size());
+    add_contents(&mut child)
 }
 
 /// Lazy-rebuild the player when needed (project changed shape OR

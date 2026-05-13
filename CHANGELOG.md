@@ -8,6 +8,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); thi
 
 (Nothing yet — known issues all resolved as of v0.4.23.)
 
+## [0.4.30] — 2026-05-13
+
+### Fixed
+- **Lane content no longer bleeds above the transport bar.** v0.4.29's nested-panel approach (`TopBottomPanel::top` + `TopBottomPanel::bottom` + `CentralPanel`, all via `show_inside`) misbehaved when hosted inside the app's outer `CentralPanel::show(ctx, ...)` — the first lane row would render *above* the lanes region, overlapping the global menu bar. Replaced with explicit `child_ui` regions whose `clip_rect` and `max_size` are both pinned to a pre-computed `Rect` taken from `ui.max_rect()`. The result: each of the three regions (transport, lanes, console) is a hard-clipped rectangular zone, content overflow is physically impossible, and the layout no longer depends on egui's nested-panel internals being well-behaved.
+- New helper `render_clipped(parent, rect, id, |ui| …)` centralises the child-ui pattern so all three regions share the same clipping contract — no copy-paste of the `child_ui_with_id_source` + `set_clip_rect` + `set_max_size` triple.
+- Added `TRANSPORT_BAR_H = 56.0` so the transport region has a known fixed height, preventing the lanes/console below it from shifting when transport content changes width (e.g. the error banner appearing/disappearing).
+
 ## [0.4.29] — 2026-05-12
 
 ### Changed — Mix tab GUI architecture
