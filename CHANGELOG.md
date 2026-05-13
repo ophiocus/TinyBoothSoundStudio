@@ -8,6 +8,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); thi
 
 (Nothing yet — known issues all resolved as of v0.4.23.)
 
+## [0.4.34] — 2026-05-13
+
+### Fixed
+- **Lane overlap finally fixed for real.** The v0.4.33 diagnostic build revealed that the three top-level Mix-tab panels (transport, lanes CentralPanel, console) are positioned correctly — green stripes between Frame::groups confirmed the lanes CentralPanel starts cleanly below the transport. The bleed was *inside* `lanes_view`: the first lane row's header was rendered via `ui.allocate_exact_size` + `ui.child_ui(header_rect, …)` + manual `set_clip_rect`. On the **first iteration** of the lanes ScrollArea's for-loop, the parent ui's cursor was stale (Y ≈ top of screen), so the computed `header_rect` was at Y ≈ 0 and the child_ui rendered there — overlapping the transport panel. Subsequent iterations (rows 2-9) had a valid cursor by then and rendered correctly inside the CentralPanel.
+- The fix: replaced the manual `child_ui` + `set_clip_rect` with `ui.allocate_ui_with_layout(size, layout, |ui| …)`, which uses egui's own internal cursor tracking and doesn't suffer the stale-cursor issue. Same `(HEADER_W, LANE_H)` sizing constraint, same lane-header content; egui handles the positioning correctly across all iterations.
+- Diagnostic colors from v0.4.33 removed — `render_transport / render_console / render_lanes` are back to clean delegate functions.
+
 ## [0.4.33] — 2026-05-13
 
 ### Diagnostic build
