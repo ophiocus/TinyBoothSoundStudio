@@ -60,13 +60,10 @@ const FADER_H_MAX: f32 = 200.0;
 /// strip occupying half their screen. 340 px ≈ spectrum panel
 /// (80) + strip natural height (~230) + a touch of margin.
 const CONSOLE_H_MAX: f32 = 340.0;
-/// Fixed height for the transport bar region (v0.4.30). The
-/// previous nested-panel layout let it claim its natural size, but
-/// when content overflowed (long status, error banner) it'd push
-/// everything below it. With a fixed height the lanes / console
-/// regions don't shift; the transport itself self-clips if its
-/// content is taller (rare — only the error banner can grow).
-const TRANSPORT_BAR_H: f32 = 56.0;
+// v0.4.31 — TRANSPORT_BAR_H removed. The ctx-level `TopBottomPanel`
+// now sizes the transport region from its own content's natural
+// height (egui's panel layout is dynamic; the lanes/console below
+// absorb any wobble through their own panel's available_height).
 const METER_W: f32 = 6.0;
 /// Cap on track-name characters before we ellipsise. Tuned so Latin-script
 /// names like "Backing Vocals" / "Electric Guitar" / "Synth / Lead" fit
@@ -78,130 +75,92 @@ const FONT_STRIP_NAME: f32 = 13.0;
 const FONT_STRIP_DB: f32 = 12.0;
 const FONT_MASTER_NAME: f32 = 14.0;
 
-/// Mix-tab entry point.
+/// Mix-tab entry point — empty-project placeholder.
 ///
-/// **Architecture (v0.4.30 — explicit clipped child_ui layout):**
-///
-/// The Mix tab is split into three vertically-stacked regions
-/// rendered as `child_ui`s with **explicitly-set `clip_rect`s**. Pre-
-/// v0.4.30 we used egui's nested `TopBottomPanel::show_inside` +
-/// `CentralPanel::show_inside`, but that combination misbehaves when
-/// the outer surface is itself an app-level `CentralPanel::show(ctx,
-/// ...)`: lane rows would render *above* their host area, visible as
-/// the first lane spilling up into the global menu bar.
-///
-/// The new layout is explicit and predictable:
-///
-/// ```text
-///   ┌─ transport_rect  (natural height, ~50 px) ──────────────────┐
-///   │  transport bar  +  optional error banner                     │
-///   ├─ lanes_rect (fills the middle, clip_rect set) ──────────────┤
-///   │  lanes_view (vertical ScrollArea, only scrollable surface)   │
-///   ├─ console_rect (exact_height = CONSOLE_H, clip_rect set) ────┤
-///   │  spectrum panel + strip cards (horizontal scroll only)       │
-///   └──────────────────────────────────────────────────────────────┘
-/// ```
-///
-/// Each region:
-///   • Has its rect computed up-front from `ui.max_rect()`, not
-///     incrementally from the cursor — so a 1-px wobble in any
-///     surface's content can't shift the others by a px each frame.
-///   • Gets a child `Ui` with its `clip_rect` set to its own rect,
-///     hard-bounding all drawing. Content overflow is physically
-///     impossible.
-///   • Owns its own scroll-event hit-testing because the child Ui's
-///     interact_rect is its clip_rect — wheel events outside a
-///     scroll area's rect are ignored.
+/// The **populated** Mix tab uses `ctx_panels` instead (called
+/// directly from `app.rs` for `Tab::Mix`). This function only
+/// handles the "no tracks yet" case so the central panel has
+/// something to render.
 pub fn show(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
-    if app.project.tracks.is_empty() {
+    if !app.project.tracks.is_empty() {
+        // Shouldn't normally happen — app.rs routes populated Mix
+        // tabs through `ctx_panels`. Defensive: render an empty
+        // central area, leaving the user to switch tabs.
         ui.heading("Mix");
         ui.separator();
-        ui.label("Record at least one track or import a Suno bundle to mix.");
+        ui.label("(rendering Mix tab via ctx_panels)");
         return;
     }
+    ui.heading("Mix");
+    ui.separator();
+    ui.label("Record at least one track or import a Suno bundle to mix.");
+    let _ = app; // suppress unused-mut on the empty path
+}
 
+/// Mix-tab entry point at **ctx level** — declares its own
+/// `TopBottomPanel::top` (transport), `TopBottomPanel::bottom`
+/// (console deck), and `CentralPanel` (lanes) directly on `ctx`,
+/// as siblings of the app's global menu + status bars. Called from
+/// `app.rs` instead of `mix::show` when the Mix tab is active and
+/// the project has tracks.
+///
+/// **Why ctx-level (v0.4.31):** Pre-v0.4.31 the Mix tab nested
+/// these three panels inside the app's global `CentralPanel::show`
+/// via `show_inside`, `allocate_ui_with_layout`, then explicit
+/// `child_ui` + `set_clip_rect`. Each approach had a different
+/// failure mode (lanes overlaying transport, content bleeding past
+/// clip rects, widget text rendering at the wrong y-coord while
+/// the surrounding `Frame::group` border was correctly placed).
+/// The root cause across all of them: egui's painter has multiple
+/// layers (Foreground for widgets, Background for panel fills,
+/// Tooltip for popups), and nested `child_ui` + `set_clip_rect`
+/// only constrains the layer the immediate child is drawing to —
+/// `ComboBox` popups, `ScrollArea` viewports, tooltips all bypass
+/// it. Ctx-level panels claim space at the proper layer and egui
+/// composites them cleanly. This is the egui-blessed pattern.
+pub fn ctx_panels(app: &mut TinyBoothApp, ctx: &egui::Context) {
     rebuild_player_if_needed(app);
     consume_autoplay_request(app);
     capture_automation(app);
 
-    // Total area available to the Mix tab — taken from the host
-    // CentralPanel's max_rect, NOT from cursor-based available_height
-    // which can wobble with sibling widgets.
-    let outer = ui.max_rect();
-    let outer_w = outer.width();
-    let total_h = outer.height().max(200.0);
+    // Compute console height for this frame. The bottom panel
+    // claims exactly this; the central panel takes whatever's left.
+    let console_h = {
+        let screen_h = ctx.screen_rect().height().max(200.0);
+        (screen_h * app.mix_console_fraction.clamp(0.2, 0.7)).clamp(180.0, CONSOLE_H_MAX)
+    };
 
-    // Heights: transport claims its natural needs (fixed estimate);
-    // console claims a fraction (clamped); lanes get whatever's left.
-    let transport_h = TRANSPORT_BAR_H;
-    let console_h =
-        (total_h * app.mix_console_fraction.clamp(0.2, 0.7)).clamp(180.0, CONSOLE_H_MAX);
-    let lanes_h = (total_h - transport_h - console_h).max(120.0);
+    // ── Top: transport ───────────────────────────────────────────
+    egui::TopBottomPanel::top("mix_transport_panel")
+        .resizable(false)
+        .show(ctx, |ui| {
+            transport_bar(app, ui);
+            render_player_error_banner_if_present(app, ui);
+        });
 
-    let top_y = outer.min.y;
-    let transport_rect = Rect::from_min_size(
-        Pos2::new(outer.min.x, top_y),
-        egui::vec2(outer_w, transport_h),
-    );
-    let lanes_rect = Rect::from_min_size(
-        Pos2::new(outer.min.x, top_y + transport_h),
-        egui::vec2(outer_w, lanes_h),
-    );
-    let console_rect = Rect::from_min_size(
-        Pos2::new(outer.min.x, top_y + transport_h + lanes_h),
-        egui::vec2(outer_w, console_h),
-    );
-
-    // ── Region 1: transport ───────────────────────────────────────
-    render_clipped(ui, transport_rect, "mix_transport", |ui| {
-        transport_bar(app, ui);
-        render_player_error_banner_if_present(app, ui);
-    });
-
-    // Early-return path: error banner up, no player. Transport
-    // already drew the Retry button above.
+    // Error-banner early return — player isn't ready, skip the
+    // bottom panel and the lanes. egui will render the rest of
+    // the app (other panels) normally.
     if app.player.is_none() {
+        // Render an empty central panel so the visualizer / other
+        // surface state stays consistent. Otherwise egui complains
+        // about a missing CentralPanel for this frame.
+        egui::CentralPanel::default().show(ctx, |_ui| {});
         return;
     }
 
-    // ── Region 2: lanes (the only vertical-scroll surface) ───────
-    render_clipped(ui, lanes_rect, "mix_lanes", |ui| {
+    // ── Bottom: console deck (fixed height) ──────────────────────
+    egui::TopBottomPanel::bottom("mix_console_panel")
+        .resizable(false)
+        .exact_height(console_h)
+        .show(ctx, |ui| {
+            console_deck(app, ui);
+        });
+
+    // ── Central: lanes ───────────────────────────────────────────
+    egui::CentralPanel::default().show(ctx, |ui| {
         lanes_view(app, ui);
     });
-
-    // ── Region 3: console deck (horizontal-scroll only) ──────────
-    render_clipped(ui, console_rect, "mix_console", |ui| {
-        console_deck(app, ui);
-    });
-
-    // Tell the parent ui we consumed the whole outer rect so it
-    // doesn't think the cursor is back at the top — keeps any
-    // sibling layout (none today, but defensively) honest.
-    ui.allocate_rect(outer, egui::Sense::hover());
-}
-
-/// Build a `child_ui` clamped to `rect`, with `clip_rect = rect` set
-/// so any content drawn beyond the boundary is physically hard-
-/// clipped. v0.4.30 — replaces the previous nested-`show_inside`
-/// approach which leaked the first lane row above the host area
-/// when egui's CentralPanel-inside-CentralPanel interaction
-/// misfired.
-fn render_clipped<R>(
-    parent: &mut egui::Ui,
-    rect: Rect,
-    id_source: &str,
-    add_contents: impl FnOnce(&mut egui::Ui) -> R,
-) -> R {
-    let mut child = parent.child_ui_with_id_source(
-        rect,
-        egui::Layout::top_down(egui::Align::Min),
-        id_source,
-        None,
-    );
-    child.set_clip_rect(rect);
-    // `set_max_size` so any ScrollArea inside knows its viewport.
-    child.set_max_size(rect.size());
-    add_contents(&mut child)
 }
 
 /// Lazy-rebuild the player when needed (project changed shape OR

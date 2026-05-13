@@ -1642,22 +1642,41 @@ impl eframe::App for TinyBoothApp {
             return;
         }
 
-        egui::CentralPanel::default().show(ctx, |ui| {
-            // Visualizer takes over the central panel when toggled on.
-            // The user closes via the ✖ button inside the canvas, the
-            // 🌀 menu icon, or by switching tabs (we keep the active
-            // tab so they return to where they were).
-            if self.show_visualizer {
-                ui::visualizer::show(self, ui);
-                return;
-            }
-            match self.tab {
-                Tab::Record => ui::record::show(self, ui),
-                Tab::Project => ui::project::show(self, ui),
-                Tab::Mix => ui::mix::show(self, ui),
-                Tab::Export => ui::export::show(self, ui),
-            }
-        });
+        // v0.4.31 — Mix tab is special. When active (and not in
+        // Visualizer mode, and the project has tracks), it declares
+        // its own three panels (transport / console / lanes) at ctx
+        // level directly, as siblings of the app's global menu and
+        // status bars. This is the egui-blessed pattern for a multi-
+        // pane workspace; nesting `TopBottomPanel::show_inside` or
+        // `child_ui` inside the global `CentralPanel::show(ctx, ...)`
+        // doesn't propagate clip rects to all painter layers
+        // (ComboBox popups, ScrollArea viewports, tooltip layer),
+        // which manifested as lanes / button text overlapping the
+        // global menu bar in v0.4.29 / v0.4.30.
+        let use_mix_ctx_panels = matches!(self.tab, Tab::Mix)
+            && !self.show_visualizer
+            && !self.project.tracks.is_empty();
+
+        if use_mix_ctx_panels {
+            ui::mix::ctx_panels(self, ctx);
+        } else {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                // Visualizer takes over the central panel when toggled on.
+                // The user closes via the ✖ button inside the canvas, the
+                // 🌀 menu icon, or by switching tabs (we keep the active
+                // tab so they return to where they were).
+                if self.show_visualizer {
+                    ui::visualizer::show(self, ui);
+                    return;
+                }
+                match self.tab {
+                    Tab::Record => ui::record::show(self, ui),
+                    Tab::Project => ui::project::show(self, ui),
+                    Tab::Mix => ui::mix::show(self, ui),
+                    Tab::Export => ui::export::show(self, ui),
+                }
+            });
+        }
 
         // Mix-tab transport runs continuously while playing — repaint so
         // the playhead animates.

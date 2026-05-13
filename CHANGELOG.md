@@ -8,6 +8,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); thi
 
 (Nothing yet — known issues all resolved as of v0.4.23.)
 
+## [0.4.31] — 2026-05-13
+
+### Fixed
+- **Lane content rendering at wrong Y coords — root cause finally found and fixed.** The bug was visible across v0.4.29 / v0.4.30: the first lane's name + chips + M/S/A/B/+Cor row would render at the top of the screen overlapping the global menu bar, while the `Frame::group` border for that lane was either missing or in its proper place below the transport bar. Different parts of the same row drawing in different y-coords pointed at a **painter-layer / Z-order** issue, not just bad rect maths.
+- The actual cause: egui's painter uses **multiple layers** (Foreground for widgets, Background for panel fills, Tooltip for popups, plus ScrollArea-internal sublayers). Nesting `TopBottomPanel::show_inside` / `child_ui` + `set_clip_rect` inside the app's global `CentralPanel::show(ctx, ...)` only constrains the *immediate* layer — `ComboBox` popups, `ScrollArea` viewports, and tooltip rendering bypass the child's clip_rect and use the OUTER `ui`'s. So the lane's `Frame::group` (drawn directly in the immediate layer) sat where it should, while the ComboBox / ScrollArea content for that row ended up unbounded.
+- **Fix:** the Mix tab now declares its three panels (`mix_transport_panel`, `mix_console_panel`, lanes `CentralPanel`) **at ctx level**, as siblings of the app's global menu bar (`top_bar`) and status bar (`bottom_bar`), rather than nested inside the global `CentralPanel`. This is the egui-blessed pattern for a multi-pane workspace — egui's panel system composites these cleanly because they all draw to the same level, with no painter-layer mismatch. New `mix::ctx_panels(app, ctx)` function called directly from `app.rs` when `Tab::Mix` is active.
+- `app.rs` gains a branch: for Mix tab with tracks (and not the Visualizer takeover), it calls `mix::ctx_panels(self, ctx)`; everything else continues to render inside the global `CentralPanel` via `mix::show(self, ui)` (now a thin placeholder for the empty-project case).
+- Removed `TRANSPORT_BAR_H` constant and the `render_clipped` helper from v0.4.30 — both were ceremony for the failed child_ui approach.
+
 ## [0.4.30] — 2026-05-13
 
 ### Fixed
