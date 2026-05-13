@@ -118,7 +118,7 @@ pub fn show(app: &mut TinyBoothApp, ctx: &egui::Context) {
                 .max_height(360.0)
                 .show(ui, |ui| {
                     egui::Grid::new("tbss_health_grid")
-                        .num_columns(9)
+                        .num_columns(10)
                         .striped(true)
                         .min_col_width(50.0)
                         .show(ui, |ui| {
@@ -132,6 +132,13 @@ pub fn show(app: &mut TinyBoothApp, ctx: &egui::Context) {
                             ui.label(egui::RichText::new("Mood").strong());
                             ui.label(egui::RichText::new("Inst. layer").strong());
                             ui.label(egui::RichText::new("Key").strong());
+                            ui.label(egui::RichText::new("Band Coh.").strong())
+                                .on_hover_text(
+                                    "Cross-band coherence (v0.4.35) — mean pairwise \
+                                 Pearson correlation of octave-band energy \
+                                 envelopes. Natural recordings 0.6–0.9; AI-audio \
+                                 fingerprint 0.2–0.5. See sound-vision-philosophy.md §V.",
+                                );
                             ui.end_row();
 
                             for t in &app.project.tracks {
@@ -149,6 +156,7 @@ pub fn show(app: &mut TinyBoothApp, ctx: &egui::Context) {
                                             egui::RichText::new("pending")
                                                 .color(egui::Color32::from_rgb(240, 200, 100)),
                                         );
+                                        ui.label("—");
                                         ui.label("—");
                                         ui.label("—");
                                         ui.label("—");
@@ -200,6 +208,25 @@ pub fn show(app: &mut TinyBoothApp, ctx: &egui::Context) {
                                                 format!("{} ({:.2})", k.label(), k.confidence)
                                             }
                                         });
+                                        // Cross-band coherence column.
+                                        let c = tel.cross_band_coherence;
+                                        let coh_color = if c < 0.45 {
+                                            egui::Color32::from_rgb(220, 140, 220)
+                                        } else if c >= 0.65 {
+                                            egui::Color32::from_rgb(140, 220, 180)
+                                        } else {
+                                            egui::Color32::from_gray(180)
+                                        };
+                                        let coh_label = if c <= 0.05 {
+                                            "—".to_string()
+                                        } else if c < 0.45 {
+                                            format!("{c:.2} 🤖")
+                                        } else if c >= 0.65 {
+                                            format!("{c:.2} ≈")
+                                        } else {
+                                            format!("{c:.2}")
+                                        };
+                                        ui.label(egui::RichText::new(coh_label).color(coh_color));
                                     }
                                 }
                                 ui.end_row();

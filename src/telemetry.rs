@@ -42,7 +42,12 @@ use std::path::Path;
 ///                  flux arbitration. Pre-v3 manifests over-counted
 ///                  drum events ~3-6× (one snare hit produced separate
 ///                  Snare + Cymbal + HiHat events).
-pub const ANALYZER_VERSION: u32 = 3;
+///   v4 (0.4.35): + cross_band_coherence — mean pairwise Pearson
+///                  correlation of octave-band energy envelopes. The
+///                  AI-audio fingerprint diagnostic from
+///                  docs/sound-vision-philosophy.md §V. Natural
+///                  recordings ≈ 0.6–0.9, AI-generated ≈ 0.2–0.5.
+pub const ANALYZER_VERSION: u32 = 4;
 
 /// FFT window size for spectral analysis. Power of two for rustfft.
 const FFT_SIZE: usize = 2048;
@@ -177,6 +182,30 @@ pub struct TrackTelemetry {
     /// pitch data is present (Guitar / Bass profiles). Added v0.4.14.
     #[serde(default)]
     pub key_estimate: Option<KeyEstimate>,
+
+    /// **Cross-band coherence** — mean pairwise Pearson correlation
+    /// of octave-band energy envelopes. The AI-audio fingerprint
+    /// diagnostic from `docs/sound-vision-philosophy.md` §V.
+    ///
+    /// Physical instruments and natural recordings have correlated
+    /// bands — when a string vibrates or a vocal cord opens, every
+    /// frequency band shares the same low-frequency modulation
+    /// envelope (the bands "move together"). Score typically 0.6–0.9.
+    ///
+    /// AI-generated audio has band-decorrelated micro-fluctuations:
+    /// each band is generated semi-independently by the model and
+    /// wobbles out of phase with the others. Score typically 0.2–0.5.
+    ///
+    /// In `[-1, 1]` mathematically; in practice `[0, 1]` for music
+    /// content. Computed once at first save from the existing STFT
+    /// pass — no extra audio I/O. Added v0.4.35 (telemetry v4).
+    ///
+    /// Phase 3 (TBD): a "Coherence Restoration" post-processing
+    /// filter that re-correlates the bands by gating their modulation
+    /// envelopes against a shared reference envelope. Goal: take AI
+    /// output meaningfully closer to "sounds like a recording".
+    #[serde(default)]
+    pub cross_band_coherence: f32,
 }
 
 /// Pick-stroke / pitch telemetry for guitar / bass content. See
@@ -655,6 +684,11 @@ pub fn analyze_wav(
     let arousal = arousal_proxy(rms, onset_rate_hz, centroid_avg);
     let valence = valence_proxy(centroid_avg, flatness_avg);
 
+    // ── Cross-band coherence (AI-audio fingerprint) ──────────────
+    // Cheap — reuses the STFT we already have; one extra pass over
+    // 8 octave-spaced bands × N frames + 28 Pearson correlations.
+    let cross_band_coherence = compute_cross_band_coherence(&stft, sr);
+
     Ok(TrackTelemetry {
         analyzer_version: ANALYZER_VERSION,
         spectral_centroid_avg: centroid_avg,
@@ -673,7 +707,113 @@ pub fn analyze_wav(
         drum_kit,
         guitar,
         key_estimate,
+        cross_band_coherence,
     })
+}
+
+/// Compute the cross-band coherence score for an STFT.
+///
+/// Algorithm:
+/// 1. Pick 8 octave-spaced centres: 60, 120, 240, 480, 960, 1920,
+///    3840, 7680 Hz. For each, sum FFT bin magnitudes in a 1/3-octave
+///    window around the centre → per-band energy(t) curve.
+/// 2. Normalise each curve to zero-mean, unit-variance (so absolute
+///    loudness doesn't drown the modulation pattern we care about).
+/// 3. Light EMA smoothing (~10 Hz cutoff at the STFT hop rate)
+///    to focus on slow modulation envelopes — the timescale where
+///    real-instrument bands move together.
+/// 4. Compute pairwise Pearson correlations across all 28 band
+///    pairs and return the mean.
+///
+/// Output range mathematically `[-1, 1]`; in practice `[0, 1]` for
+/// music content. Pure silence / DC returns 0. Returns 0 on
+/// degenerate input (too few frames, all-zero spectrum).
+pub fn compute_cross_band_coherence(stft: &[Vec<f32>], sr: u32) -> f32 {
+    if stft.len() < 16 || stft[0].is_empty() {
+        return 0.0;
+    }
+    let bin_hz = sr as f32 / FFT_SIZE as f32;
+    let half = stft[0].len();
+    // Octave-spaced centres. 60 Hz floors at sub-bass; 7680 Hz tops
+    // out below the typical 24-kHz Nyquist with headroom.
+    const CENTRES_HZ: [f32; 8] = [60.0, 120.0, 240.0, 480.0, 960.0, 1920.0, 3840.0, 7680.0];
+    // 1/3-octave window: lower = centre / 2^(1/6), upper = centre * 2^(1/6).
+    const THIRD_OCT_RATIO: f32 = 1.122_462; // 2^(1/6)
+
+    // Build per-band energy curves.
+    let mut bands: Vec<Vec<f32>> = Vec::with_capacity(CENTRES_HZ.len());
+    for &centre in &CENTRES_HZ {
+        let lo = (centre / THIRD_OCT_RATIO / bin_hz).floor() as usize;
+        let hi = ((centre * THIRD_OCT_RATIO / bin_hz).ceil() as usize).min(half - 1);
+        if hi <= lo {
+            bands.push(vec![0.0; stft.len()]);
+            continue;
+        }
+        let curve: Vec<f32> = stft
+            .iter()
+            .map(|frame| frame[lo..=hi].iter().sum::<f32>())
+            .collect();
+        bands.push(curve);
+    }
+
+    // Light EMA smoothing to focus on slow modulation. STFT frame
+    // rate ≈ sr / FFT_HOP (≈ 94 Hz at 48k); α = 0.2 gives a ~3-frame
+    // time constant, attenuating modulation > ~10 Hz.
+    for band in bands.iter_mut() {
+        if band.is_empty() {
+            continue;
+        }
+        let mut prev = band[0];
+        for v in band.iter_mut() {
+            let smoothed = 0.2 * (*v) + 0.8 * prev;
+            *v = smoothed;
+            prev = smoothed;
+        }
+    }
+
+    // Zero-mean, unit-variance normalise each band.
+    for band in bands.iter_mut() {
+        let m = mean(band);
+        let s = stddev(band).max(1e-9);
+        for v in band.iter_mut() {
+            *v = (*v - m) / s;
+        }
+    }
+
+    // Mean pairwise Pearson correlation across all 28 pairs.
+    // (Bands are already z-scored, so Pearson reduces to mean(b1·b2).)
+    let n = bands.len();
+    let mut sum = 0.0_f64;
+    let mut pairs = 0_u32;
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let b1 = &bands[i];
+            let b2 = &bands[j];
+            if b1.is_empty() || b2.is_empty() {
+                continue;
+            }
+            let len = b1.len().min(b2.len());
+            if len < 2 {
+                continue;
+            }
+            let r: f32 = b1
+                .iter()
+                .zip(b2.iter())
+                .take(len)
+                .map(|(a, b)| a * b)
+                .sum::<f32>()
+                / len as f32;
+            if r.is_finite() {
+                sum += r as f64;
+                pairs += 1;
+            }
+        }
+    }
+    if pairs == 0 {
+        0.0
+    } else {
+        (sum / pairs as f64).clamp(-1.0, 1.0) as f32
+    }
 }
 
 // ───────────────────── STFT + spectral helpers ─────────────────────
@@ -1661,6 +1801,7 @@ fn empty_telemetry() -> TrackTelemetry {
         sustain_ratio: 0.0,
         arousal: 0.0,
         valence: 0.0,
+        cross_band_coherence: 0.0,
         drum_kit: None,
         guitar: None,
         key_estimate: None,
@@ -2254,5 +2395,87 @@ mod tests {
                 .map(|e| (e.time_secs, e.class))
                 .collect::<Vec<_>>()
         );
+    }
+
+    /// Build a synthetic STFT where every band shares a common
+    /// modulation envelope (the "natural instrument" case). All
+    /// bands rise and fall together → coherence should be HIGH
+    /// (≥ 0.7 typically).
+    #[test]
+    fn coherence_high_when_bands_move_together() {
+        let sr = 48_000;
+        let half = FFT_SIZE / 2;
+        let n_frames = 200;
+        let mut stft = Vec::with_capacity(n_frames);
+        for t in 0..n_frames {
+            // Shared slow envelope (~2 Hz at our frame rate).
+            let env = 0.5 + 0.5 * (std::f32::consts::TAU * t as f32 / n_frames as f32 * 4.0).sin();
+            let frame: Vec<f32> = (0..half).map(|_| env).collect();
+            stft.push(frame);
+        }
+        let c = compute_cross_band_coherence(&stft, sr);
+        assert!(
+            c >= 0.7,
+            "common-envelope STFT should score ≥0.7 coherence, got {c}"
+        );
+    }
+
+    /// Build a synthetic STFT where each band's envelope is
+    /// independently random (the "AI fingerprint" case). Bands
+    /// modulate without correlation → coherence should be LOW
+    /// (close to 0).
+    #[test]
+    fn coherence_low_when_bands_decorrelated() {
+        let sr = 48_000;
+        let half = FFT_SIZE / 2;
+        let n_frames = 200;
+        let bin_hz = sr as f32 / FFT_SIZE as f32;
+        // Per-band independent envelopes. We use deterministic LFOs
+        // at unrelated frequencies and phases so the test is stable
+        // without an RNG dep.
+        let band_freqs = [1.7_f32, 2.9, 3.3, 4.1, 5.7, 6.3, 7.1, 8.9];
+        let band_phase = [0.0_f32, 0.5, 1.1, 1.8, 2.6, 3.4, 4.3, 5.2];
+        let mut stft = Vec::with_capacity(n_frames);
+        for t in 0..n_frames {
+            let mut frame = vec![0.0_f32; half];
+            for (bi, &centre) in [60.0_f32, 120.0, 240.0, 480.0, 960.0, 1920.0, 3840.0, 7680.0]
+                .iter()
+                .enumerate()
+            {
+                let bin = (centre / bin_hz).round() as usize;
+                let lo = bin.saturating_sub(2);
+                let hi = (bin + 2).min(half - 1);
+                let env = 0.5
+                    + 0.5
+                        * (std::f32::consts::TAU * t as f32 / n_frames as f32 * band_freqs[bi]
+                            + band_phase[bi])
+                            .sin();
+                for f in &mut frame[lo..=hi] {
+                    *f = env;
+                }
+            }
+            stft.push(frame);
+        }
+        let c = compute_cross_band_coherence(&stft, sr);
+        assert!(
+            c.abs() < 0.4,
+            "decorrelated-envelope STFT should score |c|<0.4 (≈0); got {c}"
+        );
+    }
+
+    /// Degenerate inputs return 0 rather than NaN / panicking.
+    #[test]
+    fn coherence_degenerate_inputs_safe() {
+        let sr = 48_000;
+        // Empty STFT
+        assert_eq!(compute_cross_band_coherence(&[], sr), 0.0);
+        // Too few frames
+        let short: Vec<Vec<f32>> = (0..4).map(|_| vec![0.5; FFT_SIZE / 2]).collect();
+        assert_eq!(compute_cross_band_coherence(&short, sr), 0.0);
+        // All-zero spectrum → bands have zero variance → division
+        // by stddev guarded with .max(1e-9); should not NaN.
+        let zeros: Vec<Vec<f32>> = (0..200).map(|_| vec![0.0; FFT_SIZE / 2]).collect();
+        let c = compute_cross_band_coherence(&zeros, sr);
+        assert!(c.is_finite(), "all-zero STFT must not produce NaN; got {c}");
     }
 }

@@ -8,6 +8,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); thi
 
 (Nothing yet — known issues all resolved as of v0.4.23.)
 
+## [0.4.35] — 2026-05-13
+
+### Added — AI-audio fingerprint diagnostic
+The first half of the cross-band coherence work from `docs/sound-vision-philosophy.md` §V lands here as a measurement + UI surfaces.
+
+- **New telemetry field `cross_band_coherence: f32`** on every analyzed `Track`. Algorithm: pick 8 octave-spaced centres (60 / 120 / 240 / 480 / 960 / 1920 / 3840 / 7680 Hz), sum FFT bin magnitudes in a 1/3-octave window around each centre per STFT frame, z-score the resulting 8 energy envelopes, EMA-smooth (α=0.2 → ~10 Hz cutoff at typical STFT hop), compute pairwise Pearson correlation across all 28 band pairs, return the mean. **Cheap** — reuses the STFT that was already computed for centroid/onsets/etc.; the extra work is ~8 × N_frames adds + 28 correlations.
+- **What it measures**: natural recordings score 0.6–0.9 because every band is driven by the same physical event (one string vibrating, one vocal cord opening — the bands share a common low-frequency modulation envelope). AI-generated audio scores 0.2–0.5 because each band is generated semi-independently and wobbles out of phase. Below ~0.45 is the working threshold for the AI fingerprint.
+- **Mix-tab chip**: a `🤖` badge in pink on every track whose coherence < 0.45, with a tooltip explaining the score and reserving phase-3 (Coherence Restoration filter). A `≈` badge in cool green when ≥ 0.65 — surfaces the "this stem is naturally recorded" case for tracks where it matters (e.g. a real vocal you tracked yourself, dropped into a TinyDAW project alongside Suno stems).
+- **Project Health column "Band Coh."** with the numeric value coloured by tier (pink < 0.45, gray middle, green ≥ 0.65) and a `🤖`/`≈` glyph appended at the extremes.
+- **Schema bumped 3 → 4** so existing v0.4.34 manifests are auto-stale and re-analyze on next open. Migration is invisible.
+- 3 new tests in `src/telemetry.rs`: synthetic common-envelope STFT → coherence ≥ 0.7 (natural case), decorrelated-envelope STFT → coherence < 0.4 (AI case), degenerate inputs (empty / too-few-frames / all-zero) don't NaN. Suite: 75 → **78 passing**.
+
+### Reserved for phase 3
+The Coherence Restoration post-processing filter (re-correlates the bands by gating their modulation envelopes against a shared reference envelope) is the eventual payoff — it turns this diagnostic from "tells you which stems are AI-shaped" into "fixes the bands-don't-move-together signature, taking the stem closer to a real recording". Not in v0.4.35; will land as a per-stem opt-in inside the existing correction chain when shipped.
+
 ## [0.4.34] — 2026-05-13
 
 ### Fixed

@@ -1259,6 +1259,58 @@ fn telemetry_chips(ui: &mut egui::Ui, track: &crate::project::Track) {
             }
         }
 
+        // ── AI fingerprint chip (v0.4.35) ─────────────────────
+        // Cross-band coherence measures how synchronously the
+        // octave-spaced energy envelopes move. Natural recordings
+        // score 0.6–0.9 (every band shares the same physical
+        // modulation); AI audio scores 0.2–0.5 (each band wobbles
+        // semi-independently). When the score is suspiciously low
+        // we surface a "🤖" badge; when it's high we surface a
+        // neutral "≈" badge for the curious; in between we render
+        // nothing to avoid clutter.
+        let c = tel.cross_band_coherence;
+        // Skip the chip on tracks the analyzer left at exactly 0
+        // (empty_telemetry sentinel, "Off" profile, etc.). A real
+        // analysed track should land in [0.1, 1.0] for any audio
+        // with content.
+        if c > 0.05 {
+            if c < 0.45 {
+                ui.label(
+                    egui::RichText::new("🤖")
+                        .size(11.0)
+                        .color(Color32::from_rgb(220, 140, 220)),
+                )
+                .on_hover_text(format!(
+                    "Cross-band coherence: {c:.2}\n\
+                     \n\
+                     Low score (< 0.45) is the AI-audio fingerprint —\n\
+                     octave-spaced energy bands wobble out of phase\n\
+                     with each other, where natural recordings score\n\
+                     0.6–0.9 because the bands share a common\n\
+                     modulation envelope (one string vibrating drives\n\
+                     all of them together).\n\
+                     \n\
+                     Diagnostic only in v0.4.35. The planned\n\
+                     phase-3 'Coherence Restoration' filter will\n\
+                     re-correlate the bands to push this stem closer\n\
+                     to natural."
+                ));
+            } else if c >= 0.65 {
+                ui.label(
+                    egui::RichText::new("≈")
+                        .size(11.0)
+                        .color(Color32::from_rgb(140, 220, 180)),
+                )
+                .on_hover_text(format!(
+                    "Cross-band coherence: {c:.2}\n\
+                     \n\
+                     High score (≥ 0.65). The octave-spaced energy\n\
+                     bands modulate together — the signature of a\n\
+                     real physical instrument or natural recording.",
+                ));
+            }
+        }
+
         // ── Mood pip ──────────────────────────────────────────
         // 10×10 px coloured square. Hue = valence (cool ↔ warm),
         // saturation = arousal. Tooltip carries every numeric
