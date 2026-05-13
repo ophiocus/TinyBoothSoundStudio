@@ -8,6 +8,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); thi
 
 (Nothing yet — known issues all resolved as of v0.4.23.)
 
+## [0.4.36] — 2026-05-13
+
+### Fixed
+- **AI-fingerprint chip no longer renders as a `□` tofu square.** egui's default font has selective Unicode coverage — musical-instrument emojis (🎸 🥁) and arrows (↗) render, but `🤖` (U+1F916) doesn't and silently falls back to tofu on Suno-shaped stems. Replaced with a plain text "AI" tag rendered in a pink chip (monospace, dark-magenta background, light-magenta foreground) — same colour scheme, same hover tooltip, guaranteed to render in any font. Same change in the Project Health panel's "Band Coh." column. Bundling a Noto-Emoji subset is the longer-term fix but stays out of scope for a small UI patch.
+
 ## [0.4.35] — 2026-05-13
 
 ### Added — AI-audio fingerprint diagnostic

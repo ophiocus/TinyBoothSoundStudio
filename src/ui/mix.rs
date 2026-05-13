@@ -1275,10 +1275,19 @@ fn telemetry_chips(ui: &mut egui::Ui, track: &crate::project::Track) {
         // with content.
         if c > 0.05 {
             if c < 0.45 {
+                // v0.4.36 — was 🤖 (U+1F916), which renders as tofu (□)
+                // in egui's default font because that code point isn't
+                // covered. Switched to a plain text "AI" tag — same
+                // colour, same hover, guaranteed to render. Could
+                // revisit later by bundling a Noto-Emoji subset, but
+                // text is the bulletproof option.
                 ui.label(
-                    egui::RichText::new("🤖")
-                        .size(11.0)
-                        .color(Color32::from_rgb(220, 140, 220)),
+                    egui::RichText::new(" AI ")
+                        .size(10.0)
+                        .strong()
+                        .monospace()
+                        .background_color(Color32::from_rgb(80, 30, 80))
+                        .color(Color32::from_rgb(255, 200, 255)),
                 )
                 .on_hover_text(format!(
                     "Cross-band coherence: {c:.2}\n\

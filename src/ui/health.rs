@@ -220,9 +220,12 @@ pub fn show(app: &mut TinyBoothApp, ctx: &egui::Context) {
                                         let coh_label = if c <= 0.05 {
                                             "—".to_string()
                                         } else if c < 0.45 {
-                                            format!("{c:.2} 🤖")
+                                            // v0.4.36 — 🤖 emoji renders as
+                                            // tofu in egui's default font;
+                                            // use plain "AI" suffix instead.
+                                            format!("{c:.2}  AI")
                                         } else if c >= 0.65 {
-                                            format!("{c:.2} ≈")
+                                            format!("{c:.2}  ≈")
                                         } else {
                                             format!("{c:.2}")
                                         };
