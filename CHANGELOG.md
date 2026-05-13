@@ -8,6 +8,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); thi
 
 (Nothing yet — known issues all resolved as of v0.4.23.)
 
+## [0.4.33] — 2026-05-13
+
+### Diagnostic build
+Five attempts at fixing the Mix-tab lane overlap haven't worked. This release tints each Mix region with a faint coloured overlay (red for `mix_transport_panel`, blue for `mix_console_panel`, green for the lanes `CentralPanel`) and prints the panel's actual `y=[top..bottom] h=height` rect in the top-left corner of each region. The next screenshot from this build will definitively show whether:
+- the panels' real rects overlap (egui's space allocation is wrong), or
+- the panels' rects are distinct but the lane content draws outside its rect (egui's clip enforcement is wrong), or
+- the lane content draws correctly inside green but the green region itself is mispositioned.
+
+No functional changes; this is a one-release-only diagnostic. v0.4.34 will revert the colors based on what we learn.
+
 ## [0.4.32] — 2026-05-13
 
 ### Fixed

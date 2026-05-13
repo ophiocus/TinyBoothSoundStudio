@@ -123,6 +123,29 @@ pub fn compute_console_h(app: &TinyBoothApp, ctx: &egui::Context) -> f32 {
 /// `app.rs` can drop it into its own `TopBottomPanel::top("mix_
 /// transport_panel")`.
 pub fn render_transport(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
+    // v0.4.33 — diagnostic tint. Paint the panel's full available
+    // rect with a faint red overlay so we can see precisely where
+    // egui placed this panel on screen. If the next screenshot
+    // shows red OVERLAPPING green (lanes region) or BELOW where it
+    // should be, we'll know the panel-placement layer is broken.
+    let rect = ui.max_rect();
+    ui.painter().rect_filled(
+        rect,
+        0.0,
+        egui::Color32::from_rgba_unmultiplied(180, 50, 50, 40),
+    );
+    ui.painter().text(
+        rect.left_top() + egui::vec2(4.0, 2.0),
+        egui::Align2::LEFT_TOP,
+        format!(
+            "DIAG mix_transport_panel y=[{:.0}..{:.0}] h={:.0}",
+            rect.top(),
+            rect.bottom(),
+            rect.height()
+        ),
+        egui::FontId::monospace(10.0),
+        egui::Color32::from_rgb(255, 200, 200),
+    );
     transport_bar(app, ui);
     render_player_error_banner_if_present(app, ui);
 }
@@ -130,12 +153,48 @@ pub fn render_transport(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
 /// Render the console deck. Pub so `app.rs` can drop it into its
 /// own `TopBottomPanel::bottom("mix_console_panel")`.
 pub fn render_console(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
+    let rect = ui.max_rect();
+    ui.painter().rect_filled(
+        rect,
+        0.0,
+        egui::Color32::from_rgba_unmultiplied(50, 50, 180, 40),
+    );
+    ui.painter().text(
+        rect.left_top() + egui::vec2(4.0, 2.0),
+        egui::Align2::LEFT_TOP,
+        format!(
+            "DIAG mix_console_panel y=[{:.0}..{:.0}] h={:.0}",
+            rect.top(),
+            rect.bottom(),
+            rect.height()
+        ),
+        egui::FontId::monospace(10.0),
+        egui::Color32::from_rgb(200, 200, 255),
+    );
     console_deck(app, ui);
 }
 
 /// Render the lane stack. Pub so `app.rs` can drop it into its own
 /// `CentralPanel`.
 pub fn render_lanes(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
+    let rect = ui.max_rect();
+    ui.painter().rect_filled(
+        rect,
+        0.0,
+        egui::Color32::from_rgba_unmultiplied(50, 180, 50, 40),
+    );
+    ui.painter().text(
+        rect.left_top() + egui::vec2(4.0, 2.0),
+        egui::Align2::LEFT_TOP,
+        format!(
+            "DIAG CentralPanel(lanes) y=[{:.0}..{:.0}] h={:.0}",
+            rect.top(),
+            rect.bottom(),
+            rect.height()
+        ),
+        egui::FontId::monospace(10.0),
+        egui::Color32::from_rgb(200, 255, 200),
+    );
     lanes_view(app, ui);
 }
 
