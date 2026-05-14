@@ -110,6 +110,40 @@ pub fn render(p: &mut Profile, ui: &mut egui::Ui, show_identity: bool) -> bool {
     });
 
     ui.add_space(10.0);
+    ui.strong("Coherence Restoration");
+    ui.label(
+        egui::RichText::new(
+            "The AI-audio fingerprint fix (TBSS-FR-0005 phase 3). Real \
+             recordings have correlated frequency bands — one physical event \
+             drives them all. AI-generated audio has bands that wobble \
+             independently; the v0.4.35 'Band Coh.' telemetry measures it. \
+             This filter splits the signal into six bands and re-correlates \
+             their modulation envelopes toward the shared broadband envelope, \
+             without touching the spectral balance. Strength 0.3–0.6 is the \
+             useful range; past ~0.7 it can start to sound pumped.",
+        )
+        .italics()
+        .weak(),
+    );
+    changed |= row(ui, "Enabled", |ui| {
+        ui.checkbox(&mut p.coherence_restoration.enabled, "")
+            .on_hover_text("True bypass when off — the crossover bank isn't even built.")
+            .changed()
+    });
+    changed |= row(ui, "Strength", |ui| {
+        ui.add_enabled(
+            p.coherence_restoration.enabled,
+            egui::Slider::new(&mut p.coherence_restoration.strength, 0.0..=1.0).step_by(0.05),
+        )
+        .on_hover_text(
+            "0 = bands keep their own envelopes (no re-correlation).\n\
+             1 = every band fully adopts the broadband modulation shape.\n\
+             0.3–0.6 recommended.",
+        )
+        .changed()
+    });
+
+    ui.add_space(10.0);
     ui.strong("Parametric EQ (4 bands)");
     ui.label(
         egui::RichText::new("Bands with kind = Bypass are skipped.")

@@ -818,7 +818,11 @@ pub fn compute_cross_band_coherence(stft: &[Vec<f32>], sr: u32) -> f32 {
 
 // ───────────────────── STFT + spectral helpers ─────────────────────
 
-fn compute_stft(mono: &[f32]) -> Vec<Vec<f32>> {
+/// Hann-windowed magnitude STFT — `FFT_SIZE`-point, `FFT_HOP`-stride.
+/// `pub` so other modules (e.g. the dsp.rs Coherence Restoration
+/// tests) can build an STFT to feed into
+/// [`compute_cross_band_coherence`].
+pub fn compute_stft(mono: &[f32]) -> Vec<Vec<f32>> {
     use rustfft::{num_complex::Complex, FftPlanner};
     let mut planner = FftPlanner::<f32>::new();
     let fft = planner.plan_fft_forward(FFT_SIZE);

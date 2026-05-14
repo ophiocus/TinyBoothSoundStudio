@@ -8,6 +8,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); thi
 
 (Nothing yet — known issues all resolved as of v0.4.23.)
 
+## [0.4.37] — 2026-05-13
+
+### Added — Coherence Restoration filter (TBSS-FR-0005 phase 3)
+The payoff of the cross-band coherence arc: v0.4.35 shipped the *diagnostic* (measures the AI-audio fingerprint), v0.4.37 ships the *fix* — a real DSP filter that re-correlates the bands.
+
+- **New `CoherenceRestoration` config** on every `Profile` (`enabled: bool`, `strength: f32`). `#[serde(default)]` → existing manifests and `profiles.json` files are byte-unaffected; the field defaults to disabled.
+- **The DSP** (`CoherenceRestorer` in `dsp.rs`): splits the signal into 6 octave-ish bands via a Linkwitz-Riley 4th-order crossover bank (crossovers at 120 / 350 / 1k / 2.8k / 7k Hz), follows each band's amplitude envelope plus the broadband envelope, and applies a per-band time-varying gain that pulls every band's modulation toward the *shared broadband modulation shape* — while preserving each band's long-term average level, so the **spectral balance is untouched and only the modulation correlation changes**. `strength` ∈ [0,1] blends the correction gain toward unity; `enabled = false` is a true bypass (the crossover bank isn't even constructed).
+- **Chain position**: runs after the HPF / DC-remove cleanup, before the EQ — so the rest of the correction chain shapes an already-restored signal. Wired into both `FilterChain` (mono) and `FilterChainStereo` (two independent per-channel restorers, so a hard-panned element on L isn't modulated by R's content).
+- **UI**: a "Coherence Restoration" section in the Correction window (and the Admin profile editor) — Enabled checkbox + Strength slider, with hover-text and an inline explanation linking it to the v0.4.35 "Band Coh." telemetry chip.
+- **Allocation-free hot path**: the per-sample `process` uses a stack `[f32; 6]` scratch array; all state (20 biquads + envelope followers per channel) is preallocated at chain construction.
+
+### Proof
+6 new tests in `src/dsp.rs`, all passing. The headline one: a synthetic *realistic* AI-shaped signal (shared base modulation + per-band jitter — measures ~0.33 cross-band coherence, squarely in the real-Suno 0.2–0.5 range) run through the restorer at full strength comes out at ~0.52 — a **+0.19 gain that clears the 0.45 AI-fingerprint threshold**. Also tested: doesn't tank an already-coherent signal, helps even a pathologically-decorrelated one, strength scales monotonically, silence stays silent (no NaN from the envelope-division paths), and `build_coherence` gates correctly on `enabled` + non-trivial `strength`. The proof tests run the restorer end-to-end and re-measure with the actual v0.4.35 `compute_cross_band_coherence` analyzer. Total suite: 78 → **84 passing**.
+
+### Note on tuning
+The restorer's envelope followers (3 ms attack / 30 ms release) and gain smoothing (6 ms) are tuned to track the modulation tightly without audible band-pumping. Pushing harder would raise the measured coherence further but risks artefacts on real audio — the design deliberately stops where the effect is real but clean. Threshold calibration against actual Suno content is the natural follow-up.
+
 ## [0.4.36] — 2026-05-13
 
 ### Fixed
