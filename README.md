@@ -6,6 +6,12 @@
 
 Channel recorder, visualizer, and TinyBooth project exporter. Native Rust + egui desktop app for Windows — the bedroom-studio opposite of a corporate DAW.
 
+<p align="center">
+  <img src="assets/v0.4.37.png" alt="Mix tab in v0.4.37 — multitrack lanes, per-track Correction chains, LUFS metering, AI-fingerprint telemetry" width="100%"/>
+  <br/>
+  <em>Mix tab in v0.4.37 — multitrack lanes with synchronized playhead, per-track Correction chains (HPF / EQ / de-esser / gate / compressor / Coherence Restoration), live BS.1770-4 LUFS metering on the master, and cross-band coherence telemetry per stem (the green ≈ / pink AI pills).</em>
+</p>
+
 ## What it does
 
 **The fast path: turn a Suno bundle into a finished release.**
