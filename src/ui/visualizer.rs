@@ -33,6 +33,33 @@ use crate::app::TinyBoothApp;
 use eframe::egui;
 use std::f32::consts::TAU;
 
+// ── Live cross-band coherence HUD (Phase 4, v0.4.38) ────────────────
+//
+// The visualizer canvas overlays a live readout of the same AI-audio
+// fingerprint metric the telemetry analyzer computes per-track at save
+// (`telemetry::compute_cross_band_coherence`). Where the analyzer runs
+// once over the whole STFT, the HUD estimates it continuously: each
+// frame it bins the master-bus spectrum into log-spaced bands, keeps a
+// rolling history of per-band energy, and reports the mean pairwise
+// Pearson correlation across that history. Same number, live — so you
+// can hear *and* see a stem's coherence as it plays. Tiers reuse the
+// shared `telemetry::COH_*` thresholds so the verdict matches the
+// Mix-tab pill and Project-Health column.
+
+/// Number of log-spaced bands the live-coherence HUD tracks.
+const COH_VIZ_BANDS: usize = 6;
+/// Upper edges (Hz) of the first `COH_VIZ_BANDS - 1` bands; the final
+/// band runs from the last edge up to Nyquist. Roughly octave-spaced,
+/// mirroring the analyzer's band layout.
+const COH_VIZ_EDGES: [f32; COH_VIZ_BANDS - 1] = [150.0, 400.0, 1000.0, 2500.0, 6000.0];
+/// Frames of band-energy history (~3 s at the 30 fps canvas cadence)
+/// feeding the live pairwise-correlation estimate.
+const COH_VIZ_HISTORY: usize = 90;
+/// Minimum history before we trust the estimate enough to display.
+const COH_VIZ_MIN_FRAMES: usize = 16;
+/// EMA smoothing applied to the displayed value so it doesn't jitter.
+const COH_VIZ_SMOOTH: f32 = 0.1;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VizMode {
     Lissajous,
@@ -248,6 +275,17 @@ pub struct VisualizerState {
     /// Total time the canvas has been collecting watermark data,
     /// for normalising the colour scale.
     onion_total_seconds: f32,
+
+    // Live coherence HUD (Phase 4, v0.4.38)
+    /// Toggle for the canvas coherence overlay.
+    pub coherence_hud: bool,
+    /// Rolling per-band energy history feeding the live estimate.
+    coh_history: std::collections::VecDeque<[f32; COH_VIZ_BANDS]>,
+    /// EMA-smoothed live coherence value shown in the HUD.
+    coh_live: f32,
+    /// False until the EMA has been seeded with its first real reading,
+    /// so the HUD doesn't flash "AI" from a cold 0.0 start.
+    coh_primed: bool,
 }
 
 impl Default for VisualizerState {
@@ -266,6 +304,10 @@ impl Default for VisualizerState {
             onion_smoothed: (0.5, 0.0),
             onion_last_ghost_time: 0.0,
             onion_total_seconds: 0.0,
+            coherence_hud: true,
+            coh_history: std::collections::VecDeque::with_capacity(COH_VIZ_HISTORY),
+            coh_live: 0.0,
+            coh_primed: false,
         }
     }
 }
@@ -359,6 +401,15 @@ fn canvas(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
 
     let now = ui.ctx().input(|i| i.time);
 
+    // Live coherence estimate updates before the mode draws so the HUD
+    // (rendered last, on top) reflects the current frame.
+    let sr = app
+        .player
+        .as_ref()
+        .map(|p| p.state.sample_rate)
+        .unwrap_or(0);
+    update_live_coherence(&mut app.visualizer, &samples, sr);
+
     match app.visualizer.mode {
         VizMode::Lissajous => {
             draw_lissajous(&painter, rect, &samples, &app.visualizer.params.lissajous)
@@ -368,6 +419,127 @@ fn canvas(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
         VizMode::Chladni => draw_chladni(&painter, rect, &samples, &mut app.visualizer),
         VizMode::OnionSkin => draw_onion_skin(&painter, rect, &samples, &mut app.visualizer, now),
     }
+
+    if app.visualizer.coherence_hud && app.visualizer.coh_primed {
+        draw_coherence_hud(&painter, rect, app.visualizer.coh_live);
+    }
+}
+
+/// Update the rolling live cross-band coherence estimate from the
+/// master-bus sample tap. See the `COH_VIZ_*` constants and the module
+/// HUD note for the rationale; this mirrors the analyzer's pairwise-
+/// Pearson approach over a short rolling window instead of the full
+/// STFT.
+fn update_live_coherence(state: &mut VisualizerState, samples: &[(f32, f32)], sr: u32) {
+    if sr == 0 || samples.len() < 256 {
+        return;
+    }
+    // Mono sum → spectrum.
+    let mono: Vec<f32> = samples.iter().map(|(l, r)| 0.5 * (l + r)).collect();
+    let spec = crate::analysis::spectrum(&mono);
+    if spec.is_empty() {
+        return;
+    }
+    // `spectrum` returns the first half of the FFT (0..Nyquist), so the
+    // Hz of bin `i` is `i * Nyquist / spec.len()`.
+    let hz_per_bin = (sr as f32 * 0.5) / spec.len() as f32;
+    let mut energy = [0.0f32; COH_VIZ_BANDS];
+    for (i, mag) in spec.iter().enumerate() {
+        let hz = i as f32 * hz_per_bin;
+        let band = COH_VIZ_EDGES
+            .iter()
+            .position(|&e| hz < e)
+            .unwrap_or(COH_VIZ_BANDS - 1);
+        energy[band] += *mag;
+    }
+    state.coh_history.push_back(energy);
+    while state.coh_history.len() > COH_VIZ_HISTORY {
+        state.coh_history.pop_front();
+    }
+    let n = state.coh_history.len();
+    if n < COH_VIZ_MIN_FRAMES {
+        return;
+    }
+
+    // Per-band means.
+    let mut means = [0.0f32; COH_VIZ_BANDS];
+    for row in &state.coh_history {
+        for b in 0..COH_VIZ_BANDS {
+            means[b] += row[b];
+        }
+    }
+    for m in &mut means {
+        *m /= n as f32;
+    }
+    // Variances + pairwise covariances over the window.
+    let mut var = [0.0f32; COH_VIZ_BANDS];
+    let mut cov = [[0.0f32; COH_VIZ_BANDS]; COH_VIZ_BANDS];
+    for row in &state.coh_history {
+        let mut d = [0.0f32; COH_VIZ_BANDS];
+        for b in 0..COH_VIZ_BANDS {
+            d[b] = row[b] - means[b];
+            var[b] += d[b] * d[b];
+        }
+        for a in 0..COH_VIZ_BANDS {
+            for b in (a + 1)..COH_VIZ_BANDS {
+                cov[a][b] += d[a] * d[b];
+            }
+        }
+    }
+    // Mean of the 15 pairwise Pearson correlations.
+    let mut sum_corr = 0.0f32;
+    let mut pairs = 0u32;
+    for a in 0..COH_VIZ_BANDS {
+        for b in (a + 1)..COH_VIZ_BANDS {
+            let denom = (var[a] * var[b]).sqrt();
+            if denom > 1e-9 {
+                sum_corr += cov[a][b] / denom;
+                pairs += 1;
+            }
+        }
+    }
+    if pairs == 0 {
+        return; // every band flat this window — keep the last reading.
+    }
+    let inst = (sum_corr / pairs as f32).clamp(0.0, 1.0);
+    if state.coh_primed {
+        state.coh_live += COH_VIZ_SMOOTH * (inst - state.coh_live);
+    } else {
+        state.coh_live = inst;
+        state.coh_primed = true;
+    }
+}
+
+/// Draw the live coherence badge in the top-right corner of the canvas.
+fn draw_coherence_hud(painter: &egui::Painter, rect: egui::Rect, coh: f32) {
+    use crate::telemetry::{COH_AI_MAX, COH_CLEAN_MIN};
+    let (label, color) = if coh < COH_AI_MAX {
+        (
+            format!("Band Coh {coh:.2}  AI"),
+            egui::Color32::from_rgb(230, 150, 230),
+        )
+    } else if coh >= COH_CLEAN_MIN {
+        (
+            format!("Band Coh {coh:.2}  ≈"),
+            egui::Color32::from_rgb(150, 230, 190),
+        )
+    } else {
+        (
+            format!("Band Coh {coh:.2}"),
+            egui::Color32::from_gray(200),
+        )
+    };
+    let galley = painter.layout_no_wrap(label, egui::FontId::monospace(13.0), color);
+    let pad = egui::vec2(8.0, 4.0);
+    let size = galley.size() + pad * 2.0;
+    let top_right = egui::pos2(rect.max.x - 12.0, rect.min.y + 12.0);
+    let chip = egui::Rect::from_min_size(egui::pos2(top_right.x - size.x, top_right.y), size);
+    painter.rect_filled(
+        chip,
+        4.0,
+        egui::Color32::from_rgba_unmultiplied(0, 0, 0, 170),
+    );
+    painter.galley(chip.min + pad, galley, color);
 }
 
 // ───────────────────── config panel ─────────────────────
@@ -381,6 +553,19 @@ fn config_panel(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
                 .weak(),
         );
         ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(6.0);
+
+        // Global overlay (applies to every mode).
+        ui.checkbox(&mut app.visualizer.coherence_hud, "Live coherence HUD")
+            .on_hover_text(
+                "Overlay a live cross-band coherence readout — the AI-audio \
+                 fingerprint metric — in the top-right of the canvas. Low \
+                 (pink AI) = bands wobble independently; high (green ≈) = \
+                 bands move together like a real recording. Same thresholds \
+                 as the Mix-tab pill.",
+            );
+        ui.add_space(6.0);
         ui.separator();
         ui.add_space(6.0);
 

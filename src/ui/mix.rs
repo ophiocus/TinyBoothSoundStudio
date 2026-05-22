@@ -65,10 +65,6 @@ const CONSOLE_H_MAX: f32 = 340.0;
 // height (egui's panel layout is dynamic; the lanes/console below
 // absorb any wobble through their own panel's available_height).
 const METER_W: f32 = 6.0;
-/// Cap on track-name characters before we ellipsise. Tuned so Latin-script
-/// names like "Backing Vocals" / "Electric Guitar" / "Synth / Lead" fit
-/// inside `STRIP_W` without truncation at 1.0× zoom.
-const STRIP_NAME_CHARS: usize = 14;
 /// Strip-name font size in pt at 1.0× zoom. Egui's `set_zoom_factor`
 /// scales these proportionally — bump zoom from the View menu.
 const FONT_STRIP_NAME: f32 = 13.0;
@@ -380,6 +376,7 @@ fn lanes_view(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
     let pos = player.state.position_secs();
 
     let mut requested_correction: Option<usize> = None;
+    let mut requested_apply_coherence: Option<usize> = None;
     let mut requested_profile_change: Option<(usize, crate::telemetry::TelemetryProfile)> = None;
 
     // v0.4.29 — explicit single-axis scroll. `auto_shrink([false; 2])`
@@ -436,7 +433,15 @@ fn lanes_view(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
                                     ui.horizontal(|ui| {
                                         ui.label(egui::RichText::new(&track.name).strong());
                                         if let Some(t) = app.project.tracks.get(idx) {
-                                            telemetry_chips(ui, t);
+                                            match telemetry_chips(ui, t) {
+                                                ChipAction::ApplyCoherence => {
+                                                    requested_apply_coherence = Some(idx);
+                                                }
+                                                ChipAction::OpenCorrection => {
+                                                    requested_correction = Some(idx);
+                                                }
+                                                ChipAction::None => {}
+                                            }
                                         }
                                     });
 
@@ -604,6 +609,12 @@ fn lanes_view(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
                 ui.add_space(ROW_GAP);
             }
         });
+
+    // One-click "AI" pill → apply Coherence Restoration to the track
+    // (deferred out of the lane loop so the `player` borrow drops).
+    if let Some(i) = requested_apply_coherence {
+        apply_coherence_restoration(app, i);
+    }
 
     if let Some(i) = requested_correction {
         if app.project.tracks[i].correction.is_none() {
@@ -828,7 +839,7 @@ fn strip(app: &mut TinyBoothApp, ui: &mut egui::Ui, idx: usize, available_h: f32
                 draw_rotated_label(
                     ui,
                     label_rect,
-                    &ellipsize(&track.name, STRIP_NAME_CHARS),
+                    &track.name,
                     FONT_STRIP_NAME,
                     Color32::from_rgb(220, 230, 220),
                 );
@@ -917,8 +928,34 @@ fn strip(app: &mut TinyBoothApp, ui: &mut egui::Ui, idx: usize, available_h: f32
 /// of vertical space at the top of every card.
 fn draw_rotated_label(ui: &mut egui::Ui, rect: Rect, text: &str, size_pt: f32, color: Color32) {
     let painter = ui.painter_at(rect);
-    let galley =
-        painter.layout_no_wrap(text.to_string(), egui::FontId::proportional(size_pt), color);
+    let font = egui::FontId::proportional(size_pt);
+
+    // The label is rotated 90° CW, so the text's horizontal length
+    // (galley.size().x) maps onto the *vertical* extent of `rect`. Fit
+    // the name to the available rail height, trimming with an ellipsis
+    // only when it genuinely overflows. The gutter is the full
+    // fader-rail height (~190–260 px), so names like "Electric Guitar"
+    // render in full — this replaces the old fixed 14-char cap that
+    // truncated names that actually fit the rail.
+    let avail = (rect.height() - 6.0).max(0.0);
+    let mut galley = painter.layout_no_wrap(text.to_string(), font.clone(), color);
+    if galley.size().x > avail {
+        // Trim trailing chars + ellipsis until it fits (operates on
+        // `chars()` so multi-byte names won't split a code point).
+        let chars: Vec<char> = text.chars().collect();
+        let mut keep = chars.len();
+        while keep > 1 {
+            keep -= 1;
+            let candidate: String = chars[..keep].iter().collect::<String>() + "…";
+            let g = painter.layout_no_wrap(candidate, font.clone(), color);
+            let fits = g.size().x <= avail;
+            galley = g;
+            if fits {
+                break;
+            }
+        }
+    }
+
     let text_size = galley.size();
     // For TextShape::angle = +π/2 (CW rotation around `pos`):
     //   the unrotated rect [0,w]×[0,h] anchored at pos becomes
@@ -1051,21 +1088,6 @@ fn draw_meter(ui: &mut egui::Ui, peak: f32, height: f32) {
     painter.rect_filled(filled, 1.0, color);
 }
 
-/// Truncate `name` to at most `cap` chars, appending `…` if any chars
-/// were dropped. Operates on `chars()` so multi-byte UTF-8 names (accents,
-/// emoji) won't panic the way `&name[..n]` byte-slicing would.
-fn ellipsize(name: &str, cap: usize) -> String {
-    let count = name.chars().count();
-    if count <= cap {
-        name.to_owned()
-    } else {
-        // cap counts the visible glyphs including the ellipsis itself.
-        let keep = cap.saturating_sub(1);
-        let head: String = name.chars().take(keep).collect();
-        format!("{head}…")
-    }
-}
-
 // ───────────────────── automation recorder hooks ─────────────────────
 
 fn capture_automation(app: &mut TinyBoothApp) {
@@ -1173,10 +1195,30 @@ pub fn fmt_time(secs: f32) -> String {
 // Single line via `ui.horizontal` (not `_wrapped`) → every row has
 // the same height regardless of telemetry density. Headers are no
 // longer uneven between drum stems and vocal stems.
-fn telemetry_chips(ui: &mut egui::Ui, track: &crate::project::Track) {
+/// Result of an interaction with the Mix-tab telemetry pills. The lane
+/// loop borrows `app` immutably while drawing, so chip clicks are
+/// returned here and applied *after* the loop — the same deferral
+/// pattern the "Cor" button uses via `requested_correction`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ChipAction {
+    None,
+    /// User clicked the pink "AI" pill — apply Coherence Restoration.
+    ApplyCoherence,
+    /// User clicked the "AI ✓" badge — open the correction editor.
+    OpenCorrection,
+}
+
+fn telemetry_chips(ui: &mut egui::Ui, track: &crate::project::Track) -> ChipAction {
     let Some(tel) = track.telemetry.as_ref() else {
-        return;
+        return ChipAction::None;
     };
+    // Whether this track already carries a Coherence-Restoration chain —
+    // drives the "AI" (clickable, apply) vs "AI ✓" (applied) pill state.
+    let restoration_applied = track
+        .correction
+        .as_ref()
+        .is_some_and(|p| p.coherence_restoration.enabled);
+    let mut action = ChipAction::None;
     ui.horizontal(|ui| {
         // ── Instrument summary chip ───────────────────────────
         // Drum stem → "🥁 N" with full per-class tooltip.
@@ -1259,52 +1301,96 @@ fn telemetry_chips(ui: &mut egui::Ui, track: &crate::project::Track) {
             }
         }
 
-        // ── AI fingerprint chip (v0.4.35) ─────────────────────
+        // ── AI fingerprint chip (v0.4.35; clickable v0.4.38) ──
         // Cross-band coherence measures how synchronously the
         // octave-spaced energy envelopes move. Natural recordings
-        // score 0.6–0.9 (every band shares the same physical
-        // modulation); AI audio scores 0.2–0.5 (each band wobbles
-        // semi-independently). When the score is suspiciously low
-        // we surface a "🤖" badge; when it's high we surface a
-        // neutral "≈" badge for the curious; in between we render
-        // nothing to avoid clutter.
+        // score high (every band shares the same physical modulation);
+        // AI audio scores low (each band wobbles semi-independently).
+        //
+        // Below COH_AI_MAX we surface a clickable pink "AI" pill — one
+        // click applies the Coherence Restoration filter to this track
+        // (Tier A). Once applied, the pill becomes an amber "AI ✓"
+        // badge — click that to open the correction editor and tune the
+        // restoration strength. Above COH_CLEAN_MIN we show a neutral
+        // "≈"; in the ambiguous middle we render nothing to avoid
+        // clutter. Thresholds live in `telemetry` so this matches the
+        // Project-Health column exactly.
+        use crate::telemetry::{COH_AI_MAX, COH_CLEAN_MIN, COH_PRESENT_MIN};
         let c = tel.cross_band_coherence;
-        // Skip the chip on tracks the analyzer left at exactly 0
-        // (empty_telemetry sentinel, "Off" profile, etc.). A real
-        // analysed track should land in [0.1, 1.0] for any audio
-        // with content.
-        if c > 0.05 {
-            if c < 0.45 {
-                // v0.4.36 — was 🤖 (U+1F916), which renders as tofu (□)
-                // in egui's default font because that code point isn't
-                // covered. Switched to a plain text "AI" tag — same
-                // colour, same hover, guaranteed to render. Could
-                // revisit later by bundling a Noto-Emoji subset, but
-                // text is the bulletproof option.
-                ui.label(
-                    egui::RichText::new(" AI ")
-                        .size(10.0)
-                        .strong()
-                        .monospace()
-                        .background_color(Color32::from_rgb(80, 30, 80))
-                        .color(Color32::from_rgb(255, 200, 255)),
-                )
-                .on_hover_text(format!(
-                    "Cross-band coherence: {c:.2}\n\
-                     \n\
-                     Low score (< 0.45) is the AI-audio fingerprint —\n\
-                     octave-spaced energy bands wobble out of phase\n\
-                     with each other, where natural recordings score\n\
-                     0.6–0.9 because the bands share a common\n\
-                     modulation envelope (one string vibrating drives\n\
-                     all of them together).\n\
-                     \n\
-                     Diagnostic only in v0.4.35. The planned\n\
-                     phase-3 'Coherence Restoration' filter will\n\
-                     re-correlate the bands to push this stem closer\n\
-                     to natural."
-                ));
-            } else if c >= 0.65 {
+        // Skip the chip on tracks the analyzer left at the sentinel 0
+        // (empty_telemetry, "Off" profile, etc.). A real analysed track
+        // lands in [0.1, 1.0] for any audio with content.
+        if c > COH_PRESENT_MIN {
+            if c < COH_AI_MAX {
+                if restoration_applied {
+                    // Restoration already on — status badge, click opens
+                    // the editor to tune it. Amber, not pink, so the
+                    // user can see at a glance which flagged stems are
+                    // already being fixed.
+                    let resp = ui
+                        .add(
+                            egui::Label::new(
+                                egui::RichText::new(" AI ✓ ")
+                                    .size(10.0)
+                                    .strong()
+                                    .monospace()
+                                    .background_color(Color32::from_rgb(70, 60, 25))
+                                    .color(Color32::from_rgb(240, 220, 150)),
+                            )
+                            .sense(egui::Sense::click()),
+                        )
+                        .on_hover_text(format!(
+                            "Cross-band coherence: {c:.2} — flagged AI by the\n\
+                             original measurement.\n\
+                             \n\
+                             Coherence Restoration is applied to this track;\n\
+                             playback and export re-correlate the octave\n\
+                             bands toward a shared modulation envelope.\n\
+                             \n\
+                             ▶ Click to open the correction editor and tune\n\
+                             the restoration strength. (The score above is\n\
+                             the raw source measurement — it won't change.)"
+                        ));
+                    if resp.clicked() {
+                        action = ChipAction::OpenCorrection;
+                    }
+                } else {
+                    // v0.4.36 — was 🤖 (U+1F916), which renders as tofu
+                    // (□) in egui's default font. Plain "AI" text is
+                    // bulletproof. v0.4.38 made it clickable.
+                    let resp = ui
+                        .add(
+                            egui::Label::new(
+                                egui::RichText::new(" AI ")
+                                    .size(10.0)
+                                    .strong()
+                                    .monospace()
+                                    .background_color(Color32::from_rgb(80, 30, 80))
+                                    .color(Color32::from_rgb(255, 200, 255)),
+                            )
+                            .sense(egui::Sense::click()),
+                        )
+                        .on_hover_text(format!(
+                            "Cross-band coherence: {c:.2}\n\
+                             \n\
+                             Low score (< {COH_AI_MAX:.2}) is the AI-audio\n\
+                             fingerprint — octave-spaced energy bands wobble\n\
+                             out of phase with each other, where natural\n\
+                             recordings score 0.6–0.9 because the bands\n\
+                             share a common modulation envelope (one string\n\
+                             vibrating drives all of them together).\n\
+                             \n\
+                             ▶ Click to apply Coherence Restoration to this\n\
+                             track — it re-correlates the bands toward a\n\
+                             shared envelope, pushing the stem closer to\n\
+                             natural. Seeds a correction chain from\n\
+                             Suno-Clean if the track has none."
+                        ));
+                    if resp.clicked() {
+                        action = ChipAction::ApplyCoherence;
+                    }
+                }
+            } else if c >= COH_CLEAN_MIN {
                 ui.label(
                     egui::RichText::new("≈")
                         .size(11.0)
@@ -1313,8 +1399,8 @@ fn telemetry_chips(ui: &mut egui::Ui, track: &crate::project::Track) {
                 .on_hover_text(format!(
                     "Cross-band coherence: {c:.2}\n\
                      \n\
-                     High score (≥ 0.65). The octave-spaced energy\n\
-                     bands modulate together — the signature of a\n\
+                     High score (≥ {COH_CLEAN_MIN:.2}). The octave-spaced\n\
+                     energy bands modulate together — the signature of a\n\
                      real physical instrument or natural recording.",
                 ));
             }
@@ -1374,6 +1460,43 @@ fn telemetry_chips(ui: &mut egui::Ui, track: &crate::project::Track) {
             tel.sustain_ratio * 100.0,
         ));
     });
+    action
+}
+
+/// Ensure track `i` carries a correction chain with Coherence
+/// Restoration enabled — the one-click action behind the Mix-tab "AI"
+/// pill (Tier A). Seeds a fresh chain from the `Suno-Clean` preset (or
+/// the first available profile) when the track has none, forces
+/// `coherence_restoration.enabled`, gives it a sensible default
+/// strength if it was zero, marks the project dirty, and pushes the
+/// snapshot to the player so the next playback cycle hears it.
+fn apply_coherence_restoration(app: &mut TinyBoothApp, i: usize) {
+    if i >= app.project.tracks.len() {
+        return;
+    }
+    if app.project.tracks[i].correction.is_none() {
+        let seed = app
+            .profiles
+            .iter()
+            .find(|p| p.name == "Suno-Clean")
+            .or_else(|| app.profiles.first())
+            .cloned();
+        app.project.tracks[i].correction = seed;
+    }
+    if let Some(p) = app.project.tracks[i].correction.as_mut() {
+        p.coherence_restoration.enabled = true;
+        if p.coherence_restoration.strength <= 0.0 {
+            // Mid of the recommended 0.3–0.6 useful range.
+            p.coherence_restoration.strength = 0.5;
+        }
+    }
+    app.project_dirty = true;
+    let snapshot = app.project.tracks[i].correction.clone();
+    if let Some(player) = app.player.as_ref() {
+        if let Some(t) = player.state.tracks.get(i) {
+            t.set_correction(snapshot);
+        }
+    }
 }
 
 /// Short label for `ResolvedProfile`, used in the profile-dropdown

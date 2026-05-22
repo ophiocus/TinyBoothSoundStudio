@@ -49,6 +49,41 @@ use std::path::Path;
 ///                  recordings ≈ 0.6–0.9, AI-generated ≈ 0.2–0.5.
 pub const ANALYZER_VERSION: u32 = 4;
 
+// ── Cross-band-coherence classification thresholds ──────────────────
+//
+// The single source of truth for the three display tiers used by the
+// Mix-tab pill (`ui/mix.rs`) and the Project-Health column
+// (`ui/health.rs`). Previously these magic numbers were duplicated as
+// inline literals in both UI sites; centralising them here keeps the
+// verdict consistent and makes the calibration auditable in one place.
+//
+// Calibration (v0.4.38). We do not yet have a labelled corpus of real-
+// vs-Suno stems, so the boundaries are anchored to (a) the documented
+// natural/AI ranges and (b) the DSP test-signal evidence we *do* have:
+//
+//   • Natural recordings score ~0.6–0.9 — every octave band shares one
+//     physical modulation envelope, so the bands move together.
+//   • AI-generated audio scores ~0.2–0.5 — each band is synthesised
+//     semi-independently and wobbles out of phase with the others.
+//   • Our `render_signal` AI-shaped test fixture lands at ~0.33 raw and
+//     rises to ~0.52 after Coherence Restoration; a fully-correlated
+//     control signal stays > 0.8 (see `dsp.rs` coherence tests).
+//
+// `COH_AI_MAX` sits at the upper edge of the AI band; `COH_CLEAN_MIN`
+// sits at the lower edge of the natural band; the gap in between is the
+// honest "no verdict" zone where we render the score without a label.
+// Note a restored stem (~0.52) lands in that ambiguous middle by
+// design — restoration nudges it out of the AI band without faking a
+// natural score.
+//
+/// Score strictly below this is the AI-fingerprint tier (pink "AI" pill).
+pub const COH_AI_MAX: f32 = 0.45;
+/// Score at or above this is the natural-recording tier (green "≈" pill).
+pub const COH_CLEAN_MIN: f32 = 0.65;
+/// Score at or below this is the "not analysed" sentinel (Off profile,
+/// `empty_telemetry`, silence) — render a dash, never a verdict.
+pub const COH_PRESENT_MIN: f32 = 0.05;
+
 /// FFT window size for spectral analysis. Power of two for rustfft.
 const FFT_SIZE: usize = 2048;
 /// Hop size between FFT windows. 25% hop = 75% overlap = smooth

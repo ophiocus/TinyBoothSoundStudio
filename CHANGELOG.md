@@ -8,6 +8,35 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); thi
 
 (Nothing yet — known issues all resolved as of v0.4.23.)
 
+## [0.4.38] — 2026-05-22
+
+A bundle release: one Mix-tab fix, a build-speed tweak, and three steps that turn the cross-band-coherence work from v0.4.35–37 into something you *act on* rather than just read.
+
+### Added — clickable "Apply this" correction chips (Tier A)
+The Mix-tab "AI" pill is now a button, not just a verdict.
+- **Click the pink `AI` pill** on any flagged stem → one-click apply Coherence Restoration to that track. Seeds a correction chain from the `Suno-Clean` preset if the track has none, forces `coherence_restoration.enabled`, gives it a sensible default strength (0.5, mid of the recommended 0.3–0.6 range), marks the project dirty, and pushes the snapshot to the player so the next playback cycle hears it.
+- **Once applied, the pill becomes an amber `AI ✓` badge** — so you can see at a glance which flagged stems are already being fixed. Click *that* to open the correction editor and tune the strength. The badge's tooltip is explicit that the score shown is the raw *source* measurement and won't change (telemetry runs on the source, restoration runs at playback/export).
+- Implemented as a deferred action (`ChipAction` returned from `telemetry_chips`, handled after the lane loop) so the immutable `player` borrow held while drawing the lanes drops first — the same pattern the `Cor` button already uses.
+
+### Added — live coherence HUD in the visualizer (TBSS-FR-0005 phase 4, first slice)
+The 🌀 Visualizer now overlays a **live** cross-band coherence readout in the top-right of the canvas — the same AI-audio fingerprint metric the analyzer computes per-track, but estimated continuously as you listen.
+- Each frame it bins the master-bus spectrum into 6 log-spaced bands (edges 150 / 400 / 1k / 2.5k / 6k Hz → Nyquist), keeps a ~3 s rolling history of per-band energy, and reports the mean of the 15 pairwise Pearson correlations — EMA-smoothed so it doesn't jitter. Cheap: ~1.6k multiply-adds per frame at 30 fps.
+- Tiers and colours reuse the shared `telemetry::COH_*` thresholds, so the HUD's verdict matches the Mix-tab pill and Project-Health column exactly. Toggle it off with **"Live coherence HUD"** in the visualizer config panel.
+- Works across every mode (Lissajous / Mandala / Lorenz / Chladni / Onion Skin) — it's a global overlay, not a new mode.
+
+### Changed — coherence thresholds centralised + calibration documented
+- The AI / clean tier boundaries (`< 0.45` AI, `≥ 0.65` natural, `≤ 0.05` not-analysed) were duplicated as magic numbers in two UI sites. They're now named constants — `COH_AI_MAX`, `COH_CLEAN_MIN`, `COH_PRESENT_MIN` — in `telemetry.rs`, the single source of truth referenced by the Mix-tab pill, the Project-Health column, and the new visualizer HUD.
+- The constants carry the **calibration rationale** in-source: anchored to the documented natural (0.6–0.9) and AI (0.2–0.5) ranges and to the DSP test-signal evidence (AI-shaped fixture ~0.33 raw → ~0.52 after restoration; correlated control > 0.8). A restored stem landing in the ambiguous `[0.45, 0.65)` middle is *by design* — restoration nudges it out of the AI band without faking a natural score. Honest caveat noted: values stay heuristic until calibrated against a labelled real-vs-Suno corpus.
+
+### Fixed — vertical strip labels no longer truncate with "…"
+The console-strip track-name labels (rotated 90°, reading top-to-bottom) were clipped by a fixed 14-character cap left over from when the label was horizontal — so "Electric Guitar" (15 chars) showed as "Electric Guit…" despite the rotated gutter having ~190–260 px of room. `draw_rotated_label` now **fits the name to the actual rail height**, ellipsising only on genuine overflow (operating on `chars()` so multi-byte names never split a code point). Removed the now-dead `STRIP_NAME_CHARS` constant and `ellipsize` helper.
+
+### Build
+- **`lto = "thin"`** (was `lto = true`) in the release profile. Most of the cross-crate inlining win of fat LTO at a fraction of the link time; runtime perf is within noise for this UI + block-DSP workload, and CI link time drops noticeably.
+
+### Proof
+Full suite still **84 passing** (no behavioural regressions; the coherence DSP/telemetry tests are unchanged and green). `cargo clippy` clean.
+
 ## [0.4.37] — 2026-05-13
 
 ### Added — Coherence Restoration filter (TBSS-FR-0005 phase 3)

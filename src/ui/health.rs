@@ -209,22 +209,28 @@ pub fn show(app: &mut TinyBoothApp, ctx: &egui::Context) {
                                             }
                                         });
                                         // Cross-band coherence column.
+                                        // Tiers from the shared thresholds in
+                                        // `telemetry` so the verdict matches
+                                        // the Mix-tab pill exactly.
+                                        use crate::telemetry::{
+                                            COH_AI_MAX, COH_CLEAN_MIN, COH_PRESENT_MIN,
+                                        };
                                         let c = tel.cross_band_coherence;
-                                        let coh_color = if c < 0.45 {
+                                        let coh_color = if c < COH_AI_MAX {
                                             egui::Color32::from_rgb(220, 140, 220)
-                                        } else if c >= 0.65 {
+                                        } else if c >= COH_CLEAN_MIN {
                                             egui::Color32::from_rgb(140, 220, 180)
                                         } else {
                                             egui::Color32::from_gray(180)
                                         };
-                                        let coh_label = if c <= 0.05 {
+                                        let coh_label = if c <= COH_PRESENT_MIN {
                                             "—".to_string()
-                                        } else if c < 0.45 {
+                                        } else if c < COH_AI_MAX {
                                             // v0.4.36 — 🤖 emoji renders as
                                             // tofu in egui's default font;
                                             // use plain "AI" suffix instead.
                                             format!("{c:.2}  AI")
-                                        } else if c >= 0.65 {
+                                        } else if c >= COH_CLEAN_MIN {
                                             format!("{c:.2}  ≈")
                                         } else {
                                             format!("{c:.2}")

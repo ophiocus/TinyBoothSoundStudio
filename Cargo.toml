@@ -1,6 +1,6 @@
 [package]
 name = "tinybooth-sound-studio"
-version = "0.4.37"
+version = "0.4.38"
 edition = "2021"
 authors = ["ophiocus <csantanad@gmail.com>"]
 description = "Channel recorder, visualizer, and TinyBooth project exporter"
@@ -55,6 +55,9 @@ eula         = false
 
 [profile.release]
 opt-level = 3
-lto = true
+# Thin LTO: most of the cross-crate inlining win of fat LTO at a
+# fraction of the link time. Runtime perf is within noise for this
+# workload (UI + block-based DSP), and CI link time drops noticeably.
+lto = "thin"
 codegen-units = 1
 strip = true
