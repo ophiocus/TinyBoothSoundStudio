@@ -7,7 +7,10 @@ Design proposals for upcoming TinyBooth Sound Studio features. Each RFC follows 
 | **TBSS-FR-0001** | [Suno cleanup mode](TBSS-FR-0001-suno-cleanup.md) | ✅ Implemented (DSP) | v0.1.6 | Parametric EQ + de-esser added to FilterChain(Stereo); Suno-Clean preset shipped. Mix-tab path delivered by FR-0002. |
 | **TBSS-FR-0002** | [Multitrack remastering](TBSS-FR-0002-multitrack-remastering.md) | ✅ Implemented | v0.2.0 | Mix tab + cpal output player + per-track corrections + A/B bypass + correction-aware export. |
 | **TBSS-FR-0003** | [Import normalization](TBSS-FR-0003-import-normalization.md) | 📝 Proposed | — | LUFS-balance imported stems on ingest; non-destructive (gain only). |
-| **TBSS-FR-0004** | [Console mixer + volume automation](TBSS-FR-0004-console-mixer-automation.md) | 📝 Proposed | — | Hardware-style fader strips on the Mix tab + timestamped fader-movement automation per studio-console convention. |
+| **TBSS-FR-0004** | [Console mixer + volume automation](TBSS-FR-0004-console-mixer-automation.md) | ✅ Implemented | v0.4.x | Hardware-style fader strips on the Mix tab + recordable Catmull-Rom fader automation. |
+| **TBSS-FR-0005** | [Track telemetry](TBSS-FR-0005-track-telemetry.md) | ✅ Implemented | v0.4.13–0.4.37 | Pure-DSP analysis (onsets, YIN pitch, key, drum classes, cross-band coherence) + Coherence Restoration filter. |
+| **TBSS-FR-0006** | [The machine-learning boundary](TBSS-FR-0006-ml-boundary.md) | ✅ Accepted (policy) | — | Standing policy: no ML in the core analyzer; ML only as a quarantined opt-in sidecar. |
+| **TBSS-FR-0007** | [The `.tib` container — single-file projects with stem revision history](TBSS-FR-0007-tib-container-revisions.md) | 📝 Proposed | — | One ZIP-based `.tib` per project; `stems/<stem>/<track>/rev-NNN.wav` revision history (destructive + non-destructive); append-on-save + compaction; folder-format migration. |
 
 ## Convention
 
