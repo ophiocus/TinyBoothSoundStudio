@@ -80,10 +80,12 @@ project.tib                         (a ZIP)
 ├── stems/
 │   └── <stem_named>/               a stem = a named GROUP
 │       └── <Track Name>/           a track in the stem — loads into the Mix tab
-│           ├── rev-001.wav         STORE; the track's revision history
-│           └── rev-002.wav         a destructive edit appended this
+│           ├── orig.wav            pristine import — immutable, never pruned
+│           ├── latest.wav          the CURRENT audio — player/seek always reads THIS
+│           ├── rev-001.wav         destructive snapshot (binary), FIFO depth 5
+│           └── rev-002.wav
 ├── mixdown/
-│   └── <name>/rev-001.wav          bundled Suno mixdown reference (same rev scheme)
+│   └── <name>/{orig,latest,rev-NNN}.wav   bundled Suno mixdown (same scheme)
 ├── console/                        (optional) bulky gesture recordings if moved
 │                                   out of the manifest
 └── <anything else>                 dirt: reader ignores, writer preserves
@@ -98,33 +100,59 @@ Three levels under `stems/`: **stem (group) → track → revisions.**
   stems will have exactly one track; the level exists so a stem can
   hold alternates (take A / take B / a re-import) without flattening
   them into unrelated peers.
-- A **revision** (`…/<Track Name>/rev-NNN.wav`) is one version of that
-  track's audio. The list of revisions is the track's history.
+
+Each track folder holds three kinds of WAV (the §3 scheme):
+
+- **`orig.wav`** — the pristine import. **Immutable, never pruned.** The
+  ultimate "restore to factory" source.
+- **`latest.wav`** — the current working audio. **The player and every
+  seek operation read this one, stable filename** — no "which revision
+  is current?" lookup, ever. Overwritten in place whenever the current
+  audio changes.
+- **`rev-NNN.wav`** — committed destructive snapshots, the rollback
+  history. A bounded FIFO (depth 5; §6).
 
 Folder and file names are **human-readable on purpose** (zip-app
 browsing). The `manifest.json` is the index that maps logical refs to
 exact entry paths, so names can stay readable *and* survive renames
 (the manifest path updates; the tolerant reader never guesses).
 
-### 3. Revision model
+### 3. Revision model — `orig` / `latest` / `rev-NNN`
 
-Revisions are a **retained set with a `current` pointer and a `pinned`
-flag** — *not* a destructive undo stack. Restoring an older revision
-moves `current`; it never deletes newer revisions. That retained set is
-exactly the "layered availability" the UI exposes.
+The read path and the history are deliberately separated:
 
-- **Destructive op** (Trim today; future normalize-bake,
-  re-import-replace) → append a new `rev-NNN.wav` and move `current` to
-  it. The prior bytes remain available.
-- **Non-destructive op** (correction / gain / polarity / automation)
-  → a **manifest-only revision** that **references the same
-  `rev-NNN.wav`** as its predecessor (no audio copy). This is how the
-  "non-destructive history alike" requirement is met at ~zero storage
-  cost: the audio blob is shared; only the config snapshot differs.
+- **`latest.wav` is always the current audio.** The player resolves a
+  track straight to `…/<Track Name>/latest.wav` — a single, stable path
+  — so seeks and loads never walk a revision list. This is the speed
+  win: one known filename per track, always.
+- **`orig.wav` is the pristine import, kept forever** (never pruned).
+  Always a valid "restore to original" target.
+- **`rev-NNN.wav` are committed binary snapshots** — the rollback
+  history, bounded to the last 5 (§6).
 
-Each revision record (in the manifest) therefore carries both an audio
-ref *and* a config snapshot, so restoring a revision restores the
-audio **and** the console state that went with it.
+Edits split by *kind* and by *when* they write:
+
+- **Destructive op, on _execute_** (Trim today; future normalize-bake,
+  re-import-replace) → immediately **write a new `rev-NNN.wav`** (the
+  committed snapshot) **and overwrite `latest.wav`** with the new audio.
+  History grows by one binary snapshot; the player keeps reading
+  `latest.wav`. **Rolling back = copy a chosen `rev-NNN.wav` (or
+  `orig.wav`) over `latest.wav`** — a single, consistent operation per
+  track.
+- **Non-destructive op (correction / gain / polarity / automation), on
+  _save_** → append a **manifest-only revision** (a config snapshot).
+  No audio is written; `latest.wav` is untouched. This is the
+  "non-destructive history alike" capability at ~zero storage cost.
+
+So there are two history streams: **binary** snapshots (`rev-NNN.wav`,
+written on destructive execute, FIFO-5) and **config** snapshots
+(manifest revisions, written on save). A manifest revision records the
+config *and* which binary it applied to, so restoring it restores both
+the console state and the audio it belonged with.
+
+On **import** the app always writes `orig.wav` **and** `latest.wav` (a
+copy) up front — every track starts with a pristine baseline and a live
+working copy from frame one.
 
 ### 4. Manifest schema (indicative)
 
@@ -142,33 +170,35 @@ a **library** (stems/tracks/revisions) plus the **mix** (what's loaded
 
   "stems": [                    // the library (groups)
     {
-      "id": "stem-001",
-      "name": "Lead Vocal",
+      "id": "stem-001", "name": "Lead Vocal",
       "tracks": [
         {
-          "id": "trk-001",
-          "name": "Take 1",
+          "id": "trk-001", "name": "Take 1",
           "source": { "kind": "SunoStem", "role": "Vocals", ... },
-          "current_rev": 2,
-          "revisions": [
-            {
-              "rev": 1, "audio": "stems/Lead Vocal/Take 1/rev-001.wav",
-              "kind": "Destructive", "pinned": true,
-              "created": "...", "label": "import",
-              "sample_rate": 48000, "stereo": true, "duration_secs": 200.8,
-              // config snapshot frozen with this revision:
+          "sample_rate": 48000, "stereo": true, "duration_secs": 200.8,
+
+          // AUDIO — the player ALWAYS reads `latest`; `orig` + the
+          // binary revs are restore sources only.
+          "orig":   "stems/Lead Vocal/Take 1/orig.wav",
+          "latest": "stems/Lead Vocal/Take 1/latest.wav",
+          "binary_revs": [          // destructive snapshots, FIFO depth 5
+            { "rev": 1, "file": "stems/Lead Vocal/Take 1/rev-001.wav",
+              "created": "...", "label": "trim 4.0–198.2s", "pinned": false }
+          ],
+
+          // LIVE console state (the head):
+          "correction": { ...Profile... }, "gain_db": -2.0,
+          "polarity_inverted": false, "gain_automation": { ... },
+          "telemetry": { ... },
+
+          // NON-DESTRUCTIVE history (config snapshots, appended on save):
+          "config_revs": [
+            { "created": "...", "label": "import",
               "correction": null, "gain_db": 0.0,
-              "polarity_inverted": false, "gain_automation": null,
-              "telemetry": { ... }
-            },
-            {
-              "rev": 2, "audio": "stems/Lead Vocal/Take 1/rev-001.wav",
-              "kind": "Config", "pinned": false, "created": "...",
-              "label": "Suno-Clean + -2 dB",
+              "polarity_inverted": false, "gain_automation": null },
+            { "created": "...", "label": "Suno-Clean -2 dB",
               "correction": { ...Profile... }, "gain_db": -2.0,
-              "polarity_inverted": false, "gain_automation": { ... },
-              "telemetry": { ... }
-            }
+              "polarity_inverted": false, "gain_automation": { ... } }
           ]
         }
       ]
@@ -181,9 +211,11 @@ a **library** (stems/tracks/revisions) plus the **mix** (what's loaded
 }
 ```
 
-Note `rev-2` reuses `rev-001.wav` (config-only revision) — no second
-WAV written. A `Config` revision with `audio` equal to its predecessor
-is the dedup signal.
+Two history streams, no `current` pointer needed: `latest.wav` *is* the
+current audio. **Binary** history is the `binary_revs` files (restore =
+copy one over `latest.wav`); **config** history is `config_revs`,
+manifest-only (restore = re-apply the snapshot to the head — no audio
+written). A config change costs no WAV bytes at all.
 
 ### 5. Save protocol — append-on-save
 
@@ -194,8 +226,12 @@ non-starter.
 
 - **Append-on-save.** A config save appends a new `manifest.json` entry
   and rewrites only the (small) ZIP central directory + EOCD — kilobytes,
-  not megabytes. Assets are touched **only** by destructive ops, which
-  append one new `rev-NNN.wav`.
+  not megabytes. Audio entries are touched **only** by destructive ops
+  *on execute*, which append a new `rev-NNN.wav` **and** a new
+  `latest.wav` (overwriting the old `latest` — in ZIP terms, appending a
+  fresh `latest.wav` entry that shadows the prior one, whose bytes
+  become dead until compaction). Two WAV writes per destructive edit;
+  zero on a config save.
 - **Debounce.** Coalesce rapid dirty actions into one manifest append;
   always flush on tab-switch and on close, so we don't append hundreds
   of manifest copies between compactions.
@@ -211,12 +247,17 @@ non-starter.
 
 ### 6. Retention / auto-prune
 
-History is bounded by default (chosen policy): keep `current` + all
-`pinned` + the **last N destructive revisions** per track; older
-unpinned destructive revisions become compaction-eligible. Config-only
-revisions are nearly free (no audio) and are kept liberally. Pinning a
-revision protects it from auto-prune. `N` is a config knob (default TBD,
-e.g. 3).
+Binary history is a **bounded FIFO of the last 5 destructive snapshots**
+per track. Creating a 6th `rev-NNN.wav` enqueues it and **pops the
+oldest for deletion** (its bytes become dead, reclaimed at the next
+compaction). `orig.wav` and `latest.wav` are **exempt** — `orig` is the
+permanent factory baseline, `latest` is the live audio. Pinning a `rev`
+protects it from FIFO eviction. Config snapshots (`config_revs`) are
+manifest-only and effectively free, so they're kept liberally (and can
+be bounded later if they ever grow large).
+
+Net effect per track: you can always roll back through the **last 5
+destructive edits**, *or* all the way to `orig.wav`.
 
 ### 7. Recordings filespace as `.tib`
 
@@ -234,8 +275,8 @@ so auto-prune + compaction matter more there than for song projects.
 | 1 | `TibContainer` abstraction over `zip`: open / windowed-read-entry / append-entry / compact / dirt-passthrough; STORE audio, DEFLATE json. Validate per-stem random-access read cost early. | M |
 | 2 | Manifest as library (stems/tracks/revisions) + mix; rewrite **every** asset-path site (`project.rs`, `player.rs`, `trim.rs`, `export.rs`, `suno_import.rs`): `Track.file`→rev refs, `Project.root`→`container_path`, `track_abs_path`→`read_revision_bytes`. | **L** |
 | 3 | Owner-thread reads revisions from the `.tib` (the v0.4.40 build snapshot carries entry refs, not `PathBuf`; `build_state` reads entries). | M |
-| 4 | Stem/track/revision + group schema; manifest version bump v1→v2; **folder-project migration** (each existing track → a stem with one track + one `rev-001`). | L |
-| 5 | Destructive ops (Trim first) append revisions instead of overwriting; auto-prune bookkeeping. | M |
+| 4 | Stem/track/revision + group schema; manifest version bump v1→v2; **folder-project migration** (each existing track → a stem with one track; existing WAV becomes `orig.wav` + a `latest.wav` copy). | L |
+| 5 | Destructive ops (Trim first): on execute, write a new `rev-NNN.wav` + overwrite `latest.wav`; FIFO-5 prune. The player keeps reading `latest.wav`. | M |
 | 6 | UI: stem-group browser + per-track revision/layer picker + "load into Mix" + restore / pin / compact. | **L** (design-heavy) |
 | 7 | Recordings filespace → `.tib` (record-to-temp → append). | M |
 | 8 | Save cadence: append-on-save + debounce + compaction + crash-safety. | **L** |
@@ -270,8 +311,9 @@ append/compaction polish (8) are fast-follows once the container is real.
 
 ## Open questions
 
-1. **`N` for auto-prune** of destructive revisions — default value and
-   whether it's per-project or global config.
+1. ~~`N` for auto-prune.~~ **Resolved:** depth **5** per track, FIFO,
+   `orig`/`latest` exempt, pins protected. Open sub-question only:
+   whether 5 is later exposed as a config knob.
 2. **Readable folder names vs renames.** Names are readable and the
    manifest indexes by path; confirm the rename flow updates the
    manifest path (and whether we ever rename the in-zip folder or just
@@ -288,11 +330,14 @@ append/compaction polish (8) are fast-follows once the container is real.
 ## Success criteria
 
 - A project is one `.tib` file; renaming to `.zip` opens it in any
-  archive tool and shows human-readable `stems/<stem>/<track>/rev-NNN.wav`.
-- Destructive Trim is reversible: the prior revision is retained and
-  restorable from the UI.
+  archive tool and shows human-readable
+  `stems/<stem>/<track>/{orig,latest,rev-NNN}.wav`.
+- The player always reads `latest.wav` (no revision lookup on the hot
+  path).
+- Destructive Trim is reversible: you can roll back through the **last 5**
+  destructive edits, or all the way to `orig.wav`, from the UI.
 - A non-destructive console change is restorable without storing a
-  second copy of the audio.
+  second copy of the audio (config snapshot only).
 - Opening / saving a multi-stem project is **not slower** than the
   folder format on the common path (config save stays sub-100 ms; lanes
   render as soon as audio decodes per v0.4.40).
