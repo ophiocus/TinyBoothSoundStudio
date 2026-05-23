@@ -21,17 +21,72 @@ use anyhow::{anyhow, Context, Result};
 use cpal::traits::{DeviceTrait, StreamTrait};
 use cpal::{Stream, StreamConfig};
 use parking_lot::Mutex;
+use std::panic::AssertUnwindSafe;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
+use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
 
 use crate::automation::{AutomationLane, SplineSampler};
 use crate::dsp::{FilterChainStereo, Profile};
-use crate::project::{Project, Track};
+use crate::project::Project;
 
 /// Number of samples summed into one waveform-display peak bin.
 /// ~5.3 ms at 48 kHz — plenty for the on-screen waveform without
 /// blowing memory on a 5-minute track.
 const PEAKS_BIN_SIZE: usize = 256;
+
+/// Per-track audio build inputs, captured cheaply on the UI thread
+/// (metadata clones + the absolute WAV path — no disk I/O). Send, so it
+/// can cross to the audio owner-thread where the slow WAV load + flaky
+/// cpal device enumeration actually happen. See [`snapshot_project`].
+pub struct TrackAudioSnapshot {
+    pub abs_path: PathBuf,
+    pub name: String,
+    pub file: String,
+    pub gain_db: f32,
+    pub mute: bool,
+    pub polarity_inverted: bool,
+    pub correction: Option<Profile>,
+    pub gain_automation: Option<AutomationLane>,
+}
+
+/// Whole-project audio build inputs. Everything [`build_player_inner`]
+/// needs, in `Send` form, so the build runs off the UI thread.
+pub struct ProjectAudioSnapshot {
+    pub tracks: Vec<TrackAudioSnapshot>,
+    pub master_gain_db: f32,
+    pub master_gain_automation: Option<AutomationLane>,
+    pub corrections_disabled: bool,
+    pub project_track_count: usize,
+}
+
+/// Snapshot the live project for an async player build. Runs on the UI
+/// thread but does no I/O — just clones per-track metadata and resolves
+/// absolute paths, both cheap. The expensive/flaky work (WAV decode,
+/// cpal enumeration, stream creation) is deferred to the owner thread.
+pub fn snapshot_project(project: &Project) -> ProjectAudioSnapshot {
+    ProjectAudioSnapshot {
+        tracks: project
+            .tracks
+            .iter()
+            .map(|t| TrackAudioSnapshot {
+                abs_path: project.track_abs_path(t),
+                name: t.name.clone(),
+                file: t.file.clone(),
+                gain_db: t.gain_db,
+                mute: t.mute,
+                polarity_inverted: t.polarity_inverted,
+                correction: t.correction.clone(),
+                gain_automation: t.gain_automation.clone(),
+            })
+            .collect(),
+        master_gain_db: project.master_gain_db,
+        master_gain_automation: project.master_gain_automation.clone(),
+        corrections_disabled: project.corrections_disabled,
+        project_track_count: project.tracks.len(),
+    }
+}
 
 /// Top-level transport state. UI sets, audio thread reads.
 #[repr(u8)]
@@ -295,142 +350,198 @@ pub struct Player {
     /// than the project carries, and we don't want a perpetual rebuild
     /// loop on every Mix-tab render when one row is permanently bad.
     pub project_track_count: usize,
-    _stream: Stream,
+    /// Dropping this `Sender` closes the channel the audio owner-thread
+    /// parks on, which makes that thread drop its cpal `Stream` and exit.
+    /// That *is* the teardown path — there's no explicit stop call, and
+    /// the `!Send` `Stream` never has to cross a thread boundary.
+    _stop_tx: Sender<()>,
+}
+
+/// Build the player's shared state + cpal output stream from a `Send`
+/// snapshot. Runs entirely on the audio owner-thread (see [`spawn_build`])
+/// so the slow WAV decode and the flaky cpal device enumeration never
+/// touch the UI thread. Returns the shared state, the original project
+/// track count, and the live `Stream` (which the owner-thread keeps
+/// alive until the UI drops its `Player`).
+///
+/// `error_tx` is a clone of the app's audio-error channel; cpal's
+/// output-stream err_fn pushes through it so the UI surfaces the
+/// failure instead of locking stderr from the audio thread.
+fn build_player_inner(
+    snap: &ProjectAudioSnapshot,
+    error_tx: Sender<String>,
+    output_device_name: Option<&str>,
+) -> Result<(Arc<PlayerState>, usize, Stream)> {
+    if snap.tracks.is_empty() {
+        return Err(anyhow!("project has no tracks"));
+    }
+
+    // Cheap output-device probe BEFORE loading any WAVs. v0.4.9:
+    // pre-fix, this check happened inside `build_output_stream`
+    // at the END of `Player::new`, so a machine with no default
+    // output device (no headphones, sound card disabled) caused
+    // the whole 600+ MB of WAV samples to be loaded into memory
+    // first, then thrown away when stream construction failed.
+    // The fix is structural: probe the device first, cheap-fail
+    // immediately, no wasted work. v0.4.27: probe the *user-chosen*
+    // device when one is set (with graceful fallback to default).
+    if crate::audio::output_device_by_name(output_device_name).is_none() {
+        return Err(anyhow!(
+            "no audio output device — pick one in Admin → Audio devices… \
+                 or connect headphones/speakers and click Retry above"
+        ));
+    }
+
+    // Load tracks tolerantly. v0.4.4: per-track failures (missing
+    // file, corrupt WAV) get skipped with a warning routed through
+    // `error_tx`. v0.4.5: the per-track conformance check covers
+    // BOTH rate AND length — Suno stems are co-rendered so they
+    // share a single rate and a single length. A stem whose length
+    // differs from the rest by more than `MAX_LENGTH_JITTER_SECS`
+    // is by definition an alien (a stray recording, a different-
+    // generation take, etc.) and gets the same skip-and-warn
+    // treatment as a rate mismatch. The first successful track
+    // sets the project's reference rate + length; subsequent
+    // tracks must match within tolerance.
+    //
+    // Tolerance: 100 ms. Tight enough to obviously catch orphan
+    // recordings (typically seconds different) without rejecting
+    // legitimate Suno stems that may differ by a few frames due
+    // to codec-level packet alignment.
+    const MAX_LENGTH_JITTER_SECS: f32 = 0.1;
+
+    let mut tracks = Vec::with_capacity(snap.tracks.len());
+    let mut sample_rate = 0u32;
+    let mut reference_frames: u64 = 0;
+    let mut longest_frames = 0u64;
+    for t in &snap.tracks {
+        let tp = match load_track_play(t) {
+            Ok(tp) => tp,
+            Err(e) => {
+                let _ = error_tx.send(format!("skipped track '{}' ({}): {:#}", t.name, t.file, e));
+                continue;
+            }
+        };
+        if sample_rate == 0 {
+            // First successful track: it sets both the rate and
+            // the reference length the rest must match.
+            sample_rate = tp.sample_rate;
+            reference_frames = tp.frame_count;
+        } else {
+            let rate_ok = tp.sample_rate == sample_rate;
+            let stem_secs = tp.frame_count as f32 / tp.sample_rate.max(1) as f32;
+            let proj_secs = reference_frames as f32 / sample_rate.max(1) as f32;
+            let length_ok = (stem_secs - proj_secs).abs() <= MAX_LENGTH_JITTER_SECS;
+            if !rate_ok || !length_ok {
+                let mut whys: Vec<String> = Vec::new();
+                if !rate_ok {
+                    whys.push(format!(
+                        "rate {} Hz vs project {} Hz",
+                        tp.sample_rate, sample_rate
+                    ));
+                }
+                if !length_ok {
+                    whys.push(format!(
+                        "length {:.2}s vs project {:.2}s",
+                        stem_secs, proj_secs
+                    ));
+                }
+                let _ = error_tx.send(format!(
+                    "skipped track '{}': {} (resampling / length-fixup not yet supported)",
+                    t.name,
+                    whys.join("; ")
+                ));
+                continue;
+            }
+        }
+        longest_frames = longest_frames.max(tp.frame_count);
+        tracks.push(Arc::new(tp));
+    }
+    if tracks.is_empty() {
+        return Err(anyhow!(
+            "no tracks loaded successfully — see status bar for per-track reasons"
+        ));
+    }
+
+    let state = Arc::new(PlayerState {
+        play_state: AtomicU8::new(PlayState::Stopped as u8),
+        position_frames: AtomicU64::new(0),
+        sample_rate,
+        longest_frames,
+        tracks,
+        master_gain_db_bits: AtomicU32::new(snap.master_gain_db.to_bits()),
+        master_recording_armed: AtomicBool::new(false),
+        master_automation_lane: Mutex::new(snap.master_gain_automation.clone()),
+        master_automation_generation: AtomicU64::new(1),
+        master_peak_l_x1000: AtomicU32::new(0),
+        master_peak_r_x1000: AtomicU32::new(0),
+        master_momentary_lufs_bits: AtomicU32::new(f32::NAN.to_bits()),
+        master_integrated_lufs_bits: AtomicU32::new(f32::NAN.to_bits()),
+        global_bypass: AtomicBool::new(snap.corrections_disabled),
+        output_viz: Mutex::new(std::collections::VecDeque::with_capacity(OUTPUT_VIZ_LEN)),
+    });
+
+    let stream = build_output_stream(state.clone(), error_tx, output_device_name)?;
+    stream.play().context("starting cpal output stream")?;
+
+    Ok((state, snap.project_track_count, stream))
+}
+
+/// Spawn the audio owner-thread. It builds the player *off* the UI thread
+/// (so a flaky / hanging output driver can neither freeze nor kill the
+/// UI), then parks holding the cpal `Stream` alive until the returned
+/// `Player` is dropped. Poll the returned receiver each frame:
+/// `Ok(Ok(player))` = ready; `Ok(Err(msg))` = build failed (show the
+/// banner); `Err(Empty)` = still building. A panic inside cpal is caught
+/// here and reported as an error — the global panic hook (main.rs) still
+/// records the backtrace to `logs/panic.log`.
+pub fn spawn_build(
+    snapshot: ProjectAudioSnapshot,
+    error_tx: Sender<String>,
+    output_device_name: Option<String>,
+) -> Receiver<std::result::Result<Player, String>> {
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let _ = std::thread::Builder::new()
+        .name("tbss-audio-owner".into())
+        .spawn(move || {
+            let built = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                build_player_inner(&snapshot, error_tx.clone(), output_device_name.as_deref())
+            }));
+            match built {
+                Ok(Ok((state, count, stream))) => {
+                    // The owner-thread keeps the `!Send` Stream alive; the
+                    // UI receives only the `Send` `Player` handle. Dropping
+                    // that handle closes this channel → recv() errors → we
+                    // drop the stream and let the thread exit.
+                    let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
+                    let player = Player {
+                        state,
+                        project_track_count: count,
+                        _stop_tx: stop_tx,
+                    };
+                    if ready_tx.send(Ok(player)).is_err() {
+                        return; // UI gone before the build finished — drop stream.
+                    }
+                    let _ = stop_rx.recv(); // park until the UI drops its Player
+                    drop(stream);
+                }
+                Ok(Err(e)) => {
+                    let _ = ready_tx.send(Err(format!("{e:#}")));
+                }
+                Err(_) => {
+                    let _ = ready_tx.send(Err(
+                        "audio output init panicked — likely a flaky or virtual \
+                         device driver. Pick a different device in Admin → Audio \
+                         devices…, then Retry. (Details in logs/panic.log.)"
+                            .to_string(),
+                    ));
+                }
+            }
+        });
+    ready_rx
 }
 
 impl Player {
-    /// Build a player for the given project. Pre-loads every track's WAV
-    /// into memory (i16). Validates that all tracks share a sample rate
-    /// — mismatched rates error out (resampling is not yet supported).
-    ///
-    /// `error_tx` is a clone of the app's audio-error channel; cpal's
-    /// output-stream err_fn pushes through it so the UI surfaces the
-    /// failure instead of locking stderr from the audio thread.
-    pub fn new(
-        project: &Project,
-        error_tx: std::sync::mpsc::Sender<String>,
-        output_device_name: Option<&str>,
-    ) -> Result<Self> {
-        if project.tracks.is_empty() {
-            return Err(anyhow!("project has no tracks"));
-        }
-
-        // Cheap output-device probe BEFORE loading any WAVs. v0.4.9:
-        // pre-fix, this check happened inside `build_output_stream`
-        // at the END of `Player::new`, so a machine with no default
-        // output device (no headphones, sound card disabled) caused
-        // the whole 600+ MB of WAV samples to be loaded into memory
-        // first, then thrown away when stream construction failed.
-        // The fix is structural: probe the device first, cheap-fail
-        // immediately, no wasted work. v0.4.27: probe the *user-chosen*
-        // device when one is set (with graceful fallback to default).
-        if crate::audio::output_device_by_name(output_device_name).is_none() {
-            return Err(anyhow!(
-                "no audio output device — pick one in Admin → Audio devices… \
-                 or connect headphones/speakers and click Retry above"
-            ));
-        }
-
-        // Load tracks tolerantly. v0.4.4: per-track failures (missing
-        // file, corrupt WAV) get skipped with a warning routed through
-        // `error_tx`. v0.4.5: the per-track conformance check covers
-        // BOTH rate AND length — Suno stems are co-rendered so they
-        // share a single rate and a single length. A stem whose length
-        // differs from the rest by more than `MAX_LENGTH_JITTER_SECS`
-        // is by definition an alien (a stray recording, a different-
-        // generation take, etc.) and gets the same skip-and-warn
-        // treatment as a rate mismatch. The first successful track
-        // sets the project's reference rate + length; subsequent
-        // tracks must match within tolerance.
-        //
-        // Tolerance: 100 ms. Tight enough to obviously catch orphan
-        // recordings (typically seconds different) without rejecting
-        // legitimate Suno stems that may differ by a few frames due
-        // to codec-level packet alignment.
-        const MAX_LENGTH_JITTER_SECS: f32 = 0.1;
-
-        let mut tracks = Vec::with_capacity(project.tracks.len());
-        let mut sample_rate = 0u32;
-        let mut reference_frames: u64 = 0;
-        let mut longest_frames = 0u64;
-        for t in &project.tracks {
-            let tp = match load_track(project, t) {
-                Ok(tp) => tp,
-                Err(e) => {
-                    let _ =
-                        error_tx.send(format!("skipped track '{}' ({}): {:#}", t.name, t.file, e));
-                    continue;
-                }
-            };
-            if sample_rate == 0 {
-                // First successful track: it sets both the rate and
-                // the reference length the rest must match.
-                sample_rate = tp.sample_rate;
-                reference_frames = tp.frame_count;
-            } else {
-                let rate_ok = tp.sample_rate == sample_rate;
-                let stem_secs = tp.frame_count as f32 / tp.sample_rate.max(1) as f32;
-                let proj_secs = reference_frames as f32 / sample_rate.max(1) as f32;
-                let length_ok = (stem_secs - proj_secs).abs() <= MAX_LENGTH_JITTER_SECS;
-                if !rate_ok || !length_ok {
-                    let mut whys: Vec<String> = Vec::new();
-                    if !rate_ok {
-                        whys.push(format!(
-                            "rate {} Hz vs project {} Hz",
-                            tp.sample_rate, sample_rate
-                        ));
-                    }
-                    if !length_ok {
-                        whys.push(format!(
-                            "length {:.2}s vs project {:.2}s",
-                            stem_secs, proj_secs
-                        ));
-                    }
-                    let _ = error_tx.send(format!(
-                        "skipped track '{}': {} (resampling / length-fixup not yet supported)",
-                        t.name,
-                        whys.join("; ")
-                    ));
-                    continue;
-                }
-            }
-            longest_frames = longest_frames.max(tp.frame_count);
-            tracks.push(Arc::new(tp));
-        }
-        if tracks.is_empty() {
-            return Err(anyhow!(
-                "no tracks loaded successfully — see status bar for per-track reasons"
-            ));
-        }
-
-        let state = Arc::new(PlayerState {
-            play_state: AtomicU8::new(PlayState::Stopped as u8),
-            position_frames: AtomicU64::new(0),
-            sample_rate,
-            longest_frames,
-            tracks,
-            master_gain_db_bits: AtomicU32::new(project.master_gain_db.to_bits()),
-            master_recording_armed: AtomicBool::new(false),
-            master_automation_lane: Mutex::new(project.master_gain_automation.clone()),
-            master_automation_generation: AtomicU64::new(1),
-            master_peak_l_x1000: AtomicU32::new(0),
-            master_peak_r_x1000: AtomicU32::new(0),
-            master_momentary_lufs_bits: AtomicU32::new(f32::NAN.to_bits()),
-            master_integrated_lufs_bits: AtomicU32::new(f32::NAN.to_bits()),
-            global_bypass: AtomicBool::new(project.corrections_disabled),
-            output_viz: Mutex::new(std::collections::VecDeque::with_capacity(OUTPUT_VIZ_LEN)),
-        });
-
-        let stream = build_output_stream(state.clone(), error_tx, output_device_name)?;
-        stream.play().context("starting cpal output stream")?;
-
-        Ok(Self {
-            state,
-            project_track_count: project.tracks.len(),
-            _stream: stream,
-        })
-    }
-
     pub fn play(&self) {
         if self.state.play_state() == PlayState::Stopped {
             self.state.position_frames.store(0, Ordering::Release);
@@ -448,9 +559,9 @@ impl Player {
 
 // ───────────────────── helpers ─────────────────────
 
-fn load_track(project: &Project, t: &Track) -> Result<TrackPlay> {
-    let path = project.track_abs_path(t);
-    let mut reader = hound::WavReader::open(&path)
+fn load_track_play(t: &TrackAudioSnapshot) -> Result<TrackPlay> {
+    let path = &t.abs_path;
+    let mut reader = hound::WavReader::open(path)
         .with_context(|| format!("reading track {}", path.display()))?;
     let spec = reader.spec();
     let channels = spec.channels.max(1);

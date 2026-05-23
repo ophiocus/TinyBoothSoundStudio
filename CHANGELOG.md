@@ -8,14 +8,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); thi
 
 (Nothing yet — known issues all resolved as of v0.4.23.)
 
-## [0.4.38] — 2026-05-22
+## [0.4.39] — 2026-05-22
 
-A bundle release: one Mix-tab fix, a build-speed tweak, and three steps that turn the cross-band-coherence work from v0.4.35–37 into something you *act on* rather than just read.
+A bundle release that turns the cross-band-coherence work from v0.4.35–37 into something you *act on*, plus a serious audio-robustness fix. (Supersedes **v0.4.38**, whose tagged build never published — it tripped the CI `cargo fmt --check` gate. The code is identical here, correctly formatted, with the audio + tofu fixes below added on top.)
+
+### Fixed — audio init can no longer freeze or kill the session
+The Mix tab built its player **synchronously on the UI thread** (`Player::new` → cpal output-device enumeration). On a flaky / virtual / mid-negotiation output driver — Bluetooth Hands-Free endpoints and vendor virtual mixers are the usual suspects — that call could **hang ~30 s, freezing the whole window and tearing the lane headers mid-paint**, or outright **panic, unwinding out of the eframe event loop and silently killing the session** (a GUI-subsystem build has no console, so it vanished with no trace).
+- **The build is now asynchronous on a dedicated audio owner-thread.** The UI snapshots the project (cheap, no I/O) and hands the slow WAV decode + flaky cpal enumeration + stream creation to that thread, polling the result each frame and showing an *"initializing audio output…"* spinner meanwhile. The cpal `Stream` (which is `!Send`) lives and dies on the owner-thread; the UI only ever holds the `Send` `Arc<PlayerState>` handle. **The UI never blocks on the audio device again.**
+- **A panic inside cpal is now contained** (`catch_unwind` on the owner-thread) and degrades to the same graceful "no audio device — Retry" banner an error produces, instead of taking down the app.
+- **New panic logger** (`main.rs`): any panic, on any thread, now appends its message + backtrace to `%APPDATA%\TinyBooth Sound Studio\logs\panic.log`. A GUI-subsystem build has no stderr, so before this a panic left no trace — this is how the freeze/crash was finally diagnosed.
+
+### Fixed — "AI ✓" applied-badge rendered as "AI □" tofu
+The amber applied-state badge (below) used `✓` (U+2713), which egui's default font doesn't cover — so it rendered as a `□` tofu box, the exact failure v0.4.36 eliminated for the 🤖 emoji. Replaced with the ASCII text **"AI on"** (basic-Latin glyphs always render).
 
 ### Added — clickable "Apply this" correction chips (Tier A)
 The Mix-tab "AI" pill is now a button, not just a verdict.
 - **Click the pink `AI` pill** on any flagged stem → one-click apply Coherence Restoration to that track. Seeds a correction chain from the `Suno-Clean` preset if the track has none, forces `coherence_restoration.enabled`, gives it a sensible default strength (0.5, mid of the recommended 0.3–0.6 range), marks the project dirty, and pushes the snapshot to the player so the next playback cycle hears it.
-- **Once applied, the pill becomes an amber `AI ✓` badge** — so you can see at a glance which flagged stems are already being fixed. Click *that* to open the correction editor and tune the strength. The badge's tooltip is explicit that the score shown is the raw *source* measurement and won't change (telemetry runs on the source, restoration runs at playback/export).
+- **Once applied, the pill becomes an amber `AI on` badge** — so you can see at a glance which flagged stems are already being fixed. Click *that* to open the correction editor and tune the strength. The badge's tooltip is explicit that the score shown is the raw *source* measurement and won't change (telemetry runs on the source, restoration runs at playback/export).
 - Implemented as a deferred action (`ChipAction` returned from `telemetry_chips`, handled after the lane loop) so the immutable `player` borrow held while drawing the lanes drops first — the same pattern the `Cor` button already uses.
 
 ### Added — live coherence HUD in the visualizer (TBSS-FR-0005 phase 4, first slice)
@@ -35,7 +44,7 @@ The console-strip track-name labels (rotated 90°, reading top-to-bottom) were c
 - **`lto = "thin"`** (was `lto = true`) in the release profile. Most of the cross-crate inlining win of fat LTO at a fraction of the link time; runtime perf is within noise for this UI + block-DSP workload, and CI link time drops noticeably.
 
 ### Proof
-Full suite still **84 passing** (no behavioural regressions; the coherence DSP/telemetry tests are unchanged and green). `cargo clippy` clean.
+Full suite still **84 passing**. All CI/release gates run clean locally before tag: `cargo fmt --check`, `cargo clippy --release --all-targets -- -D warnings`, `cargo test --release`, `cargo build --release`. The async audio path was verified live — spinner shown during init, lanes render, playhead advances under playback (owner-thread stream confirmed running), no panic.
 
 ## [0.4.37] — 2026-05-13
 

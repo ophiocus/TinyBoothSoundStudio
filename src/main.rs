@@ -50,7 +50,40 @@ fn load_icon() -> egui::IconData {
     }
 }
 
+/// Install a panic hook that appends the panic message + backtrace to
+/// `%APPDATA%\TinyBooth Sound Studio\logs\panic.log`. Without this, a
+/// panic in a GUI-subsystem build has nowhere to go — there's no
+/// console, so the window just vanishes with no trace (see the v0.4.39
+/// "session vanished with no log" investigation). Keeps the default
+/// hook chained so behaviour under a debugger/console is unchanged.
+fn install_panic_logger() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if let Some(dir) = dirs::data_dir() {
+            let logs = dir.join(APP_NAME).join("logs");
+            let _ = std::fs::create_dir_all(&logs);
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(logs.join("panic.log"))
+            {
+                use std::io::Write;
+                let bt = std::backtrace::Backtrace::force_capture();
+                let _ = writeln!(
+                    f,
+                    "=== panic @ {} (v{}) ===\n{info}\n--- backtrace ---\n{bt}\n",
+                    chrono::Local::now().to_rfc3339(),
+                    env!("APP_VERSION"),
+                );
+            }
+        }
+        default_hook(info);
+    }));
+}
+
 fn main() -> eframe::Result<()> {
+    install_panic_logger();
+
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1200.0, 800.0])

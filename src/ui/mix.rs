@@ -14,7 +14,7 @@
 //! interpolation on the next playback.
 
 use crate::app::TinyBoothApp;
-use crate::player::{PlayState, Player};
+use crate::player::PlayState;
 use eframe::egui;
 use egui::{Color32, Pos2, Rect, Stroke};
 use std::sync::atomic::Ordering;
@@ -137,9 +137,45 @@ pub fn render_lanes(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
 
 /// Lazy-rebuild the player when needed (project changed shape OR
 /// player is None and the last attempt didn't fail for this project).
-/// Extracted out of `show()` for readability — same logic as v0.4.27
-/// for output-device-aware Player::new.
+///
+/// v0.4.39: the build is now **asynchronous**. `Player::new` used to run
+/// on the UI thread, where cpal device enumeration on a flaky/virtual
+/// output driver could freeze the window ~30 s (or panic and unwind out
+/// of the event loop, silently killing the session). We now snapshot the
+/// project (cheap, no I/O) and hand the heavy work to a dedicated audio
+/// owner-thread, polling its result here each frame so the UI stays live.
 fn rebuild_player_if_needed(app: &mut TinyBoothApp) {
+    // ── 1. Poll an in-flight async build, if any ──────────────────────
+    let pending_is_stale =
+        matches!(&app.player_pending, Some((root, _)) if root != &app.project.root);
+    if pending_is_stale {
+        // Project changed while a build was running — drop it (the owner-
+        // thread will discard the stream it built) and respawn below.
+        app.player_pending = None;
+    } else if app.player_pending.is_some() {
+        // try_recv returns an owned Result, so the borrow on
+        // `player_pending` ends before we mutate `app` in the arms.
+        let result = app.player_pending.as_ref().unwrap().1.try_recv();
+        match result {
+            Ok(Ok(player)) => {
+                app.player = Some(player);
+                app.player_attempt_failed_for = None;
+                app.player_pending = None;
+            }
+            Ok(Err(e)) => {
+                app.player_error = Some(e);
+                app.player_attempt_failed_for = Some(app.project.root.clone());
+                app.player_pending = None;
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => return, // still building
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                // Owner-thread vanished without a result — allow a respawn.
+                app.player_pending = None;
+            }
+        }
+    }
+
+    // ── 2. Decide whether a (re)build is warranted ────────────────────
     let attempt_already_failed = app
         .player_attempt_failed_for
         .as_ref()
@@ -149,31 +185,41 @@ fn rebuild_player_if_needed(app: &mut TinyBoothApp) {
         None => !attempt_already_failed,
         Some(p) => p.project_track_count != app.project.tracks.len(),
     };
-    if !need_rebuild {
+    if !need_rebuild || app.player_pending.is_some() {
         return;
     }
+
+    // ── 3. Kick off the build on the owner-thread, return immediately ─
     app.player = None;
     app.player_error = None;
-    match Player::new(
-        &app.project,
+    let snapshot = crate::player::snapshot_project(&app.project);
+    let rx = crate::player::spawn_build(
+        snapshot,
         app.audio_err_tx.clone(),
-        app.config.output_device.as_deref(),
-    ) {
-        Ok(p) => {
-            app.player = Some(p);
-            app.player_attempt_failed_for = None;
-        }
-        Err(e) => {
-            app.player_error = Some(format!("{e:#}"));
-            app.player_attempt_failed_for = Some(app.project.root.clone());
-        }
-    }
+        app.config.output_device.clone(),
+    );
+    app.player_pending = Some((app.project.root.clone(), rx));
 }
 
 /// Player-load error banner — rendered inside the top panel so it
 /// shares the transport bar's clip rect. Retry button clears the
 /// failed-attempt cache so the next frame retries `Player::new`.
 fn render_player_error_banner_if_present(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
+    // While the audio owner-thread is building (v0.4.39 async init), show
+    // a live indicator instead of an empty bar — and keep the UI
+    // repainting so we notice the result the moment it lands.
+    if app.player_pending.is_some() {
+        ui.horizontal(|ui| {
+            ui.spinner();
+            ui.colored_label(
+                Color32::from_rgb(180, 200, 230),
+                "initializing audio output…",
+            );
+        });
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(80));
+        return;
+    }
     let Some(err) = app.player_error.clone() else {
         return;
     };
@@ -1309,9 +1355,12 @@ fn telemetry_chips(ui: &mut egui::Ui, track: &crate::project::Track) -> ChipActi
         //
         // Below COH_AI_MAX we surface a clickable pink "AI" pill — one
         // click applies the Coherence Restoration filter to this track
-        // (Tier A). Once applied, the pill becomes an amber "AI ✓"
+        // (Tier A). Once applied, the pill becomes an amber "AI on"
         // badge — click that to open the correction editor and tune the
-        // restoration strength. Above COH_CLEAN_MIN we show a neutral
+        // restoration strength. (Text label, not a ✓ glyph: egui's
+        // default font has no U+2713 and renders it as □ tofu — the
+        // same v0.4.36 lesson that retired the 🤖 emoji.) Above
+        // COH_CLEAN_MIN we show a neutral
         // "≈"; in the ambiguous middle we render nothing to avoid
         // clutter. Thresholds live in `telemetry` so this matches the
         // Project-Health column exactly.
@@ -1330,7 +1379,7 @@ fn telemetry_chips(ui: &mut egui::Ui, track: &crate::project::Track) -> ChipActi
                     let resp = ui
                         .add(
                             egui::Label::new(
-                                egui::RichText::new(" AI ✓ ")
+                                egui::RichText::new(" AI on ")
                                     .size(10.0)
                                     .strong()
                                     .monospace()

@@ -524,10 +524,7 @@ fn draw_coherence_hud(painter: &egui::Painter, rect: egui::Rect, coh: f32) {
             egui::Color32::from_rgb(150, 230, 190),
         )
     } else {
-        (
-            format!("Band Coh {coh:.2}"),
-            egui::Color32::from_gray(200),
-        )
+        (format!("Band Coh {coh:.2}"), egui::Color32::from_gray(200))
     };
     let galley = painter.layout_no_wrap(label, egui::FontId::monospace(13.0), color);
     let pad = egui::vec2(8.0, 4.0);
