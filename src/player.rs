@@ -357,39 +357,17 @@ pub struct Player {
     _stop_tx: Sender<()>,
 }
 
-/// Build the player's shared state + cpal output stream from a `Send`
-/// snapshot. Runs entirely on the audio owner-thread (see [`spawn_build`])
-/// so the slow WAV decode and the flaky cpal device enumeration never
-/// touch the UI thread. Returns the shared state, the original project
-/// track count, and the live `Stream` (which the owner-thread keeps
-/// alive until the UI drops its `Player`).
+/// Phase 1 of the audio build: load every track's WAV into memory and
+/// assemble the shared `PlayerState` (peaks included). **No audio device
+/// is touched here** — this is the v0.4.40 split that lets the Mix tab
+/// render its lanes the instant the WAVs are decoded, whether or not an
+/// output device is present or healthy. Runs on the audio owner-thread.
 ///
-/// `error_tx` is a clone of the app's audio-error channel; cpal's
-/// output-stream err_fn pushes through it so the UI surfaces the
-/// failure instead of locking stderr from the audio thread.
-fn build_player_inner(
-    snap: &ProjectAudioSnapshot,
-    error_tx: Sender<String>,
-    output_device_name: Option<&str>,
-) -> Result<(Arc<PlayerState>, usize, Stream)> {
+/// `error_tx` is a clone of the app's audio-error channel; per-track skip
+/// warnings are routed through it so the UI surfaces them.
+fn build_state(snap: &ProjectAudioSnapshot, error_tx: &Sender<String>) -> Result<Arc<PlayerState>> {
     if snap.tracks.is_empty() {
         return Err(anyhow!("project has no tracks"));
-    }
-
-    // Cheap output-device probe BEFORE loading any WAVs. v0.4.9:
-    // pre-fix, this check happened inside `build_output_stream`
-    // at the END of `Player::new`, so a machine with no default
-    // output device (no headphones, sound card disabled) caused
-    // the whole 600+ MB of WAV samples to be loaded into memory
-    // first, then thrown away when stream construction failed.
-    // The fix is structural: probe the device first, cheap-fail
-    // immediately, no wasted work. v0.4.27: probe the *user-chosen*
-    // device when one is set (with graceful fallback to default).
-    if crate::audio::output_device_by_name(output_device_name).is_none() {
-        return Err(anyhow!(
-            "no audio output device — pick one in Admin → Audio devices… \
-                 or connect headphones/speakers and click Retry above"
-        ));
     }
 
     // Load tracks tolerantly. v0.4.4: per-track failures (missing
@@ -481,55 +459,107 @@ fn build_player_inner(
         output_viz: Mutex::new(std::collections::VecDeque::with_capacity(OUTPUT_VIZ_LEN)),
     });
 
-    let stream = build_output_stream(state.clone(), error_tx, output_device_name)?;
-    stream.play().context("starting cpal output stream")?;
-
-    Ok((state, snap.project_track_count, stream))
+    Ok(state)
 }
 
-/// Spawn the audio owner-thread. It builds the player *off* the UI thread
-/// (so a flaky / hanging output driver can neither freeze nor kill the
-/// UI), then parks holding the cpal `Stream` alive until the returned
-/// `Player` is dropped. Poll the returned receiver each frame:
-/// `Ok(Ok(player))` = ready; `Ok(Err(msg))` = build failed (show the
-/// banner); `Err(Empty)` = still building. A panic inside cpal is caught
-/// here and reported as an error — the global panic hook (main.rs) still
-/// records the backtrace to `logs/panic.log`.
+/// Phase 2 of the audio build: probe the output device and create the
+/// live cpal `Stream`. This is the slow / flaky / panic-prone part (cpal
+/// device enumeration on a bad driver), kept entirely separate from
+/// [`build_state`] so it can fail — or hang, or panic — without ever
+/// taking the Mix display down. Runs on the audio owner-thread.
+fn build_stream(
+    state: Arc<PlayerState>,
+    error_tx: Sender<String>,
+    output_device_name: Option<&str>,
+) -> Result<Stream> {
+    if crate::audio::output_device_by_name(output_device_name).is_none() {
+        return Err(anyhow!(
+            "no audio output device — pick one in Admin → Audio devices… \
+             or connect headphones/speakers and click Retry above"
+        ));
+    }
+    let stream = build_output_stream(state, error_tx, output_device_name)?;
+    stream.play().context("starting cpal output stream")?;
+    Ok(stream)
+}
+
+/// Messages from the audio owner-thread to the UI during a build.
+pub enum BuildMsg {
+    /// Track WAVs are decoded and the shared state (peaks included) is
+    /// ready — the Mix lanes can render *now*, before the output device
+    /// is even probed. Carries the playback handle.
+    Loaded(Player),
+    /// The cpal output stream is live; playback (Play) is now possible.
+    StreamReady,
+    /// The output device / stream build failed, hung-then-errored, or
+    /// panicked. If a `Loaded` was already delivered the lanes stay
+    /// visible and this just drives the "no audio output" banner.
+    StreamFailed(String),
+}
+
+/// Spawn the audio owner-thread. **Two-phase** (v0.4.40): it first loads
+/// the track state and hands the UI a `Player` (`BuildMsg::Loaded`) so
+/// the Mix lanes render immediately — *before* any audio device is
+/// touched — then probes the device and builds the cpal stream
+/// (`StreamReady` / `StreamFailed`). The owner-thread holds the `!Send`
+/// `Stream` alive (parked) until the UI drops its `Player`. All the
+/// slow / flaky / panic-prone cpal work happens here, off the UI thread;
+/// a panic is caught and reported, and the global hook (main.rs) logs the
+/// backtrace to `logs/panic.log`.
 pub fn spawn_build(
     snapshot: ProjectAudioSnapshot,
     error_tx: Sender<String>,
     output_device_name: Option<String>,
-) -> Receiver<std::result::Result<Player, String>> {
-    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+) -> Receiver<BuildMsg> {
+    let (tx, rx) = std::sync::mpsc::channel();
     let _ = std::thread::Builder::new()
         .name("tbss-audio-owner".into())
         .spawn(move || {
-            let built = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                build_player_inner(&snapshot, error_tx.clone(), output_device_name.as_deref())
-            }));
-            match built {
-                Ok(Ok((state, count, stream))) => {
-                    // The owner-thread keeps the `!Send` Stream alive; the
-                    // UI receives only the `Send` `Player` handle. Dropping
-                    // that handle closes this channel → recv() errors → we
-                    // drop the stream and let the thread exit.
-                    let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
-                    let player = Player {
-                        state,
-                        project_track_count: count,
-                        _stop_tx: stop_tx,
-                    };
-                    if ready_tx.send(Ok(player)).is_err() {
-                        return; // UI gone before the build finished — drop stream.
-                    }
-                    let _ = stop_rx.recv(); // park until the UI drops its Player
+            // ── Phase 1: load track state (no device) ────────────────
+            let state = match std::panic::catch_unwind(AssertUnwindSafe(|| {
+                build_state(&snapshot, &error_tx)
+            })) {
+                Ok(Ok(s)) => s,
+                Ok(Err(e)) => {
+                    let _ = tx.send(BuildMsg::StreamFailed(format!("{e:#}")));
+                    return;
+                }
+                Err(_) => {
+                    let _ = tx.send(BuildMsg::StreamFailed(
+                        "track load panicked (see logs/panic.log)".to_string(),
+                    ));
+                    return;
+                }
+            };
+            // Hand the display handle to the UI immediately — lanes render
+            // before the (slow/flaky) output device is even probed.
+            let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
+            let player = Player {
+                state: state.clone(),
+                project_track_count: snapshot.project_track_count,
+                _stop_tx: stop_tx,
+            };
+            if tx.send(BuildMsg::Loaded(player)).is_err() {
+                return; // UI gone before we finished.
+            }
+            // ── Phase 2: build the cpal stream (slow / flaky / panicky) ─
+            match std::panic::catch_unwind(AssertUnwindSafe(|| {
+                build_stream(
+                    state.clone(),
+                    error_tx.clone(),
+                    output_device_name.as_deref(),
+                )
+            })) {
+                Ok(Ok(stream)) => {
+                    let _ = tx.send(BuildMsg::StreamReady);
+                    let _ = stop_rx.recv(); // park, keeping the !Send Stream alive
                     drop(stream);
                 }
                 Ok(Err(e)) => {
-                    let _ = ready_tx.send(Err(format!("{e:#}")));
+                    let _ = tx.send(BuildMsg::StreamFailed(format!("{e:#}")));
                 }
                 Err(_) => {
-                    let _ = ready_tx.send(Err(
+                    let _ = tx.send(BuildMsg::StreamFailed(
                         "audio output init panicked — likely a flaky or virtual \
                          device driver. Pick a different device in Admin → Audio \
                          devices…, then Retry. (Details in logs/panic.log.)"
@@ -538,7 +568,7 @@ pub fn spawn_build(
                 }
             }
         });
-    ready_rx
+    rx
 }
 
 impl Player {

@@ -153,24 +153,39 @@ fn rebuild_player_if_needed(app: &mut TinyBoothApp) {
         // thread will discard the stream it built) and respawn below.
         app.player_pending = None;
     } else if app.player_pending.is_some() {
-        // try_recv returns an owned Result, so the borrow on
-        // `player_pending` ends before we mutate `app` in the arms.
-        let result = app.player_pending.as_ref().unwrap().1.try_recv();
-        match result {
-            Ok(Ok(player)) => {
-                app.player = Some(player);
-                app.player_attempt_failed_for = None;
-                app.player_pending = None;
-            }
-            Ok(Err(e)) => {
-                app.player_error = Some(e);
-                app.player_attempt_failed_for = Some(app.project.root.clone());
-                app.player_pending = None;
-            }
-            Err(std::sync::mpsc::TryRecvError::Empty) => return, // still building
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                // Owner-thread vanished without a result — allow a respawn.
-                app.player_pending = None;
+        // Drain whatever the owner-thread has sent this frame. `Loaded`
+        // (track state ready) sets the player so the lanes render *now*,
+        // before the output device is even probed — but keeps `pending`
+        // alive so we still pick up `StreamReady` / `StreamFailed`. Each
+        // `try_recv` returns an owned value, so the borrow ends before we
+        // mutate `app`.
+        use crate::player::BuildMsg;
+        use std::sync::mpsc::TryRecvError;
+        loop {
+            let msg = app.player_pending.as_ref().map(|(_, rx)| rx.try_recv());
+            match msg {
+                Some(Ok(BuildMsg::Loaded(player))) => {
+                    app.player = Some(player);
+                    app.player_attempt_failed_for = None;
+                    app.player_error = None;
+                    // keep polling for the stream result
+                }
+                Some(Ok(BuildMsg::StreamReady)) => {
+                    app.player_attempt_failed_for = None;
+                    app.player_pending = None;
+                    break;
+                }
+                Some(Ok(BuildMsg::StreamFailed(e))) => {
+                    app.player_error = Some(e);
+                    app.player_attempt_failed_for = Some(app.project.root.clone());
+                    app.player_pending = None;
+                    break;
+                }
+                Some(Err(TryRecvError::Empty)) => break, // still working; keep pending
+                Some(Err(TryRecvError::Disconnected)) | None => {
+                    app.player_pending = None;
+                    break;
+                }
             }
         }
     }
@@ -205,16 +220,19 @@ fn rebuild_player_if_needed(app: &mut TinyBoothApp) {
 /// shares the transport bar's clip rect. Retry button clears the
 /// failed-attempt cache so the next frame retries `Player::new`.
 fn render_player_error_banner_if_present(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
-    // While the audio owner-thread is building (v0.4.39 async init), show
-    // a live indicator instead of an empty bar — and keep the UI
-    // repainting so we notice the result the moment it lands.
+    // While the owner-thread is connecting the output device, show a live
+    // indicator and keep repainting so we catch the result the moment it
+    // lands. The lanes are already visible by now (track state loaded in
+    // phase 1) — this only covers the *device* connection. v0.4.40.
     if app.player_pending.is_some() {
         ui.horizontal(|ui| {
             ui.spinner();
-            ui.colored_label(
-                Color32::from_rgb(180, 200, 230),
-                "initializing audio output…",
-            );
+            let msg = if app.player.is_some() {
+                "connecting audio output… (mix is ready; playback enables when the device is up)"
+            } else {
+                "loading tracks…"
+            };
+            ui.colored_label(Color32::from_rgb(180, 200, 230), msg);
         });
         ui.ctx()
             .request_repaint_after(std::time::Duration::from_millis(80));
@@ -225,15 +243,20 @@ fn render_player_error_banner_if_present(app: &mut TinyBoothApp, ui: &mut egui::
     };
     ui.horizontal_wrapped(|ui| {
         ui.colored_label(Color32::LIGHT_RED, &err);
-        if app.player.is_none()
-            && app.player_attempt_failed_for.is_some()
+        // Retry whenever an attempt failed — even if the lanes are showing
+        // (track state loaded but the output device failed). Dropping the
+        // player forces a full respawn on the next frame; the lanes blink
+        // briefly while the WAVs reload, then the device is re-probed.
+        if app.player_attempt_failed_for.is_some()
             && ui
                 .button("↻ Retry")
                 .on_hover_text(
-                    "Try to rebuild the player — useful after plugging in audio hardware.",
+                    "Re-probe the output device and rebuild — useful after \
+                     plugging in / switching audio hardware.",
                 )
                 .clicked()
         {
+            app.player = None;
             app.player_attempt_failed_for = None;
             app.player_error = None;
         }
@@ -274,6 +297,11 @@ fn transport_bar(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
     } else {
         (false, false)
     };
+    // The lanes render as soon as track state loads (`have_player`), but
+    // *playback* needs the cpal stream live — which may still be building
+    // or have failed on a flaky output device. Gate the transport on
+    // that, while the rest of the Mix tab stays fully interactive. v0.4.40.
+    let stream_ready = have_player && app.player_pending.is_none() && app.player_error.is_none();
 
     // How many tracks already carry a correction chain — drives the
     // bulk-action buttons' enabled state and labels.
@@ -312,7 +340,7 @@ fn transport_bar(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
     ui.horizontal(|ui| {
         ui.heading("Mix");
         ui.separator();
-        ui.add_enabled_ui(have_player, |ui| {
+        ui.add_enabled_ui(stream_ready, |ui| {
             if !playing {
                 if ui.add(egui::Button::new("▶  Play").min_size(egui::vec2(80.0, 30.0))).clicked() {
                     click_play = true;

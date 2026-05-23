@@ -8,6 +8,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); thi
 
 (Nothing yet — known issues all resolved as of v0.4.23.)
 
+## [0.4.40] — 2026-05-23
+
+### Fixed — the Mix tab renders immediately, independent of the audio device
+v0.4.39 moved audio init off the UI thread so it could no longer *freeze* or *crash* the app — but the **lanes still waited on the output device**: the whole Mix display (waveforms, faders, headers) was gated on the player, which wasn't ready until the cpal stream was built. On a flaky/slow output driver you'd stare at a near-empty Mix tab (or the `(rendering Mix tab via ctx_panels)` placeholder) for the whole device-connect — which *feels* like a freeze even though the window is technically live.
+- **The audio build is now two-phase.** Phase 1 loads the track WAVs and assembles the shared state — **no audio device touched** — and hands the UI a player immediately, so the **lanes render as soon as the audio decodes**, whether or not an output device is present or healthy. Phase 2 probes the device and builds the cpal stream in the background.
+- **Playback (Play/Stop) is gated on the stream**, not on the display. While the device connects you get a *"connecting audio output… (mix is ready; playback enables when the device is up)"* hint; the rest of the Mix tab — scrolling lanes, faders, A/B, correction editor — is fully interactive throughout.
+- **No output device? The mix still shows**, with a red "no audio output device — Retry" banner instead of a blank tab. This is exactly the requested behaviour: *render the mix, banner the device.* Retry re-probes the device (handy after plugging in / switching hardware).
+- Remaining wait is just the WAV decode (a few seconds for a full multi-stem project); the ~30 s device-enumeration stall no longer blocks the display at all. (Caching peaks in the manifest for sub-second lane render is a possible follow-up.)
+
+### Proof
+All CI/release gates run clean locally before tag (`cargo fmt --check`, `cargo clippy --release --all-targets -- -D warnings`, `cargo test --release` 84 passing, `cargo build --release`). Verified live: Mix shows "loading tracks…" → lanes render → Play enables once the device connects; the lane render no longer waits on the device.
+
 ## [0.4.39] — 2026-05-22
 
 A bundle release that turns the cross-band-coherence work from v0.4.35–37 into something you *act on*, plus a serious audio-robustness fix. (Supersedes **v0.4.38**, whose tagged build never published — it tripped the CI `cargo fmt --check` gate. The code is identical here, correctly formatted, with the audio + tofu fixes below added on top.)

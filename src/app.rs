@@ -102,16 +102,12 @@ pub struct TinyBoothApp {
     /// Retry click. v0.4.9.
     pub player_attempt_failed_for: Option<PathBuf>,
     /// In-flight async player build, keyed by the project root it's for.
-    /// `Player::new` used to run synchronously on the UI thread, where a
-    /// flaky output driver could freeze the window ~30 s during cpal
-    /// device enumeration (or panic and kill the session). The build now
-    /// runs on a dedicated audio owner-thread; this receiver is polled
-    /// each frame and the UI shows an "initializing audio" banner while
-    /// it's `Some`. v0.4.39.
-    pub player_pending: Option<(
-        PathBuf,
-        std::sync::mpsc::Receiver<Result<crate::player::Player, String>>,
-    )>,
+    /// The build runs on a dedicated audio owner-thread (v0.4.39) and is
+    /// **two-phase** (v0.4.40): the lanes render as soon as `Loaded`
+    /// arrives (track state ready) while the output device is still being
+    /// probed; `StreamReady` / `StreamFailed` follow. Polled each frame;
+    /// stays `Some` until the stream resolves.
+    pub player_pending: Option<(PathBuf, std::sync::mpsc::Receiver<crate::player::BuildMsg>)>,
     /// Index of the track whose Correction editor is open, if any.
     pub editing_correction_for: Option<usize>,
 
