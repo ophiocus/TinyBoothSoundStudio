@@ -17,6 +17,7 @@ mod project;
 mod suno_import;
 mod suno_meta;
 mod telemetry;
+mod tib;
 mod trim;
 mod ui;
 mod wav_meta;
