@@ -44,6 +44,12 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 # result modal's "Open log folder" button, etc.).
 open = "5"
 
+# Project storage — a `.tib` project is a single SQLite database
+# (TBSS-FR-0007). `bundled` compiles SQLite from source so there's no
+# system-library dependency; `blob` enables incremental BLOB I/O for
+# streaming large stem audio in/out without a second full-size buffer.
+rusqlite = { version = "0.32", features = ["bundled", "blob"] }
+
 [build-dependencies]
 winres = "0.1"
 
