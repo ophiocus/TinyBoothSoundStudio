@@ -10,7 +10,7 @@ Design proposals for upcoming TinyBooth Sound Studio features. Each RFC follows 
 | **TBSS-FR-0004** | [Console mixer + volume automation](TBSS-FR-0004-console-mixer-automation.md) | ✅ Implemented | v0.4.x | Hardware-style fader strips on the Mix tab + recordable Catmull-Rom fader automation. |
 | **TBSS-FR-0005** | [Track telemetry](TBSS-FR-0005-track-telemetry.md) | ✅ Implemented | v0.4.13–0.4.37 | Pure-DSP analysis (onsets, YIN pitch, key, drum classes, cross-band coherence) + Coherence Restoration filter. |
 | **TBSS-FR-0006** | [The machine-learning boundary](TBSS-FR-0006-ml-boundary.md) | ✅ Accepted (policy) | — | Standing policy: no ML in the core analyzer; ML only as a quarantined opt-in sidecar. |
-| **TBSS-FR-0007** | [The `.tib` container — single-file projects with stem revision history](TBSS-FR-0007-tib-container-revisions.md) | 📝 Proposed | — | One ZIP-based `.tib` per project; `stems/<stem>/<track>/rev-NNN.wav` revision history (destructive + non-destructive); append-on-save + compaction; folder-format migration. |
+| **TBSS-FR-0007** | [The `.tib` container — single-file SQLite projects with stem revision history](TBSS-FR-0007-tib-container-revisions.md) | 📝 Proposed | — | One **SQLite** `.tib` per project; per-stem revision history (orig + FIFO-5 destructive BLOB snapshots + config snapshots) with pointer-rollback; transactional WAL saves; folder-format migration. (Pivoted from ZIP after phase-1 — see RFC §"Why SQLite, not ZIP".) |
 
 ## Convention
 
