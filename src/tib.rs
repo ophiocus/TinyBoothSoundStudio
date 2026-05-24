@@ -57,11 +57,14 @@ CREATE TABLE tracks (
   stem_id TEXT NOT NULL REFERENCES stems(id) ON DELETE CASCADE,
   name TEXT NOT NULL,
   ord INTEGER,
-  source TEXT,
+  source TEXT,                                   -- JSON TrackSource
   sample_rate INTEGER, stereo INTEGER, duration_secs REAL,
+  channel_source INTEGER,                        -- mono take's hardware channel
   current_rev_id INTEGER REFERENCES revisions(id),
   correction TEXT, gain_db REAL, polarity_inverted INTEGER,
-  gain_automation TEXT, telemetry TEXT,
+  gain_automation TEXT, telemetry TEXT,          -- JSON
+  rec_profile TEXT,                              -- JSON recording-time snapshot
+  telemetry_profile TEXT,                        -- JSON analyzer profile
   loaded_in_mix INTEGER, mute INTEGER
 );
 CREATE TABLE revisions (
@@ -166,6 +169,13 @@ impl TibDb {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Borrow the underlying connection. Used by the project-mapping
+    /// layer (`tib_project`) to run domain-specific upsert/select SQL;
+    /// `TibDb` itself stays free of `Project`/`Track` knowledge.
+    pub fn conn(&self) -> &Connection {
+        &self.conn
     }
 
     pub fn schema_version(&self) -> Result<i64> {
