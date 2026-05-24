@@ -8,6 +8,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); thi
 
 (Nothing yet — known issues all resolved as of v0.4.23.)
 
+## [0.4.41] — 2026-05-23
+
+### Added — Export as single `.tib` (TBSS-FR-0007, first user-facing step)
+**File → "Export as single .tib…"** packs the whole project — every stem plus the bundled Suno mixdown — into one self-contained `.tib` file (a SQLite database; see [TBSS-FR-0007](docs/feature-requests/TBSS-FR-0007-tib-container-revisions.md)). Each stem is stored as its `orig` revision, the immutable baseline for the revision history coming in the next phase.
+- **Additive and non-destructive**: the folder project is left completely untouched; this only writes a sibling artifact. The app still loads/saves the folder format — the live-format flip is the next phase, and this proves migration on real projects first.
+- Built on the tested storage layer (TBSS-FR-0007 phases 1/2a/2b): a `TibDb` SQLite container (WAL, `page_size=16384`, `auto_vacuum=INCREMENTAL`, incremental BLOB I/O), the Project↔SQLite mapping, and the folder→`.tib` migration.
+
+### Why SQLite (not the originally-planned ZIP)
+A survey of how real apps use ZIP for live storage (OOXML/ODF/Krita/Sketch all full-rewrite on save; EPUB/USDZ are read-mostly) plus phase-1 prototyping confirmed ZIP can't do cheap in-place updates or duplicate-name overwrites — fatal for a frequently-saved file with per-stem revisions. SQLite is the canonical application-file-format for this (Audacity 3.0 made the same folder→single-SQLite move). The full rationale is in the RFC.
+
+### Proof
+New deps: `rusqlite` (bundled SQLite — no system dependency). Storage layer has 11 unit tests (container round-trip, large-BLOB incremental I/O, FIFO-5 prune, Project mapping round-trip, folder migration). The export was verified on the real 9-stem project: it packs into a single **332 MiB `.tib`** and a 36 MiB stem BLOB round-trips byte-for-byte. Suite **95 passing**; all gates (`fmt`, `clippy --release --all-targets -D warnings`, `test`, release build) clean.
+
 ## [0.4.40] — 2026-05-23
 
 ### Fixed — the Mix tab renders immediately, independent of the audio device

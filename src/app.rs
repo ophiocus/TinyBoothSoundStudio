@@ -735,6 +735,37 @@ impl TinyBoothApp {
         }
     }
 
+    /// Pack the active (folder) project into a single `.tib` SQLite file
+    /// (TBSS-FR-0007). Additive + non-destructive — the folder project is
+    /// untouched; this just writes a self-contained sibling artifact.
+    /// First user-facing step toward the `.tib` format; migration is then
+    /// proven on real projects before the live load/save flip.
+    pub fn export_project_as_tib(&mut self) {
+        if self.project.tracks.is_empty() {
+            self.status = Some("nothing to export — open or import a project first".to_string());
+            return;
+        }
+        let default_name = format!("{}.tib", self.project.name.replace(['/', '\\', ':'], "-"));
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("TinyBooth project", &["tib"])
+            .set_file_name(&default_name)
+            .save_file()
+        else {
+            return;
+        };
+        match crate::tib_project::migrate_folder_to_tib(&self.project, &path) {
+            Ok(()) => {
+                self.status = Some(format!(
+                    "exported {} ({} stems) → {}",
+                    self.project.name,
+                    self.project.tracks.len(),
+                    path.display()
+                ));
+            }
+            Err(e) => self.status = Some(format!("export failed: {e:#}")),
+        }
+    }
+
     /// Open a folder of Suno stems and turn it into a fresh `.tinybooth`
     /// project. The new project is saved as a sibling of the source folder
     /// and immediately becomes the active project.
@@ -1440,6 +1471,20 @@ impl eframe::App for TinyBoothApp {
                     }
                     if ui.button("Save").clicked() {
                         self.save_project();
+                        ui.close_menu();
+                    }
+                    if ui
+                        .button("Export as single .tib…")
+                        .on_hover_text(
+                            "Pack this whole project — every stem + the bundled \
+                             mixdown — into one self-contained .tib file (a SQLite \
+                             database; TBSS-FR-0007). The folder project is left \
+                             untouched. Each stem becomes its `orig` revision, the \
+                             baseline for future revision history.",
+                        )
+                        .clicked()
+                    {
+                        self.export_project_as_tib();
                         ui.close_menu();
                     }
                     ui.separator();
