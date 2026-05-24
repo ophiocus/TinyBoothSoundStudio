@@ -21,11 +21,18 @@ use chrono::{DateTime, Utc};
 use rusqlite::params;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
-use std::path::PathBuf;
+use std::io::Cursor;
+use std::path::{Path, PathBuf};
 
 use crate::project::{Project, ProjectKind, Track, TrackSource};
 use crate::telemetry::TelemetryProfile;
-use crate::tib::TibDb;
+use crate::tib::{RevKind, TibDb};
+
+/// Reserved track id for a migrated Suno mixdown — stored as a
+/// not-in-mix track (so it never shows as a Mix lane) whose `orig`
+/// revision holds the reference audio. `meta.suno_mixdown_track_id`
+/// points here.
+pub const MIXDOWN_TRACK_ID: &str = "__mixdown__";
 
 // ── JSON column helpers ─────────────────────────────────────────────
 
@@ -262,6 +269,7 @@ pub fn load_project(db: &TibDb, db_path: PathBuf) -> Result<Project> {
                     t.channel_source, t.correction, t.gain_db, t.polarity_inverted,
                     t.gain_automation, t.telemetry, t.rec_profile, t.telemetry_profile, t.mute
              FROM tracks t JOIN stems s ON t.stem_id = s.id
+             WHERE t.loaded_in_mix = 1
              ORDER BY s.ord, t.ord",
         )?;
         let rows = stmt.query_map([], |r| {
@@ -334,6 +342,96 @@ fn build_track(raw: RawTrack) -> Result<Track> {
             None => TelemetryProfile::default(),
         },
     })
+}
+
+// ── migration (folder format → .tib) ────────────────────────────────
+
+/// Convert a folder-format [`Project`] (JSON manifest + sibling WAVs)
+/// into a fresh `.tib` at `tib_path`. Meta + stem/track rows come from
+/// [`save_metadata`]; each track's WAV is read from the folder and stored
+/// as its `orig` revision (the immutable import baseline). A bundled Suno
+/// mixdown, if present, is stored under the reserved [`MIXDOWN_TRACK_ID`]
+/// track (not loaded in the mix) with `meta.suno_mixdown_track_id`
+/// pointed at it. Lossless — nothing on disk is needed afterwards.
+pub fn migrate_folder_to_tib(folder: &Project, tib_path: &Path) -> Result<()> {
+    let db = TibDb::create(tib_path)
+        .with_context(|| format!("creating .tib at {}", tib_path.display()))?;
+
+    // 1. meta + stem/track rows (current_rev_id NULL until audio lands).
+    save_metadata(folder, &db)?;
+
+    // 2. each track's WAV → an `orig` revision BLOB.
+    for t in &folder.tracks {
+        let wav = folder.track_abs_path(t);
+        let bytes =
+            std::fs::read(&wav).with_context(|| format!("reading track WAV {}", wav.display()))?;
+        let rid = db.insert_revision(
+            &t.id,
+            RevKind::Orig,
+            "import (migrated from folder)",
+            t.sample_rate,
+            t.stereo,
+            t.duration_secs,
+            &bytes,
+        )?;
+        db.set_current_rev(&t.id, rid)?;
+    }
+
+    // 3. bundled Suno mixdown → reserved, not-in-mix track.
+    if let Some(rel) = &folder.suno_mixdown_path {
+        let mix_path = folder.root.join(rel);
+        if mix_path.is_file() {
+            migrate_mixdown(&db, &mix_path)?;
+        }
+    }
+    Ok(())
+}
+
+fn migrate_mixdown(db: &TibDb, mix_path: &Path) -> Result<()> {
+    let bytes = std::fs::read(mix_path)
+        .with_context(|| format!("reading mixdown {}", mix_path.display()))?;
+    // Read the spec from the in-memory bytes (avoids a second file read).
+    let reader = hound::WavReader::new(Cursor::new(&bytes)).context("parsing mixdown WAV")?;
+    let spec = reader.spec();
+    let dur = reader.duration() as f32 / spec.sample_rate.max(1) as f32;
+    let stereo = spec.channels >= 2;
+
+    let stem_id = stem_id_for(MIXDOWN_TRACK_ID);
+    let conn = db.conn();
+    conn.execute(
+        "INSERT INTO stems (id, name, ord) VALUES (?1, 'Mixdown', 9999)
+         ON CONFLICT(id) DO NOTHING",
+        params![stem_id],
+    )?;
+    conn.execute(
+        "INSERT INTO tracks
+           (id, stem_id, name, ord, sample_rate, stereo, duration_secs,
+            loaded_in_mix, mute, gain_db, polarity_inverted)
+         VALUES (?1, ?2, 'Mixdown', 9999, ?3, ?4, ?5, 0, 0, 0.0, 0)
+         ON CONFLICT(id) DO NOTHING",
+        params![
+            MIXDOWN_TRACK_ID,
+            stem_id,
+            spec.sample_rate,
+            stereo as i64,
+            dur as f64
+        ],
+    )?;
+    let rid = db.insert_revision(
+        MIXDOWN_TRACK_ID,
+        RevKind::Orig,
+        "suno mixdown (migrated)",
+        spec.sample_rate,
+        stereo,
+        dur,
+        &bytes,
+    )?;
+    db.set_current_rev(MIXDOWN_TRACK_ID, rid)?;
+    conn.execute(
+        "UPDATE meta SET suno_mixdown_track_id = ?1",
+        params![MIXDOWN_TRACK_ID],
+    )?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -492,5 +590,78 @@ mod tests {
         assert_eq!(loaded.tracks.len(), 1);
         assert_eq!(loaded.tracks[0].id, "track-001");
         cleanup(&path);
+    }
+
+    fn write_wav(path: &Path, sr: u32, stereo: bool) {
+        let spec = hound::WavSpec {
+            channels: if stereo { 2 } else { 1 },
+            sample_rate: sr,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut w = hound::WavWriter::create(path, spec).unwrap();
+        let chans = if stereo { 2 } else { 1 };
+        for i in 0..(sr / 10) {
+            for _ in 0..chans {
+                w.write_sample((i as i16).wrapping_mul(7)).unwrap();
+            }
+        }
+        w.finalize().unwrap();
+    }
+
+    fn folder_track(id: &str, file: &str, name: &str) -> Track {
+        Track {
+            id: id.into(),
+            name: name.into(),
+            file: file.into(),
+            mute: false,
+            gain_db: 0.0,
+            sample_rate: 48_000,
+            channel_source: None,
+            duration_secs: 0.1,
+            profile: None,
+            stereo: true,
+            source: TrackSource::default(),
+            correction: None,
+            gain_automation: None,
+            polarity_inverted: false,
+            telemetry: None,
+            telemetry_profile: TelemetryProfile::default(),
+        }
+    }
+
+    #[test]
+    fn migrate_folder_round_trips_audio_and_mixdown() {
+        let dir = std::env::temp_dir().join(format!("tbss-migrate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("tracks")).unwrap();
+        write_wav(&dir.join("tracks/track-001.wav"), 48_000, true);
+        write_wav(&dir.join("tracks/track-002.wav"), 48_000, true);
+        write_wav(&dir.join("tracks/mixdown.wav"), 48_000, true);
+
+        let mut proj = Project::new("Migrated", dir.clone());
+        proj.tracks
+            .push(folder_track("track-001", "tracks/track-001.wav", "Vocals"));
+        proj.tracks
+            .push(folder_track("track-002", "tracks/track-002.wav", "Drums"));
+        proj.suno_mixdown_path = Some("tracks/mixdown.wav".into());
+
+        let tib = dir.join("migrated.tib");
+        migrate_folder_to_tib(&proj, &tib).unwrap();
+
+        let db = TibDb::open(&tib).unwrap();
+        let loaded = load_project(&db, tib.clone()).unwrap();
+        assert_eq!(loaded.tracks.len(), 2, "mixdown is not a mix lane");
+
+        // Track audio preserved byte-for-byte (the orig revision == the file).
+        let a1 = db.read_current_audio("track-001").unwrap();
+        assert_eq!(a1, std::fs::read(dir.join("tracks/track-001.wav")).unwrap());
+
+        // Mixdown audio preserved + pointer set.
+        assert_eq!(loaded.suno_mixdown_path.as_deref(), Some(MIXDOWN_TRACK_ID));
+        let mix = db.read_current_audio(MIXDOWN_TRACK_ID).unwrap();
+        assert_eq!(mix, std::fs::read(dir.join("tracks/mixdown.wav")).unwrap());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
