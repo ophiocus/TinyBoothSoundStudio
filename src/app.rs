@@ -1141,11 +1141,11 @@ impl TinyBoothApp {
     /// have no resampler) — caller gets a clear status message and
     /// nothing on disk changes. v0.4.20.
     pub fn hot_load_swap(&mut self, idx: usize, source: &Path) -> anyhow::Result<()> {
-        // .tib swap means inserting a new revision row + repointing
-        // current_rev_id under one transaction, not overwriting a WAV.
-        // Lands in step 5 alongside the rest of the .tib import paths.
+        // .tib projects: a swap is a new destructive revision + a
+        // current_rev_id repoint, not a WAV overwrite — so the pre-swap
+        // take stays recoverable in history. (TBSS-FR-0007 phase 2c.)
         if self.is_tib() {
-            anyhow::bail!("hot-load swap into .tib projects is not yet supported in this build");
+            return self.hot_load_swap_tib(idx, source);
         }
         let track = self
             .project
@@ -1235,6 +1235,86 @@ impl TinyBoothApp {
         // previous audio's events.
         self.project.song_key_estimate = crate::telemetry::estimate_song_key(&self.project.tracks);
 
+        Ok(())
+    }
+
+    /// `.tib` counterpart of [`Self::hot_load_swap`]. Reads the source
+    /// WAV bytes and commits them as a new `destructive` revision on the
+    /// track (repointing `current_rev_id`, FIFO-5 pruning) — the pre-swap
+    /// audio remains a recoverable revision. Metadata is persisted via the
+    /// normal `.tib` save; telemetry re-analysis is skipped until the
+    /// analyzer learns to read BLOBs (step beyond 2c MVP).
+    fn hot_load_swap_tib(&mut self, idx: usize, source: &Path) -> anyhow::Result<()> {
+        let track_id = self
+            .project
+            .tracks
+            .get(idx)
+            .ok_or_else(|| anyhow::anyhow!("no track at index {idx}"))?
+            .id
+            .clone();
+
+        // Probe the source WAV header.
+        let reader = hound::WavReader::open(source)
+            .with_context(|| format!("opening source {}", source.display()))?;
+        let spec = reader.spec();
+        let frames = reader.duration() as u64;
+        let new_sr = spec.sample_rate;
+        let new_channels = spec.channels;
+        let new_duration_secs = frames as f32 / new_sr.max(1) as f32;
+        drop(reader);
+
+        // Same single-rate enforcement as the folder path: check against
+        // the other tracks (skip ours — we're replacing it).
+        let project_rate = self
+            .project
+            .tracks
+            .iter()
+            .enumerate()
+            .find(|(i, _)| *i != idx)
+            .map(|(_, t)| t.sample_rate);
+        if let Some(rate) = project_rate {
+            if rate != new_sr {
+                anyhow::bail!(
+                    "sample-rate mismatch: project is at {} Hz, new file is {} Hz. \
+                     Re-export the file at {} Hz and try again.",
+                    rate,
+                    new_sr,
+                    rate
+                );
+            }
+        }
+
+        // Read the whole source WAV and commit it as a destructive
+        // revision. We store the file bytes as-is (no TBSS-meta injection
+        // — the .tib carries that state in columns, not in WAV chunks).
+        let bytes = std::fs::read(source)
+            .with_context(|| format!("reading source {}", source.display()))?;
+        let stereo = new_channels >= 2;
+        if let ProjectBacking::Tib { db } = &mut self.backing {
+            db.commit_destructive_revision(
+                &track_id,
+                "hot-swap",
+                new_sr,
+                stereo,
+                new_duration_secs,
+                &bytes,
+                5,
+            )
+            .context("committing hot-swap revision")?;
+            db.incremental_vacuum().ok();
+        }
+
+        let track_mut = &mut self.project.tracks[idx];
+        track_mut.duration_secs = new_duration_secs;
+        track_mut.sample_rate = new_sr;
+        track_mut.stereo = stereo;
+        track_mut.telemetry = None;
+
+        self.player = None;
+        self.player_error = None;
+        self.player_attempt_failed_for = None;
+
+        self.save_project();
         Ok(())
     }
 
