@@ -21,11 +21,23 @@ use std::sync::Arc;
 /// whereas `Project` is a plain serde struct.
 pub enum ProjectBacking {
     Folder,
-    // Wired up in TBSS-FR-0007 phase 2c step 3 (the `.tib` open path).
-    #[allow(dead_code)]
-    Tib {
-        db: TibDb,
-    },
+    Tib { db: TibDb },
+}
+
+/// True when a track's telemetry is present and analyzed by the current
+/// analyzer version (so a re-dispatch would be wasted work).
+fn telemetry_is_current(t: &Track) -> bool {
+    matches!(&t.telemetry, Some(tel) if tel.analyzer_version >= crate::telemetry::ANALYZER_VERSION)
+}
+
+/// Short stable tag derived from a project path — disambiguates telemetry
+/// temp-WAV filenames so two open `.tib` projects that happen to share a
+/// track id (e.g. both have `track-001`) can't collide in the temp dir.
+fn root_tag(root: &Path) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    root.hash(&mut h);
+    h.finish()
 }
 
 /// In-flight take metadata. Captured at `start_new_take` time so the
@@ -580,6 +592,7 @@ impl TinyBoothApp {
                     abs_path: abs,
                     profile,
                     settings: self.telemetry_settings.clone(),
+                    temp_source: false,
                 });
                 // If the take landed in the currently-active project
                 // (Open Recordings OR an active TinyDAW project), keep
@@ -779,29 +792,33 @@ impl TinyBoothApp {
         }
     }
 
-    pub fn save_project(&mut self) {
+    /// Persist the active project per its backing — folder writes the
+    /// JSON manifest + sibling WAVs stay put; `.tib` writes the meta +
+    /// stem/track rows in one transaction (never the audio BLOBs). Does
+    /// not touch `status` / `project_dirty`; callers that want user
+    /// feedback wrap it (see [`Self::save_project`]). TBSS-FR-0007.
+    pub fn persist_project(&mut self) -> anyhow::Result<()> {
         match &mut self.backing {
-            ProjectBacking::Folder => match self.project.save() {
-                Ok(()) => {
-                    let manifest = self.project.manifest_path();
-                    self.config.record_project(&manifest);
-                    self.status = Some(format!("saved {}", manifest.display()));
-                    self.project_dirty = false;
-                }
-                Err(e) => self.status = Some(format!("save error: {e}")),
-            },
+            ProjectBacking::Folder => self.project.save(),
             ProjectBacking::Tib { db } => {
                 let project = &self.project;
-                let tib_path = project.root.clone();
-                match db.transaction(|conn| crate::tib_project::save_metadata(project, conn)) {
-                    Ok(()) => {
-                        self.config.record_project(&tib_path);
-                        self.status = Some(format!("saved {}", tib_path.display()));
-                        self.project_dirty = false;
-                    }
-                    Err(e) => self.status = Some(format!("save error: {e:#}")),
-                }
+                db.transaction(|conn| crate::tib_project::save_metadata(project, conn))
             }
+        }
+    }
+
+    pub fn save_project(&mut self) {
+        let recorded_path = match &self.backing {
+            ProjectBacking::Folder => self.project.manifest_path(),
+            ProjectBacking::Tib { .. } => self.project.root.clone(),
+        };
+        match self.persist_project() {
+            Ok(()) => {
+                self.config.record_project(&recorded_path);
+                self.status = Some(format!("saved {}", recorded_path.display()));
+                self.project_dirty = false;
+            }
+            Err(e) => self.status = Some(format!("save error: {e:#}")),
         }
     }
 
@@ -1090,21 +1107,20 @@ impl TinyBoothApp {
     /// `TelemetryProfile::resolve`. Cheap on the all-fresh path —
     /// just iterates and pushes to a channel.
     pub fn dispatch_telemetry_for_active_project(&mut self) {
-        // .tib projects: telemetry analyzer reads WAVs by path; over the
-        // BLOB-backed format it'd chase `track_abs_path` results that
-        // either don't exist or (worse) collide with the .tib file
-        // itself. Re-enable in step 5 when the analyzer learns to pull
-        // bytes out of revisions.
         if self.is_tib() {
-            return;
+            self.dispatch_telemetry_tib();
+        } else {
+            self.dispatch_telemetry_folder();
         }
+    }
+
+    /// Folder-backed dispatch: every track's WAV is read straight off
+    /// disk by `abs_path`.
+    fn dispatch_telemetry_folder(&mut self) {
         let root = self.project.root.clone();
         for t in &self.project.tracks {
-            // Skip tracks whose telemetry is already current.
-            if let Some(tel) = &t.telemetry {
-                if tel.analyzer_version >= crate::telemetry::ANALYZER_VERSION {
-                    continue;
-                }
+            if telemetry_is_current(t) {
+                continue;
             }
             let abs = self.project.track_abs_path(t);
             if !abs.is_file() {
@@ -1117,6 +1133,63 @@ impl TinyBoothApp {
                 abs_path: abs,
                 profile,
                 settings: self.telemetry_settings.clone(),
+                temp_source: false,
+            });
+        }
+    }
+
+    /// `.tib`-backed dispatch (TBSS-FR-0007 phase 2c): the analyzer reads
+    /// WAVs by path, so extract each stale track's current-revision BLOB
+    /// to a throwaway temp WAV and analyze that. The worker deletes the
+    /// temp after reading; the drain matches the result back by track id
+    /// (the temp path is ephemeral). Heavy projects extract one stem at a
+    /// time — bounded by the analyzer's own one-at-a-time worker.
+    fn dispatch_telemetry_tib(&mut self) {
+        // Collect (track_id, profile) first to release the project borrow
+        // before touching `self.backing` / `self.telemetry`.
+        let jobs: Vec<(String, crate::telemetry::ResolvedProfile)> = self
+            .project
+            .tracks
+            .iter()
+            .filter(|t| !telemetry_is_current(t))
+            .map(|t| (t.id.clone(), t.telemetry_profile.resolve(&t.source)))
+            .collect();
+        if jobs.is_empty() {
+            return;
+        }
+        let root = self.project.root.clone();
+        let temp_dir = std::env::temp_dir().join("tbss-telemetry");
+        if std::fs::create_dir_all(&temp_dir).is_err() {
+            return;
+        }
+        for (track_id, profile) in jobs {
+            let bytes = match &self.backing {
+                ProjectBacking::Tib { db } => match db.read_current_audio(&track_id) {
+                    Ok(b) => b,
+                    Err(_) => continue, // no current revision → nothing to analyze
+                },
+                ProjectBacking::Folder => return,
+            };
+            let safe_id: String = track_id
+                .chars()
+                .map(|c| if c.is_alphanumeric() { c } else { '_' })
+                .collect();
+            let temp_path = temp_dir.join(format!(
+                "{}-{}-{}.wav",
+                safe_id,
+                std::process::id(),
+                root_tag(&root)
+            ));
+            if std::fs::write(&temp_path, &bytes).is_err() {
+                continue;
+            }
+            self.telemetry.dispatch(crate::telemetry::TelemetryRequest {
+                project_root: root.clone(),
+                track_id,
+                abs_path: temp_path,
+                profile,
+                settings: self.telemetry_settings.clone(),
+                temp_source: true,
             });
         }
     }
@@ -1315,24 +1388,43 @@ impl TinyBoothApp {
         self.player_attempt_failed_for = None;
 
         self.save_project();
+        // Re-analyze the swapped track from its new BLOB (telemetry was
+        // cleared above; dispatch only picks up the now-stale track).
+        self.dispatch_telemetry_tib();
         Ok(())
     }
 
     pub fn invalidate_telemetry_for_track(&mut self, idx: usize) {
-        let Some(track) = self.project.tracks.get_mut(idx) else {
+        {
+            let Some(track) = self.project.tracks.get_mut(idx) else {
+                return;
+            };
+            track.telemetry = None;
+        }
+        // .tib: persist the cleared telemetry, then re-run the BLOB-aware
+        // dispatch (it only re-analyzes the now-stale track, since the
+        // others are still current). TBSS-FR-0007 phase 2c.
+        if self.is_tib() {
+            let _ = self.persist_project();
+            self.dispatch_telemetry_tib();
+            return;
+        }
+        let Some(track) = self.project.tracks.get(idx) else {
             return;
         };
-        track.telemetry = None;
         let profile = track.telemetry_profile.resolve(&track.source);
         let track_id = track.id.clone();
         let abs = self.project.root.join(&track.file);
+        let project_root = self.project.root.clone();
+        let settings = self.telemetry_settings.clone();
         if abs.is_file() {
             self.telemetry.dispatch(crate::telemetry::TelemetryRequest {
-                project_root: self.project.root.clone(),
+                project_root,
                 track_id,
                 abs_path: abs,
                 profile,
-                settings: self.telemetry_settings.clone(),
+                settings,
+                temp_source: false,
             });
         }
         let _ = self.project.save();
@@ -1367,14 +1459,18 @@ impl TinyBoothApp {
                 continue;
             }
             if r.project_root == self.project.root {
+                let temp_source = r.temp_source;
                 if let Ok(tel) = r.outcome {
                     if let Some(track) = self.project.tracks.iter_mut().find(|t| t.id == r.track_id)
                     {
-                        // Verify the WAV path hasn't changed under us
-                        // (e.g. Trim moved it). If it has, drop the
-                        // result — Trim re-dispatches with the new path.
-                        let cur = self.project.root.join(&track.file);
-                        if cur == r.abs_path {
+                        // Folder: verify the WAV path hasn't changed under
+                        // us (Trim writes a fresh WAV, so the path may have
+                        // moved — drop stale results). .tib (temp_source):
+                        // the path is an ephemeral temp extraction, so the
+                        // track id IS the identity — accept it.
+                        let still_valid =
+                            temp_source || self.project.root.join(&track.file) == r.abs_path;
+                        if still_valid {
                             track.telemetry = Some(tel);
                             applied_active += 1;
                         }
@@ -1390,7 +1486,9 @@ impl TinyBoothApp {
             // a couple of hundred adds, one Pearson over 24 keys).
             self.project.song_key_estimate =
                 crate::telemetry::estimate_song_key(&self.project.tracks);
-            if let Err(e) = self.project.save() {
+            // Backing-aware: folder writes the manifest, .tib writes the
+            // metadata rows in a transaction (never the audio BLOBs).
+            if let Err(e) = self.persist_project() {
                 self.status = Some(format!("telemetry save error: {e:#}"));
             }
         }

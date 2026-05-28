@@ -1877,6 +1877,11 @@ pub struct TelemetryRequest {
     /// Avoids a shared lock; if the user edits settings mid-batch
     /// the in-flight requests still finish on the old values.
     pub settings: TelemetrySettings,
+    /// `true` when `abs_path` is a throwaway temp WAV extracted from a
+    /// `.tib` revision BLOB (TBSS-FR-0007 phase 2c). The worker deletes
+    /// it after analysis, and the drain matches the result by track id
+    /// only (the temp path is ephemeral, not the track's identity).
+    pub temp_source: bool,
 }
 
 #[derive(Debug)]
@@ -1886,6 +1891,8 @@ pub struct TelemetryResult {
     pub abs_path: PathBuf,
     /// `Ok` = analysis succeeded; `Err` = error string for the status bar.
     pub outcome: Result<TrackTelemetry, String>,
+    /// Propagated from the request — see [`TelemetryRequest::temp_source`].
+    pub temp_source: bool,
 }
 
 /// Background worker that owns one OS thread. Drop the service to
@@ -1915,11 +1922,17 @@ impl TelemetryService {
                         analyze_wav(&req.abs_path, req.profile, &req.settings)
                             .map_err(|e| format!("{e:#}"))
                     };
+                    // Temp WAVs extracted from .tib BLOBs are throwaway —
+                    // delete after analysis regardless of outcome.
+                    if req.temp_source {
+                        let _ = std::fs::remove_file(&req.abs_path);
+                    }
                     let result = TelemetryResult {
                         project_root: req.project_root,
                         track_id: req.track_id,
                         abs_path: req.abs_path,
                         outcome,
+                        temp_source: req.temp_source,
                     };
                     if res_tx.send(result).is_err() {
                         // UI side is gone — exit cleanly.
