@@ -21,9 +21,12 @@
 //!     the panel asks the user to stop playback first.
 
 use anyhow::{anyhow, Context, Result};
+use std::io::Cursor;
 use std::path::Path;
 
 use crate::project::{Project, TRACKS_DIR};
+use crate::tib::TibDb;
+use crate::tib_project::MIXDOWN_TRACK_ID;
 
 /// Outcome of a project-wide trim. Surfaced to the user in the trim
 /// panel's status area. Per-file successes are folded into a count;
@@ -71,17 +74,8 @@ impl TrimReport {
     }
 }
 
-/// Crop every WAV in the project (tracks + bundled mixdown) to the
-/// shared `[start_secs, end_secs]` range.
-///
-/// Updates `Track.duration_secs` on each successfully-trimmed track
-/// to reflect the new length. Caller is responsible for marking the
-/// project dirty and saving the manifest.
-///
-/// Returns `Err` only on caller-error (invalid range); per-file
-/// failures are collected in `TrimReport.failures` so partial-success
-/// is surfaced rather than silently swallowed.
-pub fn trim_project(project: &mut Project, start_secs: f32, end_secs: f32) -> Result<TrimReport> {
+/// Validate a trim range. Shared by the folder and `.tib` trim entries.
+fn validate_range(start_secs: f32, end_secs: f32) -> Result<()> {
     if !(start_secs.is_finite() && end_secs.is_finite()) {
         return Err(anyhow!("trim range must be finite"));
     }
@@ -93,6 +87,21 @@ pub fn trim_project(project: &mut Project, start_secs: f32, end_secs: f32) -> Re
             "end ({end_secs:.3}s) must be > start ({start_secs:.3}s)"
         ));
     }
+    Ok(())
+}
+
+/// Crop every WAV in the project (tracks + bundled mixdown) to the
+/// shared `[start_secs, end_secs]` range.
+///
+/// Updates `Track.duration_secs` on each successfully-trimmed track
+/// to reflect the new length. Caller is responsible for marking the
+/// project dirty and saving the manifest.
+///
+/// Returns `Err` only on caller-error (invalid range); per-file
+/// failures are collected in `TrimReport.failures` so partial-success
+/// is surfaced rather than silently swallowed.
+pub fn trim_project(project: &mut Project, start_secs: f32, end_secs: f32) -> Result<TrimReport> {
+    validate_range(start_secs, end_secs)?;
 
     let project_root = project.root.clone();
     let mut trimmed_count: usize = 0;
@@ -149,6 +158,173 @@ pub fn trim_project(project: &mut Project, start_secs: f32, end_secs: f32) -> Re
         end_secs,
         trimmed_count,
         failures,
+    })
+}
+
+/// Crop every track in a `.tib`-backed project (stems + the bundled
+/// mixdown, if any) to the shared `[start_secs, end_secs]` range. **The
+/// `.tib` counterpart of [`trim_project`].** Instead of overwriting WAV
+/// files, each track gets a new `destructive` revision carrying the
+/// cropped audio, committed atomically with a `current_rev_id` repoint
+/// and a FIFO-5 prune ([`TibDb::commit_destructive_revision`]) — so the
+/// edit is reversible (roll back by repointing) and crash-safe.
+///
+/// Updates `Track.duration_secs` on each cropped track. The caller marks
+/// the project dirty + saves the metadata (which persists the new
+/// durations) and drops the player so it rebuilds from the new revisions.
+pub fn trim_project_tib(
+    project: &mut Project,
+    db: &mut TibDb,
+    start_secs: f32,
+    end_secs: f32,
+) -> Result<TrimReport> {
+    validate_range(start_secs, end_secs)?;
+
+    let mut trimmed_count = 0;
+    let mut failures = Vec::new();
+
+    // Collect (idx, track_id) first to keep the project borrow short.
+    let targets: Vec<(usize, String)> = project
+        .tracks
+        .iter()
+        .enumerate()
+        .map(|(i, t)| (i, t.id.clone()))
+        .collect();
+
+    for (idx, track_id) in targets {
+        match trim_revision_in_db(db, &track_id, start_secs, end_secs) {
+            Ok(new_frames) => {
+                let sr = project.tracks[idx].sample_rate.max(1) as f32;
+                project.tracks[idx].duration_secs = new_frames as f32 / sr;
+                trimmed_count += 1;
+            }
+            Err(e) => failures.push(TrimFileFailure {
+                path_relative: track_id,
+                error: format!("{e:#}"),
+            }),
+        }
+    }
+
+    // The bundled mixdown is the reserved not-in-mix MIXDOWN_TRACK_ID
+    // track in a .tib (load_project stamps suno_mixdown_path with it).
+    // Crop it on the same range so coherence stays valid post-trim.
+    if project.suno_mixdown_path.as_deref() == Some(MIXDOWN_TRACK_ID) {
+        match trim_revision_in_db(db, MIXDOWN_TRACK_ID, start_secs, end_secs) {
+            Ok(_) => trimmed_count += 1,
+            Err(e) => failures.push(TrimFileFailure {
+                path_relative: MIXDOWN_TRACK_ID.to_string(),
+                error: format!("{e:#}"),
+            }),
+        }
+    }
+
+    Ok(TrimReport {
+        start_secs,
+        end_secs,
+        trimmed_count,
+        failures,
+    })
+}
+
+/// Read a track's current audio out of the `.tib`, crop it in memory,
+/// and commit the result as a new destructive revision. Returns the new
+/// frame count. The read borrow (`&self`) and the commit borrow
+/// (`&mut self`) don't overlap.
+fn trim_revision_in_db(
+    db: &mut TibDb,
+    track_id: &str,
+    start_secs: f32,
+    end_secs: f32,
+) -> Result<u64> {
+    let bytes = db
+        .read_current_audio(track_id)
+        .with_context(|| format!("reading current audio for {track_id}"))?;
+    let cropped = crop_wav_bytes(&bytes, start_secs, end_secs)
+        .with_context(|| format!("cropping audio for {track_id}"))?;
+    db.commit_destructive_revision(
+        track_id,
+        "trim",
+        cropped.sample_rate,
+        cropped.stereo,
+        cropped.duration_secs,
+        &cropped.bytes,
+        5,
+    )
+    .with_context(|| format!("committing trim revision for {track_id}"))?;
+    db.incremental_vacuum()?;
+    Ok(cropped.new_frames)
+}
+
+/// Result of an in-memory WAV crop.
+struct CroppedWav {
+    bytes: Vec<u8>,
+    new_frames: u64,
+    sample_rate: u32,
+    stereo: bool,
+    duration_secs: f32,
+}
+
+/// Crop in-memory PCM/float WAV bytes to `[start_secs, end_secs]`,
+/// preserving the original sample format and bit depth. Int files
+/// (8/16/24/32-bit) round-trip through `i32`; float files through `f32`
+/// — hound writes each at the width the spec declares.
+fn crop_wav_bytes(bytes: &[u8], start_secs: f32, end_secs: f32) -> Result<CroppedWav> {
+    let reader = hound::WavReader::new(Cursor::new(bytes)).context("parsing WAV for trim")?;
+    let spec = reader.spec();
+    let total_frames = reader.duration() as u64;
+    let sr = spec.sample_rate as f32;
+
+    let start_frame = ((start_secs * sr).floor() as i64).max(0) as u64;
+    let end_frame = (((end_secs * sr).floor() as i64).max(0) as u64).min(total_frames);
+    if start_frame >= end_frame {
+        return Err(anyhow!(
+            "computed empty trim range (start={start_frame}, end={end_frame})"
+        ));
+    }
+    let new_frames = end_frame - start_frame;
+    let channels = spec.channels.max(1) as u64;
+    let skip = (start_frame * channels) as usize;
+    let take = (new_frames * channels) as usize;
+
+    let mut out: Vec<u8> = Vec::new();
+    {
+        let mut w =
+            hound::WavWriter::new(Cursor::new(&mut out), spec).context("creating in-memory WAV")?;
+        match spec.sample_format {
+            hound::SampleFormat::Int => {
+                for (i, s) in reader.into_samples::<i32>().enumerate() {
+                    if i < skip {
+                        continue;
+                    }
+                    if i >= skip + take {
+                        break;
+                    }
+                    w.write_sample(s.context("reading int sample")?)
+                        .context("writing int sample")?;
+                }
+            }
+            hound::SampleFormat::Float => {
+                for (i, s) in reader.into_samples::<f32>().enumerate() {
+                    if i < skip {
+                        continue;
+                    }
+                    if i >= skip + take {
+                        break;
+                    }
+                    w.write_sample(s.context("reading float sample")?)
+                        .context("writing float sample")?;
+                }
+            }
+        }
+        w.finalize().context("finalising in-memory WAV")?;
+    }
+
+    Ok(CroppedWav {
+        bytes: out,
+        new_frames,
+        sample_rate: spec.sample_rate,
+        stereo: spec.channels >= 2,
+        duration_secs: new_frames as f32 / sr,
     })
 }
 
@@ -367,5 +543,167 @@ mod tests {
     #[test]
     fn format_time_zero_seconds() {
         assert_eq!(format_time_secs(0.0), "00:00.000");
+    }
+}
+
+#[cfg(test)]
+mod tib_trim_tests {
+    //! TBSS-FR-0007 phase 2c step 4: destructive trim over a `.tib`
+    //! writes a new revision + repoints current + FIFO-5 prunes, all
+    //! reversibly — no in-place WAV overwrite.
+    use super::*;
+    use crate::project::{Project, Track, TrackSource};
+    use crate::telemetry::TelemetryProfile;
+    use crate::tib::{RevKind, TibDb};
+    use hound::{SampleFormat, WavSpec, WavWriter};
+    use std::path::PathBuf;
+
+    fn wav_bytes(frames: u32, rate: u32, stereo: bool) -> Vec<u8> {
+        let channels = if stereo { 2 } else { 1 };
+        let spec = WavSpec {
+            channels,
+            sample_rate: rate,
+            bits_per_sample: 16,
+            sample_format: SampleFormat::Int,
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        {
+            let mut w = WavWriter::new(Cursor::new(&mut buf), spec).unwrap();
+            for i in 0..frames {
+                for _ in 0..channels {
+                    w.write_sample((i % 100) as i16).unwrap();
+                }
+            }
+            w.finalize().unwrap();
+        }
+        buf
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(format!("tbss-trim-{}-{}.tib", name, std::process::id()));
+        cleanup(&p);
+        p
+    }
+    fn cleanup(p: &Path) {
+        for s in ["", "-wal", "-shm"] {
+            let mut q = p.as_os_str().to_os_string();
+            q.push(s);
+            let _ = std::fs::remove_file(PathBuf::from(q));
+        }
+    }
+
+    fn track(id: &str) -> Track {
+        Track {
+            id: id.into(),
+            name: id.into(),
+            file: String::new(),
+            mute: false,
+            gain_db: 0.0,
+            sample_rate: 1000,
+            channel_source: None,
+            duration_secs: 1.0,
+            profile: None,
+            stereo: true,
+            source: TrackSource::default(),
+            correction: None,
+            gain_automation: None,
+            polarity_inverted: false,
+            telemetry: None,
+            telemetry_profile: TelemetryProfile::default(),
+        }
+    }
+
+    fn seed_track(db: &TibDb, id: &str) -> i64 {
+        db.insert_stem(&format!("stem-{id}"), id, 0).unwrap();
+        db.insert_track(id, &format!("stem-{id}"), id, 0).unwrap();
+        let wav = wav_bytes(1000, 1000, true); // exactly 1.0 s
+        let rid = db
+            .insert_revision(id, RevKind::Orig, "import", 1000, true, 1.0, &wav)
+            .unwrap();
+        db.set_current_rev(id, rid).unwrap();
+        rid
+    }
+
+    #[test]
+    fn trim_tib_writes_destructive_revision_and_crops() {
+        let path = scratch("crop");
+        let mut db = TibDb::create(&path).unwrap();
+        let orig = seed_track(&db, "t1");
+
+        let mut proj = Project::new("P", path.clone());
+        proj.tracks.push(track("t1"));
+
+        let report = trim_project_tib(&mut proj, &mut db, 0.2, 0.8).unwrap();
+        assert_eq!(report.trimmed_count, 1);
+        assert!(report.failures.is_empty());
+
+        // current_rev moved off the orig onto a new destructive row.
+        let cur = db.current_rev_id("t1").unwrap().unwrap();
+        assert_ne!(cur, orig, "current moved off orig");
+        assert_eq!(
+            db.revision_count("t1", RevKind::Orig).unwrap(),
+            1,
+            "orig preserved (rollback target)"
+        );
+        assert_eq!(db.revision_count("t1", RevKind::Destructive).unwrap(), 1);
+
+        // Cropped audio is 0.6 s = 600 frames at 1000 Hz.
+        let cropped = db.read_current_audio("t1").unwrap();
+        let r = hound::WavReader::new(Cursor::new(&cropped)).unwrap();
+        assert_eq!(r.duration(), 600);
+        assert!((proj.tracks[0].duration_secs - 0.6).abs() < 1e-3);
+
+        // The orig is still byte-recoverable by repointing (no copy).
+        db.set_current_rev("t1", orig).unwrap();
+        let back = db.read_current_audio("t1").unwrap();
+        assert_eq!(
+            hound::WavReader::new(Cursor::new(&back))
+                .unwrap()
+                .duration(),
+            1000,
+            "rolling back to orig restores full length"
+        );
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn trim_tib_prunes_to_five_destructive() {
+        let path = scratch("prune");
+        let mut db = TibDb::create(&path).unwrap();
+        seed_track(&db, "t1");
+
+        let mut proj = Project::new("P", path.clone());
+        proj.tracks.push(track("t1"));
+
+        // Six successive trims, each cropping 10% off the end — ranges
+        // stay non-empty, and the 6th commit FIFO-prunes the oldest.
+        for _ in 0..6 {
+            let dur = proj.tracks[0].duration_secs;
+            trim_project_tib(&mut proj, &mut db, 0.0, (dur * 0.9).max(0.05)).unwrap();
+        }
+        assert_eq!(
+            db.revision_count("t1", RevKind::Orig).unwrap(),
+            1,
+            "orig never pruned"
+        );
+        assert_eq!(
+            db.revision_count("t1", RevKind::Destructive).unwrap(),
+            5,
+            "FIFO-5 keeps the five newest destructive revisions"
+        );
+        cleanup(&path);
+    }
+
+    #[test]
+    fn trim_tib_rejects_bad_range() {
+        let path = scratch("badrange");
+        let mut db = TibDb::create(&path).unwrap();
+        seed_track(&db, "t1");
+        let mut proj = Project::new("P", path.clone());
+        proj.tracks.push(track("t1"));
+        assert!(trim_project_tib(&mut proj, &mut db, 0.8, 0.2).is_err());
+        cleanup(&path);
     }
 }

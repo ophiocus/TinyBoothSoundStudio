@@ -227,13 +227,22 @@ fn body(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
 }
 
 fn apply_trim(app: &mut TinyBoothApp, start_secs: f32, end_secs: f32) {
-    // Trims happen on disk. Drop the player so its in-memory WAV
-    // copies don't continue to play stale data; it'll re-load on the
-    // next Mix-tab visit via the existing rebuild path.
+    // Drop the player so its in-memory WAV copies don't continue to play
+    // stale data; it'll re-load on the next Mix-tab visit via the
+    // existing rebuild path. (This is also why .tib trim doesn't need a
+    // separate audio-generation counter — the player is already dropped.)
     app.player = None;
     app.player_error = None;
 
-    match trim::trim_project(&mut app.project, start_secs, end_secs) {
+    let result = match &mut app.backing {
+        crate::app::ProjectBacking::Folder => {
+            trim::trim_project(&mut app.project, start_secs, end_secs)
+        }
+        crate::app::ProjectBacking::Tib { db } => {
+            trim::trim_project_tib(&mut app.project, db, start_secs, end_secs)
+        }
+    };
+    match result {
         Ok(report) => {
             // Reset markers to the new range and re-cache the waveform.
             app.trim_state.start_text = trim::format_time_secs(0.0);

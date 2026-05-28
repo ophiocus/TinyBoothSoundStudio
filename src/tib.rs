@@ -275,6 +275,70 @@ impl TibDb {
         Ok(self.conn.last_insert_rowid())
     }
 
+    /// Commit a destructive edit atomically, in one transaction: insert
+    /// a new `destructive` revision carrying `audio`, repoint the track's
+    /// `current_rev_id` to it, then FIFO-prune to `keep` destructive
+    /// revisions (the new one is always kept — it's the current). Returns
+    /// the new revision id. Run [`Self::incremental_vacuum`] afterwards to
+    /// reclaim pages from any pruned rows.
+    ///
+    /// This is the transactional sibling of calling
+    /// [`Self::insert_revision`] + [`Self::set_current_rev`] +
+    /// [`Self::prune_destructive`] by hand — bundled so a crash can't
+    /// leave a dangling revision or a half-repointed track.
+    #[allow(clippy::too_many_arguments)]
+    pub fn commit_destructive_revision(
+        &mut self,
+        track_id: &str,
+        label: &str,
+        sample_rate: u32,
+        stereo: bool,
+        duration_secs: f32,
+        audio: &[u8],
+        keep: usize,
+    ) -> Result<i64> {
+        let tx = self
+            .conn
+            .transaction()
+            .context("begin destructive-revision txn")?;
+        tx.execute(
+            "INSERT INTO revisions
+               (track_id, kind, created, label, pinned, sample_rate, stereo, duration_secs, audio)
+             VALUES (?1, 'destructive', datetime('now'), ?2, 0, ?3, ?4, ?5, ?6)",
+            params![
+                track_id,
+                label,
+                sample_rate,
+                stereo as i64,
+                duration_secs as f64,
+                audio
+            ],
+        )
+        .context("inserting destructive revision")?;
+        let rid = tx.last_insert_rowid();
+        tx.execute(
+            "UPDATE tracks SET current_rev_id = ?2 WHERE id = ?1",
+            params![track_id, rid],
+        )
+        .context("repointing current_rev_id")?;
+        tx.execute(
+            "DELETE FROM revisions
+             WHERE track_id = ?1
+               AND kind = 'destructive'
+               AND pinned = 0
+               AND id <> ?2
+               AND id NOT IN (
+                 SELECT id FROM revisions
+                 WHERE track_id = ?1 AND kind = 'destructive'
+                 ORDER BY id DESC LIMIT ?3
+               )",
+            params![track_id, rid, keep as i64],
+        )
+        .context("pruning destructive revisions")?;
+        tx.commit().context("commit destructive-revision txn")?;
+        Ok(rid)
+    }
+
     pub fn set_current_rev(&self, track_id: &str, rev_id: i64) -> Result<()> {
         self.conn
             .execute(
