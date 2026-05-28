@@ -1076,27 +1076,44 @@ impl TinyBoothApp {
     /// pops the modal regardless of outcome — silence-on-failure is what
     /// made this whole flow feel broken.
     fn apply_import_outcome(&mut self, outcome: crate::suno_import::ImportOutcome) {
-        if let Some(proj) = outcome.project.as_ref() {
-            let manifest = proj.manifest_path();
-            self.config.record_project(&manifest);
-        }
         if outcome.success {
             if let Some(proj) = outcome.project.clone() {
-                self.project = proj;
-                self.project_dirty = false;
-                self.player = None;
-                self.tab = Tab::Project;
-                // Kick off background telemetry analysis for every
-                // freshly-imported track. Drum / Percussion stems
-                // additionally get drum-kit classification.
-                self.dispatch_telemetry_for_active_project();
+                // Phase 2c: imports land in the live `.tib` format. The
+                // import has already written a folder project (raw Suno
+                // WAVs + manifest); migrate that to a sibling `.tib` and
+                // open it. The folder staging stays on disk as a backup.
+                // Telemetry is dispatched once, by the open path, over
+                // the .tib BLOBs — we deliberately don't activate the
+                // folder project, so there's no double analysis.
+                let tib_path = proj.root.with_extension("tib");
+                match crate::tib_project::migrate_folder_to_tib(&proj, &tib_path) {
+                    Ok(()) => {
+                        self.open_project_path(&tib_path);
+                        self.tab = Tab::Project;
+                        self.status = Some(format!(
+                            "Imported → {} ({} tracks)",
+                            tib_path.display(),
+                            self.project.tracks.len()
+                        ));
+                    }
+                    Err(e) => {
+                        // Migration failed — fall back to the folder
+                        // project so the import isn't lost.
+                        self.config.record_project(&proj.manifest_path());
+                        self.project = proj;
+                        self.backing = ProjectBacking::Folder;
+                        self.project_dirty = false;
+                        self.player = None;
+                        self.tab = Tab::Project;
+                        self.dispatch_telemetry_for_active_project();
+                        self.status =
+                            Some(format!("Imported as folder — .tib migration failed: {e:#}"));
+                    }
+                }
             }
-        }
-        self.status = Some(if outcome.success {
-            format!("Imported into {}", self.project.manifest_path().display())
         } else {
-            "Suno import did not produce any tracks — see dialog".into()
-        });
+            self.status = Some("Suno import did not produce any tracks — see dialog".into());
+        }
         self.import_dialog = Some(outcome);
     }
 
@@ -1580,9 +1597,9 @@ impl TinyBoothApp {
                     self.project_dirty = false;
                     self.player = None;
                     self.status = Some(format!("opened {}", path.display()));
-                    // Telemetry over .tib BLOBs lands in step 5 — skip
-                    // the dispatch for now (it would chase t.file paths
-                    // that don't exist on disk).
+                    // Backfill telemetry via the BLOB→temp-WAV bridge —
+                    // the .tib branch of dispatch handles the extraction.
+                    self.dispatch_telemetry_for_active_project();
                 }
                 Err(e) => {
                     self.config.recent_projects.retain(|p| p != path);
