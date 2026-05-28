@@ -507,7 +507,11 @@ fn lanes_view(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
                                     // lanes visible per screen height.
                                     ui.add_space(1.0);
 
-                                    // Row 1: name (strong, leftmost) + telemetry chips.
+                                    // Row 1: name (strong, leftmost) + telemetry
+                                    // chips, with the mood pip pinned to the right
+                                    // edge so the pips line up in a column across
+                                    // lanes regardless of how many chips precede
+                                    // them (v0.4.42 — fixes ragged headers).
                                     ui.horizontal(|ui| {
                                         ui.label(egui::RichText::new(&track.name).strong());
                                         if let Some(t) = app.project.tracks.get(idx) {
@@ -519,6 +523,14 @@ fn lanes_view(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
                                                     requested_correction = Some(idx);
                                                 }
                                                 ChipAction::None => {}
+                                            }
+                                            if let Some(tel) = t.telemetry.as_ref() {
+                                                ui.with_layout(
+                                                    egui::Layout::right_to_left(
+                                                        egui::Align::Center,
+                                                    ),
+                                                    |ui| mood_pip(ui, tel),
+                                                );
                                             }
                                         }
                                     });
@@ -1486,62 +1498,65 @@ fn telemetry_chips(ui: &mut egui::Ui, track: &crate::project::Track) -> ChipActi
                 ));
             }
         }
-
-        // ── Mood pip ──────────────────────────────────────────
-        // 10×10 px coloured square. Hue = valence (cool ↔ warm),
-        // saturation = arousal. Tooltip carries every numeric
-        // that used to be its own chip.
-        let (r, g, b) = mood_color(tel.arousal, tel.valence);
-        let (rect, resp) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
-        ui.painter()
-            .rect_filled(rect, 2.0, Color32::from_rgb(r, g, b));
-        ui.painter()
-            .rect_stroke(rect, 2.0, egui::Stroke::new(0.5, Color32::from_gray(80)));
-        resp.on_hover_text(format!(
-            "Mood proxy\n\
-             • arousal {:.2}  (RMS + onsets + brightness)\n\
-             • valence {:+.2}  (brightness × tonality)\n\
-             \n\
-             Timbre\n\
-             • centroid {:.2}  ({})\n\
-             • flatness {:.2}  ({})\n\
-             • rolloff  {:.2}\n\
-             \n\
-             Dynamics\n\
-             • RMS  {:.1} dB ± {:.1}\n\
-             • peak {:.1} dB\n\
-             • crest {:.1}\n\
-             \n\
-             Rhythm\n\
-             • {} onsets ({:.1}/s)\n\
-             • sustain {:.0}%",
-            tel.arousal,
-            tel.valence,
-            tel.spectral_centroid_avg,
-            if tel.spectral_centroid_avg >= 0.45 {
-                "bright"
-            } else if tel.spectral_centroid_avg <= 0.15 {
-                "dark"
-            } else {
-                "neutral"
-            },
-            tel.spectral_flatness_avg,
-            if tel.spectral_flatness_avg >= 0.5 {
-                "noisy"
-            } else {
-                "tonal"
-            },
-            tel.spectral_rolloff_avg,
-            tel.rms_avg_db,
-            tel.rms_std_db,
-            tel.peak_db,
-            tel.crest_factor_avg,
-            tel.onset_count,
-            tel.onset_rate_hz,
-            tel.sustain_ratio * 100.0,
-        ));
     });
     action
+}
+
+/// Mood pip — a 12×12 coloured square (hue = valence, saturation =
+/// arousal) with a tooltip carrying the full timbre / dynamics / rhythm
+/// readout. Rendered right-aligned in the lane header (see the row-1
+/// caller) so the pips form a clean vertical column regardless of how
+/// many instrument / key / AI chips precede them on each row.
+fn mood_pip(ui: &mut egui::Ui, tel: &crate::telemetry::TrackTelemetry) {
+    let (r, g, b) = mood_color(tel.arousal, tel.valence);
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
+    ui.painter()
+        .rect_filled(rect, 2.0, Color32::from_rgb(r, g, b));
+    ui.painter()
+        .rect_stroke(rect, 2.0, egui::Stroke::new(0.5, Color32::from_gray(80)));
+    resp.on_hover_text(format!(
+        "Mood proxy\n\
+         • arousal {:.2}  (RMS + onsets + brightness)\n\
+         • valence {:+.2}  (brightness × tonality)\n\
+         \n\
+         Timbre\n\
+         • centroid {:.2}  ({})\n\
+         • flatness {:.2}  ({})\n\
+         • rolloff  {:.2}\n\
+         \n\
+         Dynamics\n\
+         • RMS  {:.1} dB ± {:.1}\n\
+         • peak {:.1} dB\n\
+         • crest {:.1}\n\
+         \n\
+         Rhythm\n\
+         • {} onsets ({:.1}/s)\n\
+         • sustain {:.0}%",
+        tel.arousal,
+        tel.valence,
+        tel.spectral_centroid_avg,
+        if tel.spectral_centroid_avg >= 0.45 {
+            "bright"
+        } else if tel.spectral_centroid_avg <= 0.15 {
+            "dark"
+        } else {
+            "neutral"
+        },
+        tel.spectral_flatness_avg,
+        if tel.spectral_flatness_avg >= 0.5 {
+            "noisy"
+        } else {
+            "tonal"
+        },
+        tel.spectral_rolloff_avg,
+        tel.rms_avg_db,
+        tel.rms_std_db,
+        tel.peak_db,
+        tel.crest_factor_avg,
+        tel.onset_count,
+        tel.onset_rate_hz,
+        tel.sustain_ratio * 100.0,
+    ));
 }
 
 /// Ensure track `i` carries a correction chain with Coherence
