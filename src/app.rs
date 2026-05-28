@@ -24,6 +24,18 @@ pub enum ProjectBacking {
     Tib { db: TibDb },
 }
 
+/// A folder project the user opened, awaiting a migrate-or-keep choice.
+/// Phase 2c nudges users onto the single-file `.tib` format: opening a
+/// legacy `*.tinybooth` shows a modal offering to migrate. The folder
+/// stays on disk either way (migration is additive). See
+/// [`crate::ui::migrate_to_tib`].
+pub struct PendingMigration {
+    /// The `*.tinybooth` manifest the user picked.
+    pub folder_manifest: PathBuf,
+    /// Sibling `.tib` path the migration would write to.
+    pub suggested_tib: PathBuf,
+}
+
 /// True when a track's telemetry is present and analyzed by the current
 /// analyzer version (so a re-dispatch would be wasted work).
 fn telemetry_is_current(t: &Track) -> bool {
@@ -166,6 +178,11 @@ pub struct TinyBoothApp {
     /// target project root already contains a project with a matching
     /// session epoch. The conflict modal shows while this is `Some`.
     pub import_conflict: Option<PendingImport>,
+
+    /// A folder project the user opened, awaiting the migrate-to-`.tib`
+    /// prompt. The migrate modal shows while this is `Some`. TBSS-FR-0007
+    /// phase 2c.
+    pub pending_migration: Option<PendingMigration>,
 
     /// Mixer/automation recorder. Captures fader gestures while a strip's
     /// arm toggle is on and the player is in Playing state. Flushed into
@@ -362,6 +379,7 @@ impl TinyBoothApp {
             visualizer: crate::ui::visualizer::VisualizerState::default(),
             import_dialog: None,
             import_conflict: None,
+            pending_migration: None,
             recorder: crate::automation::Recorder::default(),
             mix_console_fraction: 0.42,
             recordings_page: 0,
@@ -1559,7 +1577,54 @@ impl TinyBoothApp {
         if is_tib {
             self.open_tib_path(path);
         } else {
-            self.open_folder_manifest_path(path);
+            // Legacy folder project: nudge toward .tib via the migrate
+            // modal instead of opening straight away. The user can still
+            // choose "Open as folder". The .tib lands as a sibling of the
+            // project root (the manifest's parent dir).
+            let suggested_tib = path
+                .parent()
+                .map(|root| root.with_extension("tib"))
+                .unwrap_or_else(|| path.with_extension("tib"));
+            self.pending_migration = Some(PendingMigration {
+                folder_manifest: path.to_path_buf(),
+                suggested_tib,
+            });
+        }
+    }
+
+    /// Resolve the migrate-to-`.tib` prompt. `migrate = true` converts the
+    /// folder project to its sibling `.tib` and opens it (folder kept as
+    /// backup); `migrate = false` opens the folder project as-is. Either
+    /// way the pending prompt is cleared.
+    pub fn resolve_migration(&mut self, migrate: bool) {
+        let Some(pending) = self.pending_migration.take() else {
+            return;
+        };
+        if !migrate {
+            self.open_folder_manifest_path(&pending.folder_manifest);
+            return;
+        }
+        match Project::load(&pending.folder_manifest) {
+            Ok(proj) => {
+                match crate::tib_project::migrate_folder_to_tib(&proj, &pending.suggested_tib) {
+                    Ok(()) => {
+                        self.open_tib_path(&pending.suggested_tib);
+                        self.status = Some(format!(
+                            "Migrated → {} (folder kept as backup)",
+                            pending.suggested_tib.display()
+                        ));
+                    }
+                    Err(e) => {
+                        // Migration failed — fall back to opening the folder.
+                        self.open_folder_manifest_path(&pending.folder_manifest);
+                        self.status =
+                            Some(format!("Opened as folder — .tib migration failed: {e:#}"));
+                    }
+                }
+            }
+            Err(e) => {
+                self.status = Some(format!("could not load project to migrate: {e:#}"));
+            }
         }
     }
 
@@ -2123,6 +2188,11 @@ impl eframe::App for TinyBoothApp {
         // Duplicate-import conflict modal.
         if self.import_conflict.is_some() {
             ui::import_conflict::show(self, ctx);
+        }
+
+        // Migrate-to-.tib prompt (shown when a folder project is opened).
+        if self.pending_migration.is_some() {
+            ui::migrate_to_tib::show(self, ctx);
         }
 
         // Project Health modal (TBSS-FR-0005).

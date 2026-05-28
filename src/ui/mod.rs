@@ -6,6 +6,7 @@ pub mod health;
 pub mod import_conflict;
 pub mod import_dialog;
 pub mod manual;
+pub mod migrate_to_tib;
 pub mod mix;
 pub mod profile_editor;
 pub mod project;
