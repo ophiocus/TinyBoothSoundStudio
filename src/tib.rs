@@ -16,10 +16,17 @@
 //!   * `revisions(kind='destructive')` — committed snapshots, FIFO-5.
 //!   * `config_revs` — non-destructive history (no audio bytes).
 //!
-//! NOTE: this is TBSS-FR-0007 **phase 1** — the storage layer, exercised
-//! by its own tests but not yet wired into the app (phase 2 replaces the
-//! folder format's path resolution with this). The module-level
-//! `allow(dead_code)` is removed when phase 2 lands.
+//! TBSS-FR-0007 phase 2c landed: this storage layer backs the live
+//! `.tib` load/save path (open/play/trim/export/save/hot-swap/telemetry/
+//! import all operate on it), alongside the legacy folder format.
+//!
+//! This is the full `.tib` storage API surface. A few methods are
+//! currently exercised only by this module's tests (the diagnostic
+//! `pragma_*` / `revision_count`, the granular `insert_stem` /
+//! `insert_track` that `save_metadata` bypasses with batch SQL) or are
+//! reserved for the phase-6 revision-browser UI (`RevKind::Destructive`
+//! construction, standalone `prune_destructive`, `path`). They're kept as
+//! the coherent CRUD surface rather than deleted, hence the module allow.
 #![allow(dead_code)]
 
 use anyhow::{Context, Result};

@@ -1,8 +1,18 @@
 # TBSS-FR-0007: The `.tib` container — single-file SQLite projects with stem revision history
 
-**Status**: 📝 Proposed
+**Status**: ✅ Landed (MVP) — phase 2c shipped in v0.4.42
 **Author(s)**: ophiocus
-**Filed**: 2026-05-23 · **Revised**: 2026-05-23 (substrate **ZIP → SQLite**)
+**Filed**: 2026-05-23 · **Revised**: 2026-05-23 (substrate **ZIP → SQLite**) · **Landed**: 2026-05-28 (live load/save flip)
+
+> **Landed-MVP note (2026-05-28).** `.tib` is now a live load/save format
+> alongside the folder format: open/save, player (reads `current_rev_id`
+> BLOBs), reversible destructive Trim (FIFO-5 revisions), export, hot-load
+> swap, telemetry (via a BLOB→temp-WAV bridge), and import (lands in
+> `.tib`) all operate on it. A migrate-on-open prompt converts legacy
+> folder projects. **Deferred past MVP:** the stem/revision **browser UI**
+> + rollback gesture (phase 6 — storage layer already supports it),
+> recording directly into `.tib` (still uses the folder recordings
+> filespace), and a `.tib`→folder "Save As" for parity.
 
 ## Summary
 

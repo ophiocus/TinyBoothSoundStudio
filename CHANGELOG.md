@@ -8,6 +8,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); thi
 
 (Nothing yet — known issues all resolved as of v0.4.23.)
 
+## [0.4.42] — 2026-05-28
+
+### Added — `.tib` is now a live project format (TBSS-FR-0007 phase 2c)
+The single-file `.tib` SQLite container is no longer just an export target — it is a full live load/save format running alongside the legacy folder format. A `.tib` project does everything a folder project does:
+- **Open / Save** — `File → Open` accepts both `*.tib` and `*.tinybooth`; saves to a `.tib` are one SQLite transaction touching only changed pages (no whole-file rewrite), crash-safe via WAL.
+- **Play** — the player reads each track's audio from its `current_rev_id` revision BLOB via incremental SQLite I/O, on the audio owner-thread.
+- **Trim (reversible)** — a destructive Trim writes a new revision and repoints `current_rev_id`, keeping the last five edits plus the immutable `orig` as a FIFO history. Roll back by repointing — no byte copy. (Folder projects keep the in-place crop.)
+- **Export** — the mixer reads BLOBs; a `.tib` export is byte-for-byte identical to the folder export of the same audio.
+- **Hot-load swap** — replacing a track's audio commits a new revision, so the pre-swap take stays recoverable.
+- **Telemetry / Project Health** — analysis now works on `.tib` projects via a BLOB→temp-WAV bridge (extract, analyze, clean up), so `.tib` is a true peer of the folder format.
+- **Import lands in `.tib`** — importing a Suno bundle (folder or zip) migrates the imported project to a sibling `.tib` and opens it; the folder staging stays on disk as a backup.
+- **Migrate-on-open prompt** — opening a legacy `*.tinybooth` offers to convert it to a sibling `.tib` (additive — the folder is kept as a backup) or open it as a folder.
+
+### Notes
+- Recording still targets the folder-based recordings filespace (the `.tib`↔recordings bridge is deferred). A stem/revision **browser UI** and a rollback gesture are the next phase; the storage layer already supports them.
+- Suite **105 passing**; all gates (`fmt`, `clippy --release --all-targets -D warnings`, `test`, release build) clean.
+
 ## [0.4.41] — 2026-05-23
 
 ### Added — Export as single `.tib` (TBSS-FR-0007, first user-facing step)

@@ -9,12 +9,11 @@
 //! are stored as JSON text columns.
 //!
 //! [`save_metadata`] writes **only** the project + stem/track rows —
-//! never the audio BLOBs. Audio enters the db once (import / record /
-//! destructive edit) via [`crate::tib::TibDb`] directly; a routine save
-//! is then a handful of small `UPDATE`s, which is the whole point of the
-//! SQLite substrate (TBSS-FR-0007). This module is **not yet wired into
-//! the app** (phase 2c/2d) — hence the module-level `allow(dead_code)`.
-#![allow(dead_code)]
+//! never the audio BLOBs. Audio enters the db once (import / destructive
+//! edit / hot-swap) via [`crate::tib::TibDb`] directly; a routine save is
+//! then a handful of small `UPDATE`s, which is the whole point of the
+//! SQLite substrate (TBSS-FR-0007). Wired into the live load/save path
+//! as of phase 2c.
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
