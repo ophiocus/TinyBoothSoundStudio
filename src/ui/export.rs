@@ -84,7 +84,14 @@ pub fn show(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
                 bitrate_kbps: app.export_bitrate,
                 out_path: out,
             };
-            match export::export(&app.project, &opts) {
+            let result = {
+                let db = match &app.backing {
+                    crate::app::ProjectBacking::Folder => None,
+                    crate::app::ProjectBacking::Tib { db } => Some(db),
+                };
+                export::export(&app.project, &opts, db)
+            };
+            match result {
                 Ok(()) => {
                     app.export_msg = Some(format!("Exported: {}", opts.out_path.display()));
                     app.status = app.export_msg.clone();

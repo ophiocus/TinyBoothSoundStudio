@@ -15,12 +15,14 @@
 
 use anyhow::{anyhow, Context, Result};
 use hound::{SampleFormat, WavReader, WavSpec, WavWriter};
+use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use crate::automation::SplineSampler;
 use crate::dsp::FilterChainStereo;
 use crate::project::{Project, Track};
+use crate::tib::TibDb;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExportFormat {
@@ -80,13 +82,16 @@ pub struct ExportOptions {
 /// in the requested format. The output is stereo iff any unmuted source track
 /// is stereo; otherwise mono. Mono inputs in a stereo mix are centre-panned,
 /// stereo inputs in a mono mix are averaged to (L+R)/2.
-pub fn export(project: &Project, options: &ExportOptions) -> Result<()> {
+/// `db` is `Some` for `.tib`-backed projects (audio read from BLOBs by
+/// track id) and `None` for folder projects (audio read from sibling
+/// WAV files). TBSS-FR-0007 phase 2c.
+pub fn export(project: &Project, options: &ExportOptions, db: Option<&TibDb>) -> Result<()> {
     let active: Vec<&Track> = project.tracks.iter().filter(|t| !t.mute).collect();
     if active.is_empty() {
         return Err(anyhow!("nothing to export — no unmuted tracks"));
     }
 
-    let (mix, sample_rate, channels) = mixdown(project, &active)?;
+    let (mix, sample_rate, channels) = mixdown(project, &active, db)?;
     match options.format {
         ExportFormat::Wav => write_wav_16(&options.out_path, &mix, sample_rate, channels)?,
         _ => encode_via_ffmpeg(&mix, sample_rate, channels, options)?,
@@ -100,17 +105,18 @@ pub fn export(project: &Project, options: &ExportOptions) -> Result<()> {
 ///
 /// Returns `(interleaved_samples, sample_rate, out_channels)` where
 /// `out_channels` is `2` if any input track was stereo, else `1`.
-fn mixdown(project: &Project, tracks: &[&Track]) -> Result<(Vec<f32>, u32, u16)> {
+fn mixdown(
+    project: &Project,
+    tracks: &[&Track],
+    db: Option<&TibDb>,
+) -> Result<(Vec<f32>, u32, u16)> {
     let mut sample_rate = 0u32;
     let is_stereo_mix = tracks.iter().any(|t| t.stereo);
     let out_channels: u16 = if is_stereo_mix { 2 } else { 1 };
     let mut per_track: Vec<Vec<f32>> = Vec::with_capacity(tracks.len());
 
     for t in tracks {
-        let abs = project.track_abs_path(t);
-        let reader =
-            WavReader::open(&abs).with_context(|| format!("opening track {}", abs.display()))?;
-        let spec = reader.spec();
+        let (spec, raw) = read_track_pcm(project, t, db)?;
         if sample_rate == 0 {
             sample_rate = spec.sample_rate;
         } else if spec.sample_rate != sample_rate {
@@ -121,20 +127,6 @@ fn mixdown(project: &Project, tracks: &[&Track]) -> Result<(Vec<f32>, u32, u16)>
                 sample_rate
             ));
         }
-        // Read raw PCM at unity (no gain pre-multiplied — gain is applied
-        // in the per-frame loop below alongside automation. Cleaner than
-        // pre-multiplying and then dividing back out.)
-        let raw: Vec<f32> = match spec.sample_format {
-            SampleFormat::Int => reader
-                .into_samples::<i32>()
-                .filter_map(|r| r.ok())
-                .map(|s| s as f32 / i16::MAX as f32)
-                .collect(),
-            SampleFormat::Float => reader
-                .into_samples::<f32>()
-                .filter_map(|r| r.ok())
-                .collect(),
-        };
 
         let in_channels = spec.channels.max(1) as usize;
         let frame_count = raw.len() / in_channels;
@@ -227,6 +219,46 @@ fn mixdown(project: &Project, tracks: &[&Track]) -> Result<(Vec<f32>, u32, u16)>
         }
     }
     Ok((mix, sample_rate, out_channels))
+}
+
+/// Read a track's raw PCM as unity-scaled f32 (no gain applied — gain
+/// is folded in per-frame by the caller). Reads from a `.tib` BLOB by
+/// track id when `db` is `Some`, else from the sibling WAV file.
+fn read_track_pcm(project: &Project, t: &Track, db: Option<&TibDb>) -> Result<(WavSpec, Vec<f32>)> {
+    match db {
+        Some(db) => {
+            let bytes = db
+                .read_current_audio(&t.id)
+                .with_context(|| format!("reading BLOB for track '{}'", t.name))?;
+            let reader = WavReader::new(Cursor::new(bytes))
+                .with_context(|| format!("parsing in-memory WAV for track '{}'", t.name))?;
+            decode_pcm(reader)
+        }
+        None => {
+            let abs = project.track_abs_path(t);
+            let reader = WavReader::open(&abs)
+                .with_context(|| format!("opening track {}", abs.display()))?;
+            decode_pcm(reader)
+        }
+    }
+}
+
+/// Decode a WAV stream to unity f32. Mirrors the historical export
+/// scaling (int samples read as i32, divided by `i16::MAX`).
+fn decode_pcm<R: Read>(reader: WavReader<R>) -> Result<(WavSpec, Vec<f32>)> {
+    let spec = reader.spec();
+    let raw: Vec<f32> = match spec.sample_format {
+        SampleFormat::Int => reader
+            .into_samples::<i32>()
+            .filter_map(|r| r.ok())
+            .map(|s| s as f32 / i16::MAX as f32)
+            .collect(),
+        SampleFormat::Float => reader
+            .into_samples::<f32>()
+            .filter_map(|r| r.ok())
+            .collect(),
+    };
+    Ok((spec, raw))
 }
 
 fn db_to_lin(db: f32) -> f32 {
@@ -364,4 +396,104 @@ fn find_ffmpeg() -> Option<PathBuf> {
 
 pub fn ffmpeg_available() -> bool {
     find_ffmpeg().is_some()
+}
+
+#[cfg(test)]
+mod tib_export_tests {
+    //! TBSS-FR-0007 phase 2c step 6: exporting a `.tib` project must
+    //! produce the exact same mix as exporting the folder project it was
+    //! migrated from — the only difference is where the bytes are read.
+    use super::*;
+    use crate::project::{Project, Track, TrackSource};
+    use crate::telemetry::TelemetryProfile;
+    use crate::tib::TibDb;
+
+    fn write_wav_file(path: &Path, frames: u32, rate: u32) {
+        let spec = WavSpec {
+            channels: 2,
+            sample_rate: rate,
+            bits_per_sample: 16,
+            sample_format: SampleFormat::Int,
+        };
+        let mut w = WavWriter::create(path, spec).unwrap();
+        for i in 0..frames {
+            for c in 0..2u32 {
+                w.write_sample(((i as i32 * 3 + c as i32 * 7) % 1000) as i16)
+                    .unwrap();
+            }
+        }
+        w.finalize().unwrap();
+    }
+
+    fn folder_track(id: &str, file: &str, name: &str, rate: u32) -> Track {
+        Track {
+            id: id.into(),
+            name: name.into(),
+            file: file.into(),
+            mute: false,
+            gain_db: 0.0,
+            sample_rate: rate,
+            channel_source: None,
+            duration_secs: 0.0,
+            profile: None,
+            stereo: true,
+            source: TrackSource::default(),
+            correction: None,
+            gain_automation: None,
+            polarity_inverted: false,
+            telemetry: None,
+            telemetry_profile: TelemetryProfile::default(),
+        }
+    }
+
+    #[test]
+    fn export_from_tib_matches_folder_export_byte_for_byte() {
+        let dir = std::env::temp_dir().join(format!("tbss-export-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("tracks")).unwrap();
+        write_wav_file(&dir.join("tracks/a.wav"), 500, 48_000);
+        write_wav_file(&dir.join("tracks/b.wav"), 500, 48_000);
+
+        let mut proj = Project::new("E", dir.clone());
+        proj.tracks
+            .push(folder_track("a", "tracks/a.wav", "A", 48_000));
+        proj.tracks
+            .push(folder_track("b", "tracks/b.wav", "B", 48_000));
+
+        // Folder export (reads sibling WAVs).
+        let out_folder = dir.join("folder.wav");
+        export(
+            &proj,
+            &ExportOptions {
+                format: ExportFormat::Wav,
+                bitrate_kbps: 192,
+                out_path: out_folder.clone(),
+            },
+            None,
+        )
+        .unwrap();
+
+        // Migrate → .tib, reload, export from BLOBs.
+        let tib = dir.join("e.tib");
+        crate::tib_project::migrate_folder_to_tib(&proj, &tib).unwrap();
+        let db = TibDb::open(&tib).unwrap();
+        let tib_proj = crate::tib_project::load_project(&db, tib.clone()).unwrap();
+        let out_tib = dir.join("tib.wav");
+        export(
+            &tib_proj,
+            &ExportOptions {
+                format: ExportFormat::Wav,
+                bitrate_kbps: 192,
+                out_path: out_tib.clone(),
+            },
+            Some(&db),
+        )
+        .unwrap();
+
+        let fb = std::fs::read(&out_folder).unwrap();
+        let tb = std::fs::read(&out_tib).unwrap();
+        assert_eq!(fb, tb, "tib export must match folder export byte-for-byte");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
