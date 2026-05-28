@@ -1233,13 +1233,22 @@ mod tib_source_tests {
 
     #[test]
     fn missing_tib_rev_returns_error_not_panic() {
+        // `TibDb::open` is built on `rusqlite::Connection::open`, which
+        // creates the file if it doesn't exist — so we can't probe
+        // load_track_play with a fictitious path without leaving a
+        // stray empty .tib behind. Build a real empty .tib in temp_dir,
+        // point at a non-existent rev id, and clean up after.
+        let path = scratch_tib("missing-rev");
+        {
+            let _db = TibDb::create(&path).unwrap();
+        }
         let snap = TrackAudioSnapshot {
             source: AudioSource::TibRev {
-                db_path: PathBuf::from("does-not-exist.tib"),
-                rev_id: 1,
+                db_path: path.clone(),
+                rev_id: 99_999,
             },
             name: "Ghost".into(),
-            file: "tib:1".into(),
+            file: "tib:99999".into(),
             gain_db: 0.0,
             mute: false,
             polarity_inverted: false,
@@ -1247,5 +1256,6 @@ mod tib_source_tests {
             gain_automation: None,
         };
         assert!(load_track_play(&snap).is_err());
+        cleanup(&path);
     }
 }
