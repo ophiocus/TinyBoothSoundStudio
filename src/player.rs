@@ -21,6 +21,7 @@ use anyhow::{anyhow, Context, Result};
 use cpal::traits::{DeviceTrait, StreamTrait};
 use cpal::{Stream, StreamConfig};
 use parking_lot::Mutex;
+use std::io::{Cursor, Read};
 use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
@@ -30,19 +31,43 @@ use std::sync::Arc;
 use crate::automation::{AutomationLane, SplineSampler};
 use crate::dsp::{FilterChainStereo, Profile};
 use crate::project::Project;
+use crate::tib::TibDb;
 
 /// Number of samples summed into one waveform-display peak bin.
 /// ~5.3 ms at 48 kHz — plenty for the on-screen waveform without
 /// blowing memory on a 5-minute track.
 const PEAKS_BIN_SIZE: usize = 256;
 
+/// Where to fetch a track's audio bytes when the owner-thread loads it.
+/// Folder projects produce `File(abs_path)`; `.tib` projects produce
+/// `TibRev { db_path, rev_id }` — the owner-thread opens its own
+/// read-only [`TibDb`] connection (WAL allows concurrent readers
+/// alongside the writer the UI thread keeps open) and reads the BLOB
+/// via incremental I/O. Both variants are `Send`; the SQLite connection
+/// is built on the owner-thread, never crosses it.
+#[derive(Clone)]
+pub enum AudioSource {
+    File(PathBuf),
+    // Wired up to a production caller in TBSS-FR-0007 phase 2c step 3
+    // (the `.tib` open path). Step 1 lands the decode + tests only.
+    #[allow(dead_code)]
+    TibRev {
+        db_path: PathBuf,
+        rev_id: i64,
+    },
+}
+
 /// Per-track audio build inputs, captured cheaply on the UI thread
-/// (metadata clones + the absolute WAV path — no disk I/O). Send, so it
+/// (metadata clones + the source descriptor — no disk I/O). Send, so it
 /// can cross to the audio owner-thread where the slow WAV load + flaky
 /// cpal device enumeration actually happen. See [`snapshot_project`].
 pub struct TrackAudioSnapshot {
-    pub abs_path: PathBuf,
+    pub source: AudioSource,
     pub name: String,
+    /// Free-form display label for diagnostics — the legacy folder
+    /// project stores the relative filename here; `.tib` projects store
+    /// a synthetic `tib:<rev_id>` tag. Used only in error messages so
+    /// the UI can tell tracks apart.
     pub file: String,
     pub gain_db: f32,
     pub mute: bool,
@@ -71,7 +96,7 @@ pub fn snapshot_project(project: &Project) -> ProjectAudioSnapshot {
             .tracks
             .iter()
             .map(|t| TrackAudioSnapshot {
-                abs_path: project.track_abs_path(t),
+                source: AudioSource::File(project.track_abs_path(t)),
                 name: t.name.clone(),
                 file: t.file.clone(),
                 gain_db: t.gain_db,
@@ -590,35 +615,26 @@ impl Player {
 // ───────────────────── helpers ─────────────────────
 
 fn load_track_play(t: &TrackAudioSnapshot) -> Result<TrackPlay> {
-    let path = &t.abs_path;
-    let mut reader = hound::WavReader::open(path)
-        .with_context(|| format!("reading track {}", path.display()))?;
-    let spec = reader.spec();
-    let channels = spec.channels.max(1);
-    let frame_count = (reader.duration() as u64).max(1);
-
-    // Read everything as i16. hound's into_samples::<i16>() works for
-    // 16-bit Int files; Suno occasionally exports 24-bit which we
-    // currently downsize via i32::clamp(i16). This is fine for playback.
-    let samples: Vec<i16> = match spec.sample_format {
-        hound::SampleFormat::Int => {
-            if spec.bits_per_sample == 16 {
-                reader.samples::<i16>().filter_map(|r| r.ok()).collect()
-            } else {
-                reader
-                    .samples::<i32>()
-                    .filter_map(|r| r.ok())
-                    .map(|s| s.clamp(i16::MIN as i32, i16::MAX as i32) as i16)
-                    .collect()
-            }
+    let (spec, samples, frame_count) = match &t.source {
+        AudioSource::File(path) => {
+            let reader = hound::WavReader::open(path)
+                .with_context(|| format!("reading track {}", path.display()))?;
+            decode_wav(reader).with_context(|| format!("decoding track {}", path.display()))?
         }
-        hound::SampleFormat::Float => reader
-            .samples::<f32>()
-            .filter_map(|r| r.ok())
-            .map(|s| (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16)
-            .collect(),
+        AudioSource::TibRev { db_path, rev_id } => {
+            // WAL allows this read connection alongside the app's writer.
+            let db = TibDb::open(db_path)
+                .with_context(|| format!("opening .tib for playback: {}", db_path.display()))?;
+            let bytes = db
+                .read_revision_audio(*rev_id)
+                .with_context(|| format!("reading revision {rev_id} from {}", db_path.display()))?;
+            let reader = hound::WavReader::new(Cursor::new(bytes))
+                .with_context(|| format!("parsing in-memory WAV for rev {rev_id}"))?;
+            decode_wav(reader)
+                .with_context(|| format!("decoding in-memory WAV for rev {rev_id}"))?
+        }
     };
-
+    let channels = spec.channels.max(1);
     let peaks = compute_peaks(&samples, channels as usize, PEAKS_BIN_SIZE);
 
     Ok(TrackPlay {
@@ -642,6 +658,38 @@ fn load_track_play(t: &TrackAudioSnapshot) -> Result<TrackPlay> {
         correction_present: AtomicBool::new(t.correction.is_some()),
         correction_generation: AtomicU64::new(1), // ≠0 forces audio thread to build chain on first callback
     })
+}
+
+/// Decode a WAV stream into the i16-interleaved buffer the audio thread
+/// reads. Shared by the file-on-disk path (folder projects) and the
+/// in-memory `Cursor<Vec<u8>>` path (.tib BLOBs). Returns the spec,
+/// the decoded samples, and the frame count.
+fn decode_wav<R: Read>(mut reader: hound::WavReader<R>) -> Result<(hound::WavSpec, Vec<i16>, u64)> {
+    let spec = reader.spec();
+    let frame_count = (reader.duration() as u64).max(1);
+
+    // Read everything as i16. hound's into_samples::<i16>() works for
+    // 16-bit Int files; Suno occasionally exports 24-bit which we
+    // currently downsize via i32::clamp(i16). This is fine for playback.
+    let samples: Vec<i16> = match spec.sample_format {
+        hound::SampleFormat::Int => {
+            if spec.bits_per_sample == 16 {
+                reader.samples::<i16>().filter_map(|r| r.ok()).collect()
+            } else {
+                reader
+                    .samples::<i32>()
+                    .filter_map(|r| r.ok())
+                    .map(|s| s.clamp(i16::MIN as i32, i16::MAX as i32) as i16)
+                    .collect()
+            }
+        }
+        hound::SampleFormat::Float => reader
+            .samples::<f32>()
+            .filter_map(|r| r.ok())
+            .map(|s| (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16)
+            .collect(),
+    };
+    Ok((spec, samples, frame_count))
 }
 
 /// Abs-max per bin across however many channels the file has.
@@ -1031,4 +1079,173 @@ fn read_frame(t: &TrackPlay, pos: u64) -> (f32, f32) {
 
 fn db_to_lin(db: f32) -> f32 {
     10f32.powf(db / 20.0)
+}
+
+#[cfg(test)]
+mod tib_source_tests {
+    //! TBSS-FR-0007 phase 2c step 1: verify `load_track_play` can decode
+    //! a WAV BLOB out of a `.tib` via `AudioSource::TibRev`. This is the
+    //! stand-alone check that the player can run off the new audio source
+    //! without any UI / device wiring yet.
+    use super::*;
+    use crate::tib::{RevKind, TibDb};
+    use hound::{SampleFormat, WavSpec, WavWriter};
+    use std::io::Cursor;
+    use std::path::PathBuf;
+
+    fn make_wav_bytes(samples: &[i16], rate: u32, channels: u16) -> Vec<u8> {
+        let spec = WavSpec {
+            channels,
+            sample_rate: rate,
+            bits_per_sample: 16,
+            sample_format: SampleFormat::Int,
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        {
+            let mut w = WavWriter::new(Cursor::new(&mut buf), spec).unwrap();
+            for s in samples {
+                w.write_sample(*s).unwrap();
+            }
+            w.finalize().unwrap();
+        }
+        buf
+    }
+
+    fn scratch_tib(name: &str) -> PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(format!("tbss-player-{}-{}.tib", name, std::process::id()));
+        for suf in ["", "-wal", "-shm"] {
+            let mut q = p.as_os_str().to_os_string();
+            q.push(suf);
+            let _ = std::fs::remove_file(PathBuf::from(q));
+        }
+        p
+    }
+
+    fn cleanup(p: &std::path::Path) {
+        for suf in ["", "-wal", "-shm"] {
+            let mut q = p.as_os_str().to_os_string();
+            q.push(suf);
+            let _ = std::fs::remove_file(PathBuf::from(q));
+        }
+    }
+
+    #[test]
+    fn load_track_play_from_tib_rev_round_trips_stereo() {
+        let path = scratch_tib("stereo");
+        let frames: Vec<i16> = (0..16).flat_map(|i: i16| [i * 100, -i * 100]).collect();
+        let wav = make_wav_bytes(&frames, 48_000, 2);
+        let rid;
+        {
+            let db = TibDb::create(&path).unwrap();
+            db.insert_stem("s1", "Vox", 0).unwrap();
+            db.insert_track("t1", "s1", "Take 1", 0).unwrap();
+            rid = db
+                .insert_revision(
+                    "t1",
+                    RevKind::Orig,
+                    "import",
+                    48_000,
+                    true,
+                    16.0 / 48_000.0,
+                    &wav,
+                )
+                .unwrap();
+            db.set_current_rev("t1", rid).unwrap();
+        }
+
+        let snap = TrackAudioSnapshot {
+            source: AudioSource::TibRev {
+                db_path: path.clone(),
+                rev_id: rid,
+            },
+            name: "Take 1".into(),
+            file: format!("tib:{rid}"),
+            gain_db: 0.0,
+            mute: false,
+            polarity_inverted: false,
+            correction: None,
+            gain_automation: None,
+        };
+        let tp = load_track_play(&snap).expect("load from .tib BLOB should succeed");
+
+        assert_eq!(tp.channels, 2);
+        assert_eq!(tp.sample_rate, 48_000);
+        assert_eq!(tp.frame_count, 16, "16 frames written");
+        assert_eq!(tp.samples.len(), 32, "stereo: 2 samples per frame");
+        // Spot-check round-trip fidelity at a handful of points.
+        assert_eq!(tp.samples[0], 0);
+        assert_eq!(tp.samples[1], 0);
+        assert_eq!(tp.samples[2], 100);
+        assert_eq!(tp.samples[3], -100);
+        assert_eq!(tp.samples[30], 1500);
+        assert_eq!(tp.samples[31], -1500);
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn load_track_play_from_tib_rev_round_trips_mono() {
+        let path = scratch_tib("mono");
+        let frames: Vec<i16> = (0..8).map(|i: i16| i * 1000).collect();
+        let wav = make_wav_bytes(&frames, 44_100, 1);
+        let rid;
+        {
+            let db = TibDb::create(&path).unwrap();
+            db.insert_stem("s1", "Drums", 0).unwrap();
+            db.insert_track("t1", "s1", "Kick", 0).unwrap();
+            rid = db
+                .insert_revision(
+                    "t1",
+                    RevKind::Orig,
+                    "import",
+                    44_100,
+                    false,
+                    8.0 / 44_100.0,
+                    &wav,
+                )
+                .unwrap();
+            db.set_current_rev("t1", rid).unwrap();
+        }
+
+        let snap = TrackAudioSnapshot {
+            source: AudioSource::TibRev {
+                db_path: path.clone(),
+                rev_id: rid,
+            },
+            name: "Kick".into(),
+            file: format!("tib:{rid}"),
+            gain_db: 0.0,
+            mute: false,
+            polarity_inverted: false,
+            correction: None,
+            gain_automation: None,
+        };
+        let tp = load_track_play(&snap).expect("mono load");
+
+        assert_eq!(tp.channels, 1);
+        assert_eq!(tp.sample_rate, 44_100);
+        assert_eq!(tp.frame_count, 8);
+        assert_eq!(tp.samples, frames);
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn missing_tib_rev_returns_error_not_panic() {
+        let snap = TrackAudioSnapshot {
+            source: AudioSource::TibRev {
+                db_path: PathBuf::from("does-not-exist.tib"),
+                rev_id: 1,
+            },
+            name: "Ghost".into(),
+            file: "tib:1".into(),
+            gain_db: 0.0,
+            mute: false,
+            polarity_inverted: false,
+            correction: None,
+            gain_automation: None,
+        };
+        assert!(load_track_play(&snap).is_err());
+    }
 }
