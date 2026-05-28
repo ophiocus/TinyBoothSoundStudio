@@ -207,7 +207,11 @@ fn rebuild_player_if_needed(app: &mut TinyBoothApp) {
     // ── 3. Kick off the build on the owner-thread, return immediately ─
     app.player = None;
     app.player_error = None;
-    let snapshot = crate::player::snapshot_project(&app.project);
+    // For .tib-backed projects, the snapshot resolves audio via the
+    // current_rev_id map instead of on-disk paths. Folder projects get
+    // the legacy File(abs_path) source.
+    let tib_rev_ids = app.tib_rev_id_map();
+    let snapshot = crate::player::snapshot_project(&app.project, tib_rev_ids.as_ref());
     let rx = crate::player::spawn_build(
         snapshot,
         app.audio_err_tx.clone(),

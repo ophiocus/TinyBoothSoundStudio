@@ -151,8 +151,17 @@ impl TibDb {
     /// Open an existing `.tib`. Re-asserts the runtime pragmas (WAL +
     /// foreign_keys persist in the file header, but foreign_keys must be
     /// re-enabled per connection) and checks the schema version.
+    ///
+    /// Refuses missing files. `rusqlite::Connection::open` would silently
+    /// create an empty DB at the given path otherwise, which is a footgun
+    /// when the path comes from a user-supplied open dialog or stored
+    /// `last_project_path` — we'd produce an empty schema-less file in
+    /// place of a clear "not found" error.
     pub fn open(path: impl Into<PathBuf>) -> Result<Self> {
         let path = path.into();
+        if !path.is_file() {
+            anyhow::bail!("not a .tib file: {}", path.display());
+        }
         let conn =
             Connection::open(&path).with_context(|| format!("opening .tib: {}", path.display()))?;
         conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA synchronous = NORMAL;")
@@ -516,6 +525,25 @@ mod tests {
             .unwrap();
         assert_eq!(n, 0, "failed transaction must leave no rows");
         cleanup(&p);
+    }
+
+    #[test]
+    fn open_refuses_nonexistent_file() {
+        // rusqlite's Connection::open would silently create an empty db
+        // at this path; TibDb::open must guard against that footgun.
+        // Avoid expect_err — TibDb wraps a non-Debug Connection.
+        let mut p = std::env::temp_dir();
+        p.push(format!("tbss-tib-missing-{}.tib", std::process::id()));
+        let _ = std::fs::remove_file(&p);
+        match TibDb::open(&p) {
+            Ok(_) => panic!("opening a missing file must fail"),
+            Err(e) => assert!(
+                e.to_string().contains("not a .tib file"),
+                "error should mention not-a-tib, got: {e:#}"
+            ),
+        }
+        // And no file should have been created as a side effect.
+        assert!(!p.exists(), "TibDb::open must not create the file");
     }
 
     #[test]

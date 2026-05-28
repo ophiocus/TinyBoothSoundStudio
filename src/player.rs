@@ -28,6 +28,8 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
 
+use std::collections::HashMap;
+
 use crate::automation::{AutomationLane, SplineSampler};
 use crate::dsp::{FilterChainStereo, Profile};
 use crate::project::Project;
@@ -48,13 +50,7 @@ const PEAKS_BIN_SIZE: usize = 256;
 #[derive(Clone)]
 pub enum AudioSource {
     File(PathBuf),
-    // Wired up to a production caller in TBSS-FR-0007 phase 2c step 3
-    // (the `.tib` open path). Step 1 lands the decode + tests only.
-    #[allow(dead_code)]
-    TibRev {
-        db_path: PathBuf,
-        rev_id: i64,
-    },
+    TibRev { db_path: PathBuf, rev_id: i64 },
 }
 
 /// Per-track audio build inputs, captured cheaply on the UI thread
@@ -88,22 +84,43 @@ pub struct ProjectAudioSnapshot {
 
 /// Snapshot the live project for an async player build. Runs on the UI
 /// thread but does no I/O — just clones per-track metadata and resolves
-/// absolute paths, both cheap. The expensive/flaky work (WAV decode,
-/// cpal enumeration, stream creation) is deferred to the owner thread.
-pub fn snapshot_project(project: &Project) -> ProjectAudioSnapshot {
+/// the audio source descriptor, both cheap. The expensive/flaky work
+/// (WAV decode, cpal enumeration, stream creation) is deferred to the
+/// owner thread.
+///
+/// When `tib_rev_ids` is `Some`, the project is `.tib`-backed and every
+/// track's source becomes `TibRev` keyed by its `current_rev_id` — the
+/// `db_path` is `project.root` (which `tib_project::load_project` stamps
+/// with the .tib file path). Tracks missing from the map fall through to
+/// `File`, which then errors on load and surfaces the per-track skip via
+/// the audio-error channel. (The map is the source of truth — if a track
+/// has no current revision in the db it can't play.)
+pub fn snapshot_project(
+    project: &Project,
+    tib_rev_ids: Option<&HashMap<String, i64>>,
+) -> ProjectAudioSnapshot {
     ProjectAudioSnapshot {
         tracks: project
             .tracks
             .iter()
-            .map(|t| TrackAudioSnapshot {
-                source: AudioSource::File(project.track_abs_path(t)),
-                name: t.name.clone(),
-                file: t.file.clone(),
-                gain_db: t.gain_db,
-                mute: t.mute,
-                polarity_inverted: t.polarity_inverted,
-                correction: t.correction.clone(),
-                gain_automation: t.gain_automation.clone(),
+            .map(|t| {
+                let source = match tib_rev_ids.and_then(|m| m.get(&t.id)) {
+                    Some(&rev_id) => AudioSource::TibRev {
+                        db_path: project.root.clone(),
+                        rev_id,
+                    },
+                    None => AudioSource::File(project.track_abs_path(t)),
+                };
+                TrackAudioSnapshot {
+                    source,
+                    name: t.name.clone(),
+                    file: t.file.clone(),
+                    gain_db: t.gain_db,
+                    mute: t.mute,
+                    polarity_inverted: t.polarity_inverted,
+                    correction: t.correction.clone(),
+                    gain_automation: t.gain_automation.clone(),
+                }
             })
             .collect(),
         master_gain_db: project.master_gain_db,
@@ -1229,6 +1246,70 @@ mod tib_source_tests {
         assert_eq!(tp.samples, frames);
 
         cleanup(&path);
+    }
+
+    #[test]
+    fn snapshot_emits_tib_rev_for_tracks_in_the_map() {
+        use crate::project::{Project, Track, TrackSource};
+        use crate::telemetry::TelemetryProfile;
+        use std::collections::HashMap;
+        let mut proj = Project::new("S", PathBuf::from("/tmp/whatever.tib"));
+        proj.tracks.push(Track {
+            id: "t-a".into(),
+            name: "A".into(),
+            file: String::new(),
+            mute: false,
+            gain_db: 0.0,
+            sample_rate: 48_000,
+            channel_source: None,
+            duration_secs: 1.0,
+            profile: None,
+            stereo: true,
+            source: TrackSource::default(),
+            correction: None,
+            gain_automation: None,
+            polarity_inverted: false,
+            telemetry: None,
+            telemetry_profile: TelemetryProfile::default(),
+        });
+        proj.tracks.push(Track {
+            id: "t-b".into(),
+            name: "B".into(),
+            file: String::new(),
+            mute: false,
+            gain_db: 0.0,
+            sample_rate: 48_000,
+            channel_source: None,
+            duration_secs: 1.0,
+            profile: None,
+            stereo: true,
+            source: TrackSource::default(),
+            correction: None,
+            gain_automation: None,
+            polarity_inverted: false,
+            telemetry: None,
+            telemetry_profile: TelemetryProfile::default(),
+        });
+
+        // Folder path: no map → every source is `File`.
+        let snap = snapshot_project(&proj, None);
+        for ts in &snap.tracks {
+            assert!(matches!(ts.source, AudioSource::File(_)));
+        }
+
+        // Tib path: only `t-a` has a rev pointer. `t-b` falls through to
+        // `File` and would surface a per-track skip when loaded.
+        let mut map = HashMap::new();
+        map.insert("t-a".to_string(), 42i64);
+        let snap = snapshot_project(&proj, Some(&map));
+        match &snap.tracks[0].source {
+            AudioSource::TibRev { db_path, rev_id } => {
+                assert_eq!(db_path, &PathBuf::from("/tmp/whatever.tib"));
+                assert_eq!(*rev_id, 42);
+            }
+            _ => panic!("t-a should resolve to TibRev"),
+        }
+        assert!(matches!(snap.tracks[1].source, AudioSource::File(_)));
     }
 
     #[test]

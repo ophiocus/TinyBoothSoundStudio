@@ -380,9 +380,24 @@ impl TinyBoothApp {
     /// rather than the legacy folder format. Used by the load/save/
     /// player/trim/import/export call sites that take different code
     /// paths under each backing. TBSS-FR-0007 phase 2c.
-    #[allow(dead_code)] // first consumer lands in step 3
     pub fn is_tib(&self) -> bool {
         matches!(self.backing, ProjectBacking::Tib { .. })
+    }
+
+    /// `current_rev_id` map for every playable track in the active
+    /// `.tib` project, or `None` for folder-backed projects. The Mix-tab
+    /// player snapshot uses this to build `TibRev` audio sources keyed
+    /// by track id; the owner-thread then opens its own read-only
+    /// `TibDb` connection per track (WAL allows concurrent readers).
+    /// TBSS-FR-0007 phase 2c.
+    pub fn tib_rev_id_map(&self) -> Option<std::collections::HashMap<String, i64>> {
+        match &self.backing {
+            ProjectBacking::Folder => None,
+            ProjectBacking::Tib { db } => match crate::tib_project::current_rev_id_map(db) {
+                Ok(m) => Some(m),
+                Err(_) => Some(std::collections::HashMap::new()),
+            },
+        }
     }
 
     pub fn set_active_profile(&mut self, idx: usize) {
@@ -606,6 +621,16 @@ impl TinyBoothApp {
     /// isn't Suno-shaped or has no orphans. Safe to call from the
     /// Mix-tab `show()` on every visit.
     pub fn cleanse_active_project(&mut self) {
+        // .tib projects have no Recorded orphans to migrate: every track
+        // is a `tracks` row with its audio in `revisions`, addressed by
+        // id rather than by sibling-file path. The cleanse protocol's
+        // whole job — moving stray WAVs out of a Suno folder into the
+        // recordings filespace — doesn't apply. Step 5 grows the
+        // .tib ↔ recordings-folder bridge (the recordings filespace
+        // stays folder-format through 2c MVP); until then, skip.
+        if self.is_tib() {
+            return;
+        }
         match crate::cleanup::cleanse_recordings_in_suno_project(&mut self.project) {
             Ok(report) if report.is_empty() => {
                 // No-op; don't clutter status.
@@ -755,14 +780,28 @@ impl TinyBoothApp {
     }
 
     pub fn save_project(&mut self) {
-        match self.project.save() {
-            Ok(()) => {
-                let manifest = self.project.manifest_path();
-                self.config.record_project(&manifest);
-                self.status = Some(format!("saved {}", manifest.display()));
-                self.project_dirty = false;
+        match &mut self.backing {
+            ProjectBacking::Folder => match self.project.save() {
+                Ok(()) => {
+                    let manifest = self.project.manifest_path();
+                    self.config.record_project(&manifest);
+                    self.status = Some(format!("saved {}", manifest.display()));
+                    self.project_dirty = false;
+                }
+                Err(e) => self.status = Some(format!("save error: {e}")),
+            },
+            ProjectBacking::Tib { db } => {
+                let project = &self.project;
+                let tib_path = project.root.clone();
+                match db.transaction(|conn| crate::tib_project::save_metadata(project, conn)) {
+                    Ok(()) => {
+                        self.config.record_project(&tib_path);
+                        self.status = Some(format!("saved {}", tib_path.display()));
+                        self.project_dirty = false;
+                    }
+                    Err(e) => self.status = Some(format!("save error: {e:#}")),
+                }
             }
-            Err(e) => self.status = Some(format!("save error: {e}")),
         }
     }
 
@@ -1051,6 +1090,14 @@ impl TinyBoothApp {
     /// `TelemetryProfile::resolve`. Cheap on the all-fresh path —
     /// just iterates and pushes to a channel.
     pub fn dispatch_telemetry_for_active_project(&mut self) {
+        // .tib projects: telemetry analyzer reads WAVs by path; over the
+        // BLOB-backed format it'd chase `track_abs_path` results that
+        // either don't exist or (worse) collide with the .tib file
+        // itself. Re-enable in step 5 when the analyzer learns to pull
+        // bytes out of revisions.
+        if self.is_tib() {
+            return;
+        }
         let root = self.project.root.clone();
         for t in &self.project.tracks {
             // Skip tracks whose telemetry is already current.
@@ -1094,6 +1141,12 @@ impl TinyBoothApp {
     /// have no resampler) — caller gets a clear status message and
     /// nothing on disk changes. v0.4.20.
     pub fn hot_load_swap(&mut self, idx: usize, source: &Path) -> anyhow::Result<()> {
+        // .tib swap means inserting a new revision row + repointing
+        // current_rev_id under one transaction, not overwriting a WAV.
+        // Lands in step 5 alongside the rest of the .tib import paths.
+        if self.is_tib() {
+            anyhow::bail!("hot-load swap into .tib projects is not yet supported in this build");
+        }
         let track = self
             .project
             .tracks
@@ -1296,20 +1349,31 @@ impl TinyBoothApp {
 
     pub fn open_project_dialog(&mut self) {
         if let Some(p) = rfd::FileDialog::new()
-            .add_filter("TinyBooth project", &["tinybooth"])
+            .add_filter("TinyBooth project", &["tib", "tinybooth"])
             .pick_file()
         {
             self.open_project_path(&p);
         }
     }
 
-    /// Load a project manifest from a known path. Used by the Open
-    /// dialog and by the File → Open Recent submenu.
+    /// Load a project from a known path — either a `.tib` SQLite file
+    /// (TBSS-FR-0007) or a legacy folder-format `.tinybooth` manifest.
+    /// Used by the Open dialog and by the File → Open Recent submenu.
     pub fn open_project_path(&mut self, path: &Path) {
+        let is_tib = path.extension().and_then(|e| e.to_str()) == Some("tib");
+        if is_tib {
+            self.open_tib_path(path);
+        } else {
+            self.open_folder_manifest_path(path);
+        }
+    }
+
+    fn open_folder_manifest_path(&mut self, path: &Path) {
         match Project::load(path) {
             Ok(proj) => {
                 self.config.record_project(path);
                 self.project = proj;
+                self.backing = ProjectBacking::Folder;
                 self.project_dirty = false;
                 self.player = None; // force player rebuild for new project
                 self.status = Some(format!("opened {}", path.display()));
@@ -1324,6 +1388,34 @@ impl TinyBoothApp {
                 self.config.recent_projects.retain(|p| p != path);
                 self.config.save_or_log();
                 self.status = Some(format!("open error: {e}"));
+            }
+        }
+    }
+
+    fn open_tib_path(&mut self, path: &Path) {
+        match crate::tib::TibDb::open(path) {
+            Ok(db) => match crate::tib_project::load_project(&db, path.to_path_buf()) {
+                Ok(proj) => {
+                    self.config.record_project(path);
+                    self.project = proj;
+                    self.backing = ProjectBacking::Tib { db };
+                    self.project_dirty = false;
+                    self.player = None;
+                    self.status = Some(format!("opened {}", path.display()));
+                    // Telemetry over .tib BLOBs lands in step 5 — skip
+                    // the dispatch for now (it would chase t.file paths
+                    // that don't exist on disk).
+                }
+                Err(e) => {
+                    self.config.recent_projects.retain(|p| p != path);
+                    self.config.save_or_log();
+                    self.status = Some(format!("open error: {e:#}"));
+                }
+            },
+            Err(e) => {
+                self.config.recent_projects.retain(|p| p != path);
+                self.config.save_or_log();
+                self.status = Some(format!("open error: {e:#}"));
             }
         }
     }

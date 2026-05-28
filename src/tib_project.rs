@@ -18,9 +18,10 @@
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use rusqlite::params;
+use rusqlite::{params, Connection};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
+use std::collections::HashMap;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 
@@ -76,15 +77,13 @@ pub fn stem_id_for(track_id: &str) -> String {
 
 // ── save ────────────────────────────────────────────────────────────
 
-/// Write the project's metadata (meta row + stem/track rows) to the
-/// `.tib`. Does **not** touch audio revisions. Upserts existing rows and
-/// prunes stems/tracks that were removed from the in-memory project
-/// (whose revisions cascade away). Wrap the call in a `TibDb`
-/// transaction at the call site if atomicity across the whole save is
-/// wanted.
-pub fn save_metadata(project: &Project, db: &TibDb) -> Result<()> {
-    let conn = db.conn();
-
+/// Write the project's metadata (meta row + stem/track rows) over the
+/// given SQLite connection. Does **not** touch audio revisions. Upserts
+/// existing rows and prunes stems/tracks that were removed from the
+/// in-memory project (whose revisions cascade away). Takes a bare
+/// `&Connection` so the caller can run the whole save inside one
+/// `TibDb::transaction` — the routine save's atomicity guarantee.
+pub fn save_metadata(project: &Project, conn: &Connection) -> Result<()> {
     conn.execute(
         "UPDATE meta SET
            name = ?1, created = ?2, kind = ?3, master_gain_db = ?4,
@@ -161,14 +160,13 @@ pub fn save_metadata(project: &Project, db: &TibDb) -> Result<()> {
         .context("upserting track")?;
     }
 
-    prune_removed(db, &keep_tracks, &keep_stems)?;
+    prune_removed(conn, &keep_tracks, &keep_stems)?;
     Ok(())
 }
 
 /// Delete tracks/stems no longer present in the in-memory project. Their
 /// revisions + config_revs cascade away (ON DELETE CASCADE).
-fn prune_removed(db: &TibDb, keep_tracks: &[String], keep_stems: &[String]) -> Result<()> {
-    let conn = db.conn();
+fn prune_removed(conn: &Connection, keep_tracks: &[String], keep_stems: &[String]) -> Result<()> {
     let existing_tracks: Vec<String> = {
         let mut s = conn.prepare("SELECT id FROM tracks")?;
         let rows = s.query_map([], |r| r.get::<_, String>(0))?;
@@ -190,6 +188,27 @@ fn prune_removed(db: &TibDb, keep_tracks: &[String], keep_stems: &[String]) -> R
         }
     }
     Ok(())
+}
+
+/// Map of `track_id` → `current_rev_id` for every track in the `.tib`
+/// that has a current audio revision. The player snapshot uses this to
+/// build `AudioSource::TibRev` entries — one indexed SELECT here, then
+/// the owner-thread reopens its own read connection per track.
+/// TBSS-FR-0007 phase 2c.
+pub fn current_rev_id_map(db: &TibDb) -> Result<HashMap<String, i64>> {
+    let conn = db.conn();
+    let mut stmt = conn
+        .prepare("SELECT id, current_rev_id FROM tracks WHERE current_rev_id IS NOT NULL")
+        .context("preparing current_rev_id_map")?;
+    let rows = stmt
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+        .context("querying current_rev_id_map")?;
+    let mut out = HashMap::new();
+    for row in rows {
+        let (id, rev) = row.context("decoding current_rev_id row")?;
+        out.insert(id, rev);
+    }
+    Ok(out)
 }
 
 // ── load ────────────────────────────────────────────────────────────
@@ -358,7 +377,7 @@ pub fn migrate_folder_to_tib(folder: &Project, tib_path: &Path) -> Result<()> {
         .with_context(|| format!("creating .tib at {}", tib_path.display()))?;
 
     // 1. meta + stem/track rows (current_rev_id NULL until audio lands).
-    save_metadata(folder, &db)?;
+    save_metadata(folder, db.conn())?;
 
     // 2. each track's WAV → an `orig` revision BLOB.
     for t in &folder.tracks {
@@ -507,7 +526,7 @@ mod tests {
         let path = scratch("roundtrip");
         let db = TibDb::create(&path).unwrap();
         let original = fixture();
-        save_metadata(&original, &db).unwrap();
+        save_metadata(&original, db.conn()).unwrap();
 
         let loaded = load_project(&db, path.clone()).unwrap();
         assert_eq!(loaded.name, "My Song");
@@ -545,11 +564,11 @@ mod tests {
         let path = scratch("idempotent");
         let db = TibDb::create(&path).unwrap();
         let mut p = fixture();
-        save_metadata(&p, &db).unwrap();
+        save_metadata(&p, db.conn()).unwrap();
         // Edit + save again: should UPDATE, not duplicate.
         p.tracks[0].gain_db = -6.0;
         p.name = "Renamed".into();
-        save_metadata(&p, &db).unwrap();
+        save_metadata(&p, db.conn()).unwrap();
 
         let loaded = load_project(&db, path.clone()).unwrap();
         assert_eq!(loaded.name, "Renamed");
@@ -581,11 +600,11 @@ mod tests {
             telemetry: None,
             telemetry_profile: TelemetryProfile::default(),
         });
-        save_metadata(&p, &db).unwrap();
+        save_metadata(&p, db.conn()).unwrap();
         assert_eq!(load_project(&db, path.clone()).unwrap().tracks.len(), 2);
 
         p.tracks.remove(1); // drop Drums
-        save_metadata(&p, &db).unwrap();
+        save_metadata(&p, db.conn()).unwrap();
         let loaded = load_project(&db, path.clone()).unwrap();
         assert_eq!(loaded.tracks.len(), 1);
         assert_eq!(loaded.tracks[0].id, "track-001");
@@ -628,6 +647,35 @@ mod tests {
             telemetry: None,
             telemetry_profile: TelemetryProfile::default(),
         }
+    }
+
+    #[test]
+    fn current_rev_id_map_returns_pointer_per_track() {
+        let dir = std::env::temp_dir().join(format!("tbss-revmap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("tracks")).unwrap();
+        write_wav(&dir.join("tracks/track-001.wav"), 48_000, true);
+        write_wav(&dir.join("tracks/track-002.wav"), 48_000, true);
+
+        let mut proj = Project::new("Map", dir.clone());
+        proj.tracks
+            .push(folder_track("track-001", "tracks/track-001.wav", "Vox"));
+        proj.tracks
+            .push(folder_track("track-002", "tracks/track-002.wav", "Drums"));
+        let tib = dir.join("map.tib");
+        migrate_folder_to_tib(&proj, &tib).unwrap();
+
+        let db = TibDb::open(&tib).unwrap();
+        let map = current_rev_id_map(&db).unwrap();
+        assert_eq!(map.len(), 2, "one rev pointer per track");
+        // Both pointers must round-trip into a real audio BLOB.
+        for tid in ["track-001", "track-002"] {
+            let rev = map.get(tid).copied().expect("track in map");
+            let bytes = db.read_revision_audio(rev).unwrap();
+            assert!(!bytes.is_empty(), "rev BLOB non-empty for {tid}");
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

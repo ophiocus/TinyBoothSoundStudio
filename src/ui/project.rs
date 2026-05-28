@@ -191,8 +191,16 @@ pub fn show(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
 
             if let Some(i) = to_delete {
                 let t = app.project.tracks.remove(i);
-                let abs = app.project.root.join(&t.file);
-                let _ = std::fs::remove_file(&abs);
+                // Folder projects: unlink the sibling WAV. .tib projects:
+                // the audio rows cascade away on the next save (the prune
+                // step in tib_project::save_metadata). Critically, do NOT
+                // fs::remove_file on a .tib project — `t.file` is empty
+                // for .tib tracks, so root.join("") would point at the
+                // .tib file itself and we'd delete the whole project.
+                if !app.is_tib() {
+                    let abs = app.project.root.join(&t.file);
+                    let _ = std::fs::remove_file(&abs);
+                }
                 app.project_dirty = true;
             }
             if let Some(i) = to_swap {
