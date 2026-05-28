@@ -21,6 +21,9 @@ The single-file `.tib` SQLite container is no longer just an export target — i
 - **Import lands in `.tib`** — importing a Suno bundle (folder or zip) migrates the imported project to a sibling `.tib` and opens it; the folder staging stays on disk as a backup.
 - **Migrate-on-open prompt** — opening a legacy `*.tinybooth` offers to convert it to a sibling `.tib` (additive — the folder is kept as a backup) or open it as a folder.
 
+### Fixed
+- **Mix-tab lane headers no longer look ragged.** The per-track mood pip (the small coloured square) was the last item in the header's chip row, so it landed at a different x on every lane depending on how many instrument / key / AI chips preceded it. It's now pinned to the header's right edge, so the pips form a clean vertical column regardless of the chips before them.
+
 ### Notes
 - Recording still targets the folder-based recordings filespace (the `.tib`↔recordings bridge is deferred). A stem/revision **browser UI** and a rollback gesture are the next phase; the storage layer already supports them.
 - Suite **105 passing**; all gates (`fmt`, `clippy --release --all-targets -D warnings`, `test`, release build) clean.
