@@ -72,13 +72,13 @@ jobs:
           path: target/release/ffmpeg.exe
           key: ffmpeg-lgpl-${{ env.FFMPEG_PIN }}
         env:
-          FFMPEG_PIN: autobuild-2026-05-12-13-59
+          FFMPEG_PIN: autobuild-2026-05-28-14-16
 
       - name: Download + extract ffmpeg (cache miss)
         if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
         shell: pwsh
         env:
-          FFMPEG_PIN: autobuild-2026-05-12-13-59
+          FFMPEG_PIN: autobuild-2026-05-28-14-16
         run: |
           $tag = $env:FFMPEG_PIN
           # BtbN's autobuild asset filename convention.
@@ -86,8 +86,19 @@ jobs:
           # Some autobuild tags use `master-latest` naming instead of N-…;
           # the safest universal fallback is to enumerate the release's
           # assets and pick the win64-lgpl non-shared one.
+          # BtbN prunes old autobuild releases (~a week's worth kept), so a
+          # pinned tag eventually 404s. Try the pin for reproducibility; on
+          # 404 fall back to the always-present `latest` release so a stale
+          # pin degrades to a working build instead of failing the release.
+          # (Battle-scar: v0.4.42's first release run died here when the
+          # v0.4.41-era pin had been pruned.)
           $api = "https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/tags/$tag"
-          $rel = Invoke-RestMethod -Uri $api -Headers @{ "User-Agent" = "tbss-ci" }
+          try {
+            $rel = Invoke-RestMethod -Uri $api -Headers @{ "User-Agent" = "tbss-ci" }
+          } catch {
+            Write-Host "Pinned ffmpeg tag '$tag' not found (BtbN pruned it) — falling back to 'latest'."
+            $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/latest" -Headers @{ "User-Agent" = "tbss-ci" }
+          }
           $dlAsset = $rel.assets |
             Where-Object { $_.name -like '*win64-lgpl*.zip' -and $_.name -notlike '*shared*' } |
             Select-Object -First 1
