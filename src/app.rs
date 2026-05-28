@@ -5,12 +5,28 @@ use crate::export::{self, ExportFormat};
 use crate::git_update::{UpdateAvailable, UpdateState};
 use crate::project::{Project, Track};
 use crate::suno_import::{ImportKind, PendingImport};
+use crate::tib::TibDb;
 use crate::ui;
 use anyhow::Context as _;
 use eframe::egui;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::sync::Arc;
+
+/// Which on-disk format backs the live project, and any open handles that
+/// implies. **TBSS-FR-0007 phase 2c step 2 — plumbing only.** Constructed as
+/// `Folder` everywhere; step 3 adds the `Tib` producer when the `.tib` open
+/// path lands. Lives on [`TinyBoothApp`] rather than on `Project` because
+/// `TibDb` owns a `rusqlite::Connection` (not serialisable, not `Clone`),
+/// whereas `Project` is a plain serde struct.
+pub enum ProjectBacking {
+    Folder,
+    // Wired up in TBSS-FR-0007 phase 2c step 3 (the `.tib` open path).
+    #[allow(dead_code)]
+    Tib {
+        db: TibDb,
+    },
+}
 
 /// In-flight take metadata. Captured at `start_new_take` time so the
 /// Record tab doesn't have to keep a `Project` struct alive for the
@@ -54,6 +70,11 @@ pub struct TinyBoothApp {
     // Project state.
     pub project: Project,
     pub project_dirty: bool,
+    /// Live storage backing for `project` — folder format today, `.tib`
+    /// once step 3 lands. Holds the open SQLite handle for `.tib`
+    /// projects so per-save SQL doesn't reopen the file each time.
+    /// TBSS-FR-0007 phase 2c.
+    pub backing: ProjectBacking,
 
     // Recording state (Record tab).
     pub devices: Vec<DeviceInfo>,
@@ -295,6 +316,7 @@ impl TinyBoothApp {
             config,
             project,
             project_dirty: false,
+            backing: ProjectBacking::Folder,
             devices,
             selected_device,
             selected_mode: SourceMode::Mixdown,
@@ -352,6 +374,15 @@ impl TinyBoothApp {
 
     pub fn active_profile(&self) -> &Profile {
         &self.profiles[self.active_profile_idx.min(self.profiles.len() - 1)]
+    }
+
+    /// True when the live project is backed by a `.tib` SQLite file
+    /// rather than the legacy folder format. Used by the load/save/
+    /// player/trim/import/export call sites that take different code
+    /// paths under each backing. TBSS-FR-0007 phase 2c.
+    #[allow(dead_code)] // first consumer lands in step 3
+    pub fn is_tib(&self) -> bool {
+        matches!(self.backing, ProjectBacking::Tib { .. })
     }
 
     pub fn set_active_profile(&mut self, idx: usize) {
