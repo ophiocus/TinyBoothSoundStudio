@@ -363,99 +363,125 @@ pub fn start_recording(
 
     viz.reset(mode.is_stereo(), sample_rate);
 
-    // err_fn closes over a Sender so the UI thread surfaces the error
-    // in the status bar instead of locking stderr from the audio thread.
-    let err_fn = move |e: cpal::StreamError| {
-        let _ = error_tx.send(format!("input stream error: {e}"));
-    };
-
-    // The double match below dispatches on the runtime `SampleFormat`
-    // enum into the generic `build_stream_*::<T>` builders. Each arm
-    // has to spell out the concrete `T` because Rust monomorphises
-    // generics at compile time — there is no `T = match ...` shortcut.
-    // A small macro could compress this, but the explicit form keeps
-    // the call sites greppable and the cost is six near-identical
-    // arms total, called once per recording start.
-    let stream = if mode.is_stereo() {
-        let chain = crate::dsp::FilterChainStereo::new(profile, sample_rate);
-        match sample_format {
-            SampleFormat::F32 => build_stream_stereo::<f32>(
-                &dev,
-                &config,
-                channels_in,
-                writer.clone(),
-                frames.clone(),
-                viz.clone(),
-                chain,
-                err_fn,
-            )?,
-            SampleFormat::I16 => build_stream_stereo::<i16>(
-                &dev,
-                &config,
-                channels_in,
-                writer.clone(),
-                frames.clone(),
-                viz.clone(),
-                chain,
-                err_fn,
-            )?,
-            SampleFormat::U16 => build_stream_stereo::<u16>(
-                &dev,
-                &config,
-                channels_in,
-                writer.clone(),
-                frames.clone(),
-                viz.clone(),
-                chain,
-                err_fn,
-            )?,
-            other => return Err(anyhow!("unsupported sample format {other:?}")),
-        }
-    } else {
-        let channel = match mode {
-            SourceMode::Channel(c) => Some(c),
-            SourceMode::Mixdown => None,
-            SourceMode::Stereo => unreachable!(),
+    // Wrap stream construction + play in an inner Result so any failure
+    // after the WAV writer was created can clean up the header-only file
+    // before propagating. Without this, a failed Record attempt (e.g. the
+    // 2nd take after the cpal stream of the 1st hasn't fully released the
+    // device yet) leaves a ~44 B orphan WAV in tracks/ — a header from
+    // hound's WavWriter::create with no samples. TBSS-FR-0008 item (3).
+    let stream_result: Result<Stream> = (|| {
+        // err_fn closes over a Sender so the UI thread surfaces the error
+        // in the status bar instead of locking stderr from the audio thread.
+        let err_fn = move |e: cpal::StreamError| {
+            let _ = error_tx.send(format!("input stream error: {e}"));
         };
-        let chain = crate::dsp::FilterChain::new(profile, sample_rate);
-        match sample_format {
-            SampleFormat::F32 => build_stream_mono::<f32>(
-                &dev,
-                &config,
-                channels_in,
-                channel,
-                writer.clone(),
-                frames.clone(),
-                viz.clone(),
-                chain,
-                err_fn,
-            )?,
-            SampleFormat::I16 => build_stream_mono::<i16>(
-                &dev,
-                &config,
-                channels_in,
-                channel,
-                writer.clone(),
-                frames.clone(),
-                viz.clone(),
-                chain,
-                err_fn,
-            )?,
-            SampleFormat::U16 => build_stream_mono::<u16>(
-                &dev,
-                &config,
-                channels_in,
-                channel,
-                writer.clone(),
-                frames.clone(),
-                viz.clone(),
-                chain,
-                err_fn,
-            )?,
-            other => return Err(anyhow!("unsupported sample format {other:?}")),
+
+        // The double match below dispatches on the runtime `SampleFormat`
+        // enum into the generic `build_stream_*::<T>` builders. Each arm
+        // has to spell out the concrete `T` because Rust monomorphises
+        // generics at compile time — there is no `T = match ...` shortcut.
+        // A small macro could compress this, but the explicit form keeps
+        // the call sites greppable and the cost is six near-identical
+        // arms total, called once per recording start.
+        let stream = if mode.is_stereo() {
+            let chain = crate::dsp::FilterChainStereo::new(profile, sample_rate);
+            match sample_format {
+                SampleFormat::F32 => build_stream_stereo::<f32>(
+                    &dev,
+                    &config,
+                    channels_in,
+                    writer.clone(),
+                    frames.clone(),
+                    viz.clone(),
+                    chain,
+                    err_fn,
+                )?,
+                SampleFormat::I16 => build_stream_stereo::<i16>(
+                    &dev,
+                    &config,
+                    channels_in,
+                    writer.clone(),
+                    frames.clone(),
+                    viz.clone(),
+                    chain,
+                    err_fn,
+                )?,
+                SampleFormat::U16 => build_stream_stereo::<u16>(
+                    &dev,
+                    &config,
+                    channels_in,
+                    writer.clone(),
+                    frames.clone(),
+                    viz.clone(),
+                    chain,
+                    err_fn,
+                )?,
+                other => return Err(anyhow!("unsupported sample format {other:?}")),
+            }
+        } else {
+            let channel = match mode {
+                SourceMode::Channel(c) => Some(c),
+                SourceMode::Mixdown => None,
+                SourceMode::Stereo => unreachable!(),
+            };
+            let chain = crate::dsp::FilterChain::new(profile, sample_rate);
+            match sample_format {
+                SampleFormat::F32 => build_stream_mono::<f32>(
+                    &dev,
+                    &config,
+                    channels_in,
+                    channel,
+                    writer.clone(),
+                    frames.clone(),
+                    viz.clone(),
+                    chain,
+                    err_fn,
+                )?,
+                SampleFormat::I16 => build_stream_mono::<i16>(
+                    &dev,
+                    &config,
+                    channels_in,
+                    channel,
+                    writer.clone(),
+                    frames.clone(),
+                    viz.clone(),
+                    chain,
+                    err_fn,
+                )?,
+                SampleFormat::U16 => build_stream_mono::<u16>(
+                    &dev,
+                    &config,
+                    channels_in,
+                    channel,
+                    writer.clone(),
+                    frames.clone(),
+                    viz.clone(),
+                    chain,
+                    err_fn,
+                )?,
+                other => return Err(anyhow!("unsupported sample format {other:?}")),
+            }
+        };
+        stream.play()?;
+        Ok(stream)
+    })();
+
+    let stream = match stream_result {
+        Ok(s) => s,
+        Err(e) => {
+            // Stream build or .play() failed after the WAV header was
+            // written. Finalize the writer (releases the OS file handle)
+            // and remove the partial file so it doesn't sit in tracks/
+            // as a header-only orphan. TBSS-FR-0008 item (3) — the user-
+            // reported "Record won't start again" surfaces this way when
+            // the cpal device isn't fully released between takes.
+            if let Some(w) = writer.lock().take() {
+                let _ = w.finalize();
+            }
+            let _ = std::fs::remove_file(wav_path);
+            return Err(e);
         }
     };
-    stream.play()?;
 
     Ok(RecordingSession {
         wav_path: wav_path.to_path_buf(),
