@@ -1,8 +1,11 @@
 use crate::app::TinyBoothApp;
 use crate::audio;
-use crate::project::Project;
+use crate::project::{Project, TRACKS_DIR};
 use crate::ui::viz;
+use chrono::{DateTime, Local};
 use eframe::egui;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 
 /// Page size for the recordings-list view. Small enough to fit on
 /// reasonable screen heights without scrolling, large enough to
@@ -217,12 +220,35 @@ pub fn show(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
     }
 
     ui.add_space(8.0);
-    ui.horizontal_wrapped(|ui| {
+    ui.horizontal(|ui| {
         ui.label("Each take saves to");
-        let recordings_path = crate::config::Config::recordings_root()
-            .map(|p| p.join("tracks").display().to_string())
+        let recordings_dir = crate::config::Config::recordings_root().map(|p| p.join("tracks"));
+        let path_str = recordings_dir
+            .as_ref()
+            .map(|p| p.display().to_string())
             .unwrap_or_else(|| "(no platform config dir)".into());
-        ui.monospace(recordings_path);
+        ui.monospace(&path_str);
+        // TBSS-FR-0008 item (2): path-label affordances. Both buttons
+        // are no-ops without a resolvable recordings dir.
+        if let Some(dir) = recordings_dir.as_ref() {
+            if ui
+                .small_button("📋")
+                .on_hover_text("Copy path to clipboard")
+                .clicked()
+            {
+                ui.ctx().output_mut(|o| o.copied_text = path_str.clone());
+            }
+            if ui
+                .small_button("📂")
+                .on_hover_text("Open in Explorer")
+                .clicked()
+            {
+                // Make sure the dir exists so Explorer doesn't pop a
+                // "Location not available" dialog on first run.
+                let _ = std::fs::create_dir_all(dir);
+                let _ = std::process::Command::new("explorer").arg(dir).spawn();
+            }
+        }
     });
 
     ui.add_space(10.0);
@@ -353,4 +379,130 @@ fn show_recordings_list(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
     if let Some(i) = click_delete_idx {
         app.delete_recording(i);
     }
+
+    // TBSS-FR-0008 item (1): list every loose WAV in tracks/ that's
+    // not covered by the manifest. Lets the user see files dropped
+    // in manually (or carried from another machine) instead of them
+    // being invisible. Adoption / play / delete actions are deferred
+    // to the full FR-0008 implementation; for now this is a
+    // read-only view + reveal-in-Explorer per file.
+    show_loose_wavs(&rec, ui);
+}
+
+/// Render the "Loose WAVs (not in manifest)" group — every `*.wav` in
+/// the recordings filespace's `tracks/` directory whose basename is
+/// not referenced by a manifest track. `.swap-tmp` debris from
+/// interrupted writes is filtered out.
+fn show_loose_wavs(rec: &Project, ui: &mut egui::Ui) {
+    let manifested: HashSet<String> = rec
+        .tracks
+        .iter()
+        .filter_map(|t| {
+            Path::new(&t.file)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|s| s.to_ascii_lowercase())
+        })
+        .collect();
+
+    let tracks_dir = rec.root.join(TRACKS_DIR);
+    let mut loose: Vec<(PathBuf, u64, std::time::SystemTime)> = Vec::new();
+    let entries = match std::fs::read_dir(&tracks_dir) {
+        Ok(it) => it,
+        Err(_) => return, // dir absent on first run — nothing to list
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let lower = name.to_ascii_lowercase();
+        if !lower.ends_with(".wav") {
+            continue;
+        }
+        // In-flight crop/swap debris — never list these.
+        if lower.ends_with(".swap-tmp") || lower.contains(".tmp") {
+            continue;
+        }
+        if manifested.contains(&lower) {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else { continue };
+        let mtime = meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        loose.push((path, meta.len(), mtime));
+    }
+    if loose.is_empty() {
+        return;
+    }
+    loose.sort_by(|a, b| b.2.cmp(&a.2)); // newest first
+
+    ui.add_space(10.0);
+    ui.separator();
+    ui.heading(format!("Loose WAVs (not in manifest) ({})", loose.len()));
+    ui.label(
+        egui::RichText::new(
+            "Files in the recordings folder that aren't tracked in the manifest \
+             — drops, carry-overs, leftovers. Reveal in Explorer to act on them.",
+        )
+        .italics()
+        .weak(),
+    );
+
+    egui::Grid::new("loose_wavs_grid")
+        .num_columns(4)
+        .striped(true)
+        .spacing([10.0, 4.0])
+        .show(ui, |ui| {
+            ui.strong("File");
+            ui.strong("Size");
+            ui.strong("Modified");
+            ui.strong("");
+            ui.end_row();
+
+            for (path, size, mtime) in &loose {
+                let name = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("(unnamed)");
+                ui.monospace(name);
+                ui.label(human_bytes(*size));
+                ui.label(human_mtime(*mtime));
+                if ui
+                    .small_button("📂")
+                    .on_hover_text("Reveal in Explorer")
+                    .clicked()
+                {
+                    // /select, asks Explorer to open the parent and
+                    // highlight the file. Best-effort; ignore failures.
+                    let _ = std::process::Command::new("explorer")
+                        .arg(format!("/select,{}", path.display()))
+                        .spawn();
+                }
+                ui.end_row();
+            }
+        });
+}
+
+/// Compact byte-count for the Loose WAVs size column.
+fn human_bytes(n: u64) -> String {
+    const KIB: f64 = 1024.0;
+    const MIB: f64 = KIB * 1024.0;
+    let n = n as f64;
+    if n >= MIB {
+        format!("{:.1} MiB", n / MIB)
+    } else if n >= KIB {
+        format!("{:.0} KiB", n / KIB)
+    } else {
+        format!("{n:.0} B")
+    }
+}
+
+/// Local-timezone timestamp for the Loose WAVs modified column.
+fn human_mtime(t: std::time::SystemTime) -> String {
+    DateTime::<Local>::from(t)
+        .format("%Y-%m-%d %H:%M")
+        .to_string()
 }
