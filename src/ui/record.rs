@@ -6,6 +6,15 @@ use chrono::{DateTime, Local};
 use eframe::egui;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+/// Fixed bin count for cached thumbnail peak tables. ~200 px wide
+/// thumbnails sample this at 1:1; coarser display widths down-sample.
+/// Independent of WAV length, so the cache key needs only the path.
+const THUMB_BINS: usize = 200;
+/// Rendered thumbnail size in the recordings list, in logical px.
+const THUMB_W: f32 = 140.0;
+const THUMB_H: f32 = 28.0;
 
 /// Page size for the recordings-list view. Small enough to fit on
 /// reasonable screen heights without scrolling, large enough to
@@ -328,12 +337,13 @@ fn show_recordings_list(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
     let mut click_delete_idx: Option<usize> = None;
 
     egui::Grid::new("recordings_list_grid")
-        .num_columns(6)
+        .num_columns(7)
         .striped(true)
         .spacing([10.0, 4.0])
         .show(ui, |ui| {
             ui.strong(""); // play
             ui.strong("Name");
+            ui.strong(""); // waveform
             ui.strong("Duration");
             ui.strong("Mode");
             ui.strong("Profile");
@@ -349,6 +359,9 @@ fn show_recordings_list(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
                     click_play_idx = Some(*idx);
                 }
                 ui.label(&t.name).on_hover_text(&t.file);
+                let abs_path = rec.root.join(&t.file);
+                let peaks = cached_or_compute_peaks(app, &abs_path);
+                draw_thumbnail(ui, peaks.as_ref());
                 ui.label(format!("{:.1}s", t.duration_secs));
                 let mode = if t.stereo {
                     "stereo".to_string()
@@ -386,14 +399,14 @@ fn show_recordings_list(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
     // being invisible. Adoption / play / delete actions are deferred
     // to the full FR-0008 implementation; for now this is a
     // read-only view + reveal-in-Explorer per file.
-    show_loose_wavs(&rec, ui);
+    show_loose_wavs(app, &rec, ui);
 }
 
 /// Render the "Loose WAVs (not in manifest)" group — every `*.wav` in
 /// the recordings filespace's `tracks/` directory whose basename is
 /// not referenced by a manifest track. `.swap-tmp` debris from
 /// interrupted writes is filtered out.
-fn show_loose_wavs(rec: &Project, ui: &mut egui::Ui) {
+fn show_loose_wavs(app: &mut TinyBoothApp, rec: &Project, ui: &mut egui::Ui) {
     let manifested: HashSet<String> = rec
         .tracks
         .iter()
@@ -452,11 +465,12 @@ fn show_loose_wavs(rec: &Project, ui: &mut egui::Ui) {
     );
 
     egui::Grid::new("loose_wavs_grid")
-        .num_columns(4)
+        .num_columns(5)
         .striped(true)
         .spacing([10.0, 4.0])
         .show(ui, |ui| {
             ui.strong("File");
+            ui.strong(""); // waveform
             ui.strong("Size");
             ui.strong("Modified");
             ui.strong("");
@@ -468,6 +482,8 @@ fn show_loose_wavs(rec: &Project, ui: &mut egui::Ui) {
                     .and_then(|n| n.to_str())
                     .unwrap_or("(unnamed)");
                 ui.monospace(name);
+                let peaks = cached_or_compute_peaks(app, path);
+                draw_thumbnail(ui, peaks.as_ref());
                 ui.label(human_bytes(*size));
                 ui.label(human_mtime(*mtime));
                 if ui
@@ -484,6 +500,123 @@ fn show_loose_wavs(rec: &Project, ui: &mut egui::Ui) {
                 ui.end_row();
             }
         });
+}
+
+/// Get the cached thumbnail peaks for `path`, decoding the WAV on the
+/// UI thread on first miss. Returns `None` only if the file can't be
+/// opened/parsed (corrupt header, unsupported format). The decoded
+/// peak vector is cached on the app keyed by absolute path; cache
+/// entries are never evicted within a session (peak vectors are ~800 B
+/// each, negligible). **TBSS-FR-0008 Phase A** — synchronous decode is
+/// the MVP trade-off; Phase B/C move it to a worker.
+fn cached_or_compute_peaks(app: &mut TinyBoothApp, path: &Path) -> Option<Arc<Vec<f32>>> {
+    if let Some(cached) = app.recordings_peaks_cache.get(path) {
+        return Some(cached.clone());
+    }
+    let peaks = compute_wav_peaks(path)?;
+    let arc = Arc::new(peaks);
+    app.recordings_peaks_cache
+        .insert(path.to_path_buf(), arc.clone());
+    Some(arc)
+}
+
+/// Decode `path` as a WAV and produce a fixed-bin peak vector
+/// (`THUMB_BINS`) — abs-max per bin across all channels. Tolerates
+/// 16/24/32-bit int and float; unsupported / corrupt files return
+/// `None` so the row falls back to the placeholder.
+fn compute_wav_peaks(path: &Path) -> Option<Vec<f32>> {
+    let reader = hound::WavReader::open(path).ok()?;
+    let spec = reader.spec();
+    let channels = spec.channels.max(1) as usize;
+    let total_frames = reader.duration() as usize;
+    if total_frames == 0 {
+        return Some(vec![0.0; THUMB_BINS]);
+    }
+
+    // Read into i16-equivalent. Mirrors player::load_track_play / Trim's
+    // crop_wav_bytes int/float branching — same decisions, narrower
+    // output (we only need amplitude per sample for the peak compute).
+    let samples: Vec<i16> = match spec.sample_format {
+        hound::SampleFormat::Int => {
+            if spec.bits_per_sample == 16 {
+                reader
+                    .into_samples::<i16>()
+                    .filter_map(|r| r.ok())
+                    .collect()
+            } else {
+                reader
+                    .into_samples::<i32>()
+                    .filter_map(|r| r.ok())
+                    .map(|s| s.clamp(i16::MIN as i32, i16::MAX as i32) as i16)
+                    .collect()
+            }
+        }
+        hound::SampleFormat::Float => reader
+            .into_samples::<f32>()
+            .filter_map(|r| r.ok())
+            .map(|s| (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16)
+            .collect(),
+    };
+
+    let frames = samples.len() / channels;
+    let frames_per_bin = frames.div_ceil(THUMB_BINS).max(1);
+    let denom = i16::MAX as f32;
+    let mut peaks = Vec::with_capacity(THUMB_BINS);
+    for b in 0..THUMB_BINS {
+        let f0 = b * frames_per_bin;
+        let f1 = ((b + 1) * frames_per_bin).min(frames);
+        let mut peak = 0.0f32;
+        for f in f0..f1 {
+            for c in 0..channels {
+                let s = samples[f * channels + c] as f32 / denom;
+                let a = s.abs();
+                if a > peak {
+                    peak = a;
+                }
+            }
+        }
+        peaks.push(peak);
+    }
+    Some(peaks)
+}
+
+/// Render a `THUMB_W × THUMB_H` waveform thumbnail (centred symmetric
+/// peak strokes). `peaks` of `None` produces a placeholder rect so the
+/// grid layout doesn't jump while a decode is pending or failed.
+fn draw_thumbnail(ui: &mut egui::Ui, peaks: Option<&Arc<Vec<f32>>>) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(THUMB_W, THUMB_H), egui::Sense::hover());
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 2.0, egui::Color32::from_rgb(20, 20, 24));
+    let Some(peaks) = peaks else {
+        // Placeholder slash so corrupt / unreadable WAVs are visually
+        // distinct from "loading" (which never appears in Phase A's
+        // sync decode — the first frame either has peaks or doesn't).
+        painter.line_segment(
+            [rect.left_top(), rect.right_bottom()],
+            egui::Stroke::new(0.5, egui::Color32::from_gray(80)),
+        );
+        return;
+    };
+    if peaks.is_empty() {
+        return;
+    }
+    let mid = rect.center().y;
+    let half_h = THUMB_H * 0.42;
+    let stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(100, 200, 130));
+    let cols = THUMB_W as usize;
+    for x in 0..cols {
+        let idx = (x as f32 / cols.max(1) as f32 * peaks.len() as f32) as usize;
+        let idx = idx.min(peaks.len() - 1);
+        let p = peaks[idx].min(1.0);
+        let xp = rect.left() + x as f32;
+        painter.line_segment(
+            [
+                egui::pos2(xp, mid - p * half_h),
+                egui::pos2(xp, mid + p * half_h),
+            ],
+            stroke,
+        );
+    }
 }
 
 /// Compact byte-count for the Loose WAVs size column.
