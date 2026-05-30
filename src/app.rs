@@ -196,12 +196,19 @@ pub struct TinyBoothApp {
     /// entries per page, newest first). Survives tab switches.
     pub recordings_page: usize,
 
-    /// Cached peak tables per recording WAV, keyed by absolute path.
-    /// Built lazily on first Record-tab render of each take (sync decode
-    /// — acceptable for MVP; TBSS-FR-0008 item (4) Phase B/C move it
-    /// off the UI thread). The `Arc<Vec<f32>>` is cheap to clone for
-    /// per-frame rendering.
-    pub recordings_peaks_cache: std::collections::HashMap<PathBuf, Arc<Vec<f32>>>,
+    /// Cached thumbnail data per recording WAV, keyed by absolute
+    /// path. Built lazily on first Record-tab render (sync UI-thread
+    /// decode — acceptable MVP hitch). Carries both the peak vector
+    /// (for rendering) and `duration_secs` (for converting drag-pixel-x
+    /// to selection-seconds in Phase B). TBSS-FR-0008 item (4).
+    pub recordings_peaks_cache:
+        std::collections::HashMap<PathBuf, Arc<crate::ui::record::CachedThumb>>,
+
+    /// Per-take selection range `(start_secs, end_secs)` for the
+    /// recordings list's Export Selection action. Keyed by abs path.
+    /// Lives in UI state only — not persisted. TBSS-FR-0008 item (4)
+    /// Phase B/C.
+    pub recordings_selection: std::collections::HashMap<PathBuf, (f32, f32)>,
     /// When the user hits ▶ on a recording entry, we swap `project`
     /// to the recordings project and queue this flag so the Mix-tab
     /// view starts playback automatically on its next render. Cleared
@@ -391,6 +398,7 @@ impl TinyBoothApp {
             mix_console_fraction: 0.42,
             recordings_page: 0,
             recordings_peaks_cache: std::collections::HashMap::new(),
+            recordings_selection: std::collections::HashMap::new(),
             mix_autoplay_pending: false,
             mix_autoplay_solo_idx: None,
             update_state: UpdateState::Checking,

@@ -256,19 +256,19 @@ fn trim_revision_in_db(
 }
 
 /// Result of an in-memory WAV crop.
-struct CroppedWav {
-    bytes: Vec<u8>,
-    new_frames: u64,
-    sample_rate: u32,
-    stereo: bool,
-    duration_secs: f32,
+pub(crate) struct CroppedWav {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) new_frames: u64,
+    pub(crate) sample_rate: u32,
+    pub(crate) stereo: bool,
+    pub(crate) duration_secs: f32,
 }
 
 /// Crop in-memory PCM/float WAV bytes to `[start_secs, end_secs]`,
 /// preserving the original sample format and bit depth. Int files
 /// (8/16/24/32-bit) round-trip through `i32`; float files through `f32`
 /// — hound writes each at the width the spec declares.
-fn crop_wav_bytes(bytes: &[u8], start_secs: f32, end_secs: f32) -> Result<CroppedWav> {
+pub(crate) fn crop_wav_bytes(bytes: &[u8], start_secs: f32, end_secs: f32) -> Result<CroppedWav> {
     let reader = hound::WavReader::new(Cursor::new(bytes)).context("parsing WAV for trim")?;
     let spec = reader.spec();
     let total_frames = reader.duration() as u64;

@@ -337,13 +337,14 @@ fn show_recordings_list(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
     let mut click_delete_idx: Option<usize> = None;
 
     egui::Grid::new("recordings_list_grid")
-        .num_columns(7)
+        .num_columns(8)
         .striped(true)
         .spacing([10.0, 4.0])
         .show(ui, |ui| {
             ui.strong(""); // play
             ui.strong("Name");
             ui.strong(""); // waveform
+            ui.strong(""); // export selection
             ui.strong("Duration");
             ui.strong("Mode");
             ui.strong("Profile");
@@ -360,8 +361,13 @@ fn show_recordings_list(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
                 }
                 ui.label(&t.name).on_hover_text(&t.file);
                 let abs_path = rec.root.join(&t.file);
-                let peaks = cached_or_compute_peaks(app, &abs_path);
-                draw_thumbnail(ui, peaks.as_ref());
+                let thumb = cached_or_compute_thumb(app, &abs_path);
+                let selection = app.recordings_selection.get(&abs_path).copied();
+                let response = draw_thumbnail(ui, thumb.as_ref(), selection);
+                if let Some(t) = thumb.as_ref() {
+                    update_selection_from_response(app, &abs_path, &response, t.duration_secs);
+                }
+                export_selection_button(app, &abs_path, ui);
                 ui.label(format!("{:.1}s", t.duration_secs));
                 let mode = if t.stereo {
                     "stereo".to_string()
@@ -465,12 +471,13 @@ fn show_loose_wavs(app: &mut TinyBoothApp, rec: &Project, ui: &mut egui::Ui) {
     );
 
     egui::Grid::new("loose_wavs_grid")
-        .num_columns(5)
+        .num_columns(6)
         .striped(true)
         .spacing([10.0, 4.0])
         .show(ui, |ui| {
             ui.strong("File");
             ui.strong(""); // waveform
+            ui.strong(""); // export selection
             ui.strong("Size");
             ui.strong("Modified");
             ui.strong("");
@@ -482,8 +489,13 @@ fn show_loose_wavs(app: &mut TinyBoothApp, rec: &Project, ui: &mut egui::Ui) {
                     .and_then(|n| n.to_str())
                     .unwrap_or("(unnamed)");
                 ui.monospace(name);
-                let peaks = cached_or_compute_peaks(app, path);
-                draw_thumbnail(ui, peaks.as_ref());
+                let thumb = cached_or_compute_thumb(app, path);
+                let selection = app.recordings_selection.get(path).copied();
+                let response = draw_thumbnail(ui, thumb.as_ref(), selection);
+                if let Some(t) = thumb.as_ref() {
+                    update_selection_from_response(app, path, &response, t.duration_secs);
+                }
+                export_selection_button(app, path, ui);
                 ui.label(human_bytes(*size));
                 ui.label(human_mtime(*mtime));
                 if ui
@@ -502,35 +514,48 @@ fn show_loose_wavs(app: &mut TinyBoothApp, rec: &Project, ui: &mut egui::Ui) {
         });
 }
 
-/// Get the cached thumbnail peaks for `path`, decoding the WAV on the
-/// UI thread on first miss. Returns `None` only if the file can't be
-/// opened/parsed (corrupt header, unsupported format). The decoded
-/// peak vector is cached on the app keyed by absolute path; cache
-/// entries are never evicted within a session (peak vectors are ~800 B
-/// each, negligible). **TBSS-FR-0008 Phase A** — synchronous decode is
-/// the MVP trade-off; Phase B/C move it to a worker.
-fn cached_or_compute_peaks(app: &mut TinyBoothApp, path: &Path) -> Option<Arc<Vec<f32>>> {
+/// Cached thumbnail data per recording — peaks for rendering + the
+/// WAV's total duration so click-drag pixel-x can be converted to
+/// selection-seconds. Stored on `TinyBoothApp.recordings_peaks_cache`
+/// behind an `Arc` for cheap per-frame cloning.
+pub struct CachedThumb {
+    pub peaks: Vec<f32>,
+    pub duration_secs: f32,
+}
+
+/// Get the cached thumbnail for `path`, decoding the WAV on the UI
+/// thread on first miss. Returns `None` only if the file can't be
+/// opened/parsed (corrupt header, unsupported format). Cache entries
+/// are never evicted within a session — peaks + a float per take is
+/// ~1 KB, negligible. **TBSS-FR-0008 item (4)** — sync UI-thread
+/// decode is the MVP trade-off; an async worker would only matter
+/// for very long takes.
+fn cached_or_compute_thumb(app: &mut TinyBoothApp, path: &Path) -> Option<Arc<CachedThumb>> {
     if let Some(cached) = app.recordings_peaks_cache.get(path) {
         return Some(cached.clone());
     }
-    let peaks = compute_wav_peaks(path)?;
-    let arc = Arc::new(peaks);
+    let thumb = compute_wav_thumb(path)?;
+    let arc = Arc::new(thumb);
     app.recordings_peaks_cache
         .insert(path.to_path_buf(), arc.clone());
     Some(arc)
 }
 
-/// Decode `path` as a WAV and produce a fixed-bin peak vector
-/// (`THUMB_BINS`) — abs-max per bin across all channels. Tolerates
-/// 16/24/32-bit int and float; unsupported / corrupt files return
-/// `None` so the row falls back to the placeholder.
-fn compute_wav_peaks(path: &Path) -> Option<Vec<f32>> {
+/// Decode `path` and produce its peak vector (fixed `THUMB_BINS` bins)
+/// plus duration in seconds. Tolerates 16/24/32-bit int and float;
+/// unsupported / corrupt files return `None` so the row falls back to
+/// the placeholder.
+fn compute_wav_thumb(path: &Path) -> Option<CachedThumb> {
     let reader = hound::WavReader::open(path).ok()?;
     let spec = reader.spec();
     let channels = spec.channels.max(1) as usize;
     let total_frames = reader.duration() as usize;
+    let duration_secs = total_frames as f32 / spec.sample_rate.max(1) as f32;
     if total_frames == 0 {
-        return Some(vec![0.0; THUMB_BINS]);
+        return Some(CachedThumb {
+            peaks: vec![0.0; THUMB_BINS],
+            duration_secs,
+        });
     }
 
     // Read into i16-equivalent. Mirrors player::load_track_play / Trim's
@@ -577,17 +602,27 @@ fn compute_wav_peaks(path: &Path) -> Option<Vec<f32>> {
         }
         peaks.push(peak);
     }
-    Some(peaks)
+    Some(CachedThumb {
+        peaks,
+        duration_secs,
+    })
 }
 
-/// Render a `THUMB_W × THUMB_H` waveform thumbnail (centred symmetric
-/// peak strokes). `peaks` of `None` produces a placeholder rect so the
-/// grid layout doesn't jump while a decode is pending or failed.
-fn draw_thumbnail(ui: &mut egui::Ui, peaks: Option<&Arc<Vec<f32>>>) {
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(THUMB_W, THUMB_H), egui::Sense::hover());
+/// Render the thumbnail (`THUMB_W × THUMB_H`) plus, if present, a
+/// translucent overlay for the click-drag selection. Returns the
+/// `Response` so the caller can drive selection state from drag events.
+/// Selection is `(start_secs, end_secs)` — order not normalised here
+/// (the caller stores it in drag order; render normalises on the fly).
+fn draw_thumbnail(
+    ui: &mut egui::Ui,
+    thumb: Option<&Arc<CachedThumb>>,
+    selection: Option<(f32, f32)>,
+) -> egui::Response {
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(THUMB_W, THUMB_H), egui::Sense::click_and_drag());
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 2.0, egui::Color32::from_rgb(20, 20, 24));
-    let Some(peaks) = peaks else {
+    let Some(thumb) = thumb else {
         // Placeholder slash so corrupt / unreadable WAVs are visually
         // distinct from "loading" (which never appears in Phase A's
         // sync decode — the first frame either has peaks or doesn't).
@@ -595,19 +630,19 @@ fn draw_thumbnail(ui: &mut egui::Ui, peaks: Option<&Arc<Vec<f32>>>) {
             [rect.left_top(), rect.right_bottom()],
             egui::Stroke::new(0.5, egui::Color32::from_gray(80)),
         );
-        return;
+        return response;
     };
-    if peaks.is_empty() {
-        return;
+    if thumb.peaks.is_empty() {
+        return response;
     }
     let mid = rect.center().y;
     let half_h = THUMB_H * 0.42;
     let stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(100, 200, 130));
     let cols = THUMB_W as usize;
     for x in 0..cols {
-        let idx = (x as f32 / cols.max(1) as f32 * peaks.len() as f32) as usize;
-        let idx = idx.min(peaks.len() - 1);
-        let p = peaks[idx].min(1.0);
+        let idx = (x as f32 / cols.max(1) as f32 * thumb.peaks.len() as f32) as usize;
+        let idx = idx.min(thumb.peaks.len() - 1);
+        let p = thumb.peaks[idx].min(1.0);
         let xp = rect.left() + x as f32;
         painter.line_segment(
             [
@@ -617,6 +652,132 @@ fn draw_thumbnail(ui: &mut egui::Ui, peaks: Option<&Arc<Vec<f32>>>) {
             stroke,
         );
     }
+
+    // Selection overlay — a translucent fill across the selected range
+    // plus thin vertical edges. Normalise the drag-order pair so the
+    // overlay renders consistently whether the user dragged L→R or R→L.
+    if let Some((a, b)) = selection {
+        if thumb.duration_secs > 0.0 {
+            let (s, e) = (a.min(b), a.max(b));
+            let dur = thumb.duration_secs;
+            let x0 = rect.left() + (s / dur).clamp(0.0, 1.0) * rect.width();
+            let x1 = rect.left() + (e / dur).clamp(0.0, 1.0) * rect.width();
+            let sel_rect =
+                egui::Rect::from_min_max(egui::pos2(x0, rect.top()), egui::pos2(x1, rect.bottom()));
+            painter.rect_filled(
+                sel_rect,
+                0.0,
+                egui::Color32::from_rgba_unmultiplied(255, 200, 80, 50),
+            );
+            let edge = egui::Stroke::new(1.0, egui::Color32::from_rgb(255, 200, 80));
+            painter.line_segment(
+                [egui::pos2(x0, rect.top()), egui::pos2(x0, rect.bottom())],
+                edge,
+            );
+            painter.line_segment(
+                [egui::pos2(x1, rect.top()), egui::pos2(x1, rect.bottom())],
+                edge,
+            );
+        }
+    }
+
+    response
+}
+
+/// Read the source WAV, crop to `[start, end]` losslessly via the
+/// trim module's `crop_wav_bytes`, prompt the user for a save path
+/// (default name `<stem>-<start>s-<end>s.wav`), and write the cropped
+/// bytes. Returns the path written. TBSS-FR-0008 item (4) Phase C.
+fn export_selection_to_file(src: &Path, start: f32, end: f32) -> anyhow::Result<PathBuf> {
+    use anyhow::Context as _;
+    let bytes =
+        std::fs::read(src).with_context(|| format!("reading source WAV {}", src.display()))?;
+    let cropped = crate::trim::crop_wav_bytes(&bytes, start, end)?;
+    let stem = src.file_stem().and_then(|s| s.to_str()).unwrap_or("take");
+    let default_name = format!("{stem}-{:.2}s-{:.2}s.wav", start, end);
+    let Some(out) = rfd::FileDialog::new()
+        .add_filter("WAV", &["wav"])
+        .set_file_name(&default_name)
+        .save_file()
+    else {
+        anyhow::bail!("export cancelled");
+    };
+    std::fs::write(&out, &cropped.bytes).with_context(|| format!("writing {}", out.display()))?;
+    Ok(out)
+}
+
+/// Drive selection state from a thumbnail's drag/click response. Click-
+/// without-drag picks a single point (start == end). Click-drag picks a
+/// range. Right-click clears the selection. All writes are best-effort
+/// and never panic on a missing pointer pos.
+fn update_selection_from_response(
+    app: &mut TinyBoothApp,
+    path: &Path,
+    response: &egui::Response,
+    duration_secs: f32,
+) {
+    if duration_secs <= 0.0 {
+        return;
+    }
+    if response.secondary_clicked() {
+        app.recordings_selection.remove(path);
+        return;
+    }
+    let rect = response.rect;
+    if rect.width() <= 0.0 {
+        return;
+    }
+    let pos_to_secs = |pos: egui::Pos2| -> f32 {
+        let local_x = (pos.x - rect.left()).clamp(0.0, rect.width());
+        (local_x / rect.width()) * duration_secs
+    };
+    if response.drag_started() {
+        if let Some(pos) = response.interact_pointer_pos() {
+            let t = pos_to_secs(pos);
+            app.recordings_selection.insert(path.to_path_buf(), (t, t));
+        }
+    } else if response.dragged() {
+        if let Some(pos) = response.interact_pointer_pos() {
+            let t = pos_to_secs(pos);
+            let start = app
+                .recordings_selection
+                .get(path)
+                .map(|(s, _)| *s)
+                .unwrap_or(t);
+            app.recordings_selection
+                .insert(path.to_path_buf(), (start, t));
+        }
+    }
+}
+
+/// Render the per-row "Export selection" button. Disabled when there's
+/// no selection on this take. On click, runs `export_selection_to_file`
+/// and routes the result through the app status bar.
+fn export_selection_button(app: &mut TinyBoothApp, path: &Path, ui: &mut egui::Ui) {
+    let sel = app.recordings_selection.get(path).copied();
+    let has_sel = sel.is_some();
+    ui.add_enabled_ui(has_sel, |ui| {
+        if ui
+            .small_button("💾")
+            .on_hover_text(
+                "Export the selected region to a new WAV (click-drag on the \
+                 thumbnail to pick a range; right-click clears)",
+            )
+            .clicked()
+        {
+            if let Some((a, b)) = sel {
+                let (start, end) = (a.min(b), a.max(b));
+                match export_selection_to_file(path, start, end) {
+                    Ok(out) => {
+                        app.status = Some(format!("Exported selection → {}", out.display()));
+                    }
+                    Err(e) => {
+                        app.status = Some(format!("Export failed: {e:#}"));
+                    }
+                }
+            }
+        }
+    });
 }
 
 /// Compact byte-count for the Loose WAVs size column.
