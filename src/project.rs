@@ -56,6 +56,99 @@ pub enum TrackSource {
         #[serde(default)]
         provenance: Option<String>,
     },
+    /// Synthesized "generator" track — binaural beats / isochronic
+    /// tones / layered focus music — baked on demand from `mode`.
+    /// **Locked from destructive edits**: the WAV bytes are the
+    /// deterministic output of the parameters, so Trim / hot-swap /
+    /// delete-via-row no-op with a status message; only re-baking
+    /// changes the audio. See [TBSS-FR-0009] for the full design.
+    ///
+    /// [TBSS-FR-0009]: ../docs/feature-requests/TBSS-FR-0009-generator-track.md
+    Generator {
+        mode: GeneratorMode,
+        /// When the track was last successfully baked. `None` until
+        /// the first bake — the track shows as dirty.
+        #[serde(default)]
+        last_bake_at: Option<DateTime<Utc>>,
+        /// Snapshot of the project's master-chain-relevant settings
+        /// at the moment of the last bake. The Mix tab compares the
+        /// current `MasterSignature` against this to drive the
+        /// dirty indicator (master changed → bake stale).
+        /// `None` until first bake. Reading A per the RFC: the bake
+        /// does NOT pre-apply the master chain — playback routes the
+        /// generator through master like any other track.
+        #[serde(default)]
+        last_bake_master_signature: Option<MasterSignature>,
+    },
+}
+
+/// Generator-track DSP mode. Modular per TBSS-FR-0009 §"Modes —
+/// modular, scope all three": Binaural + Isochronic are the MVP DSP
+/// targets; `Layered` is reserved as the third architectural slot so
+/// the data model + dispatch don't need rework when the layered-pad
+/// design lands. Bake-time dispatch on `Layered` currently errors.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind")]
+pub enum GeneratorMode {
+    /// Sine carrier with a slight L/R freq offset (`carrier_hz ±
+    /// beat_hz/2`). Stereo mandatory — the entrainment IS the L–R
+    /// difference. Headphones required to perceive the effect.
+    Binaural {
+        carrier_hz: f32,
+        beat_hz: f32,
+        /// Peak per channel, 0..1.
+        amplitude: f32,
+    },
+    /// Sine carrier modulated by a pulse envelope at `pulse_hz`.
+    /// Works over speakers. Stereo output duplicates mono.
+    Isochronic {
+        tone_hz: f32,
+        pulse_hz: f32,
+        /// Fraction of one pulse period that's "on", 0..1.
+        duty_cycle: f32,
+        amplitude: f32,
+    },
+    /// Background drone / ambient pad layered with an entrainment
+    /// carrier. **Deferred**: bake returns Err("layered mode not yet
+    /// implemented") for this variant. The slot is reserved so the
+    /// rest of the system doesn't need rework when its design lands.
+    Layered,
+}
+
+impl Default for GeneratorMode {
+    fn default() -> Self {
+        // Alpha-range binaural with a 200 Hz carrier — a conservative,
+        // well-tolerated default for focus work.
+        Self::Binaural {
+            carrier_hz: 200.0,
+            beat_hz: 10.0,
+            amplitude: 0.3,
+        }
+    }
+}
+
+/// Snapshot of the project's master-chain-relevant settings — used to
+/// detect "a re-bake would produce different bytes" without re-running
+/// the bake. Stored on `TrackSource::Generator.last_bake_master_signature`
+/// at bake time; compared against the current project state on each
+/// Mix-tab visit to drive the dirty indicator.
+///
+/// Cheap to compute and compare. Excludes per-track state (correction,
+/// per-track gain, automation) because those apply at playback / export
+/// and don't affect what bytes a fresh bake of THIS track would write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MasterSignature {
+    /// `f32::to_bits` of `Project.master_gain_db` for an exact equality
+    /// compare without dealing with NaN payload quirks.
+    pub master_gain_db_bits: u32,
+    /// Hash of `Project.master_gain_automation` (`Option<AutomationLane>`).
+    /// Zero when None.
+    pub master_automation_hash: u64,
+    pub corrections_disabled: bool,
+    /// Longest *other* track's duration in centiseconds (rounded). The
+    /// generator's bake length tracks this — a change here means the
+    /// bake should grow or shrink.
+    pub longest_other_duration_centisecs: u32,
 }
 
 /// Stem identity inferred from a Suno bundle's filenames. Covers the
@@ -190,6 +283,18 @@ impl StemRole {
             Self::Master => "Master",
             Self::Unknown => "Unknown",
         }
+    }
+}
+
+impl Track {
+    /// True when this track's audio bytes are deterministic output of
+    /// other state (currently: only `TrackSource::Generator`). Locked
+    /// tracks short-circuit destructive ops — Trim, hot-load swap, the
+    /// delete-track unlink — with a status message; only re-baking
+    /// changes their audio. TBSS-FR-0009 §"Locked-track surface".
+    #[allow(dead_code)] // first consumer is the Trim / hot-swap guard
+    pub fn is_locked(&self) -> bool {
+        matches!(self.source, TrackSource::Generator { .. })
     }
 }
 
@@ -620,5 +725,137 @@ mod tests {
             TrackSource::Recorded => {}
             _ => panic!("missing source field should default to Recorded"),
         }
+    }
+
+    // ── TBSS-FR-0009: Generator track data model round-trip ─────────
+
+    fn generator_track(mode: GeneratorMode) -> Track {
+        Track {
+            id: "track-gen".into(),
+            name: "Focus".into(),
+            file: "tracks/track-gen.wav".into(),
+            mute: false,
+            gain_db: -6.0,
+            sample_rate: 48_000,
+            channel_source: None,
+            duration_secs: 300.0,
+            profile: None,
+            stereo: true,
+            source: TrackSource::Generator {
+                mode,
+                last_bake_at: Some(chrono::Utc::now()),
+                last_bake_master_signature: Some(MasterSignature {
+                    master_gain_db_bits: (-1.5f32).to_bits(),
+                    master_automation_hash: 0,
+                    corrections_disabled: false,
+                    longest_other_duration_centisecs: 30_000,
+                }),
+            },
+            correction: None,
+            gain_automation: None,
+            polarity_inverted: false,
+            telemetry: None,
+            telemetry_profile: crate::telemetry::TelemetryProfile::default(),
+        }
+    }
+
+    #[test]
+    fn generator_binaural_round_trips() {
+        let original = generator_track(GeneratorMode::Binaural {
+            carrier_hz: 200.0,
+            beat_hz: 10.0,
+            amplitude: 0.3,
+        });
+        let json = serde_json::to_string(&original).unwrap();
+        let restored: Track = serde_json::from_str(&json).unwrap();
+        assert!(restored.is_locked(), "generator tracks are locked");
+        match &restored.source {
+            TrackSource::Generator {
+                mode,
+                last_bake_at,
+                last_bake_master_signature,
+            } => {
+                assert!(last_bake_at.is_some());
+                let sig = last_bake_master_signature.as_ref().unwrap();
+                assert_eq!(sig.master_gain_db_bits, (-1.5f32).to_bits());
+                assert_eq!(sig.longest_other_duration_centisecs, 30_000);
+                match mode {
+                    GeneratorMode::Binaural {
+                        carrier_hz,
+                        beat_hz,
+                        amplitude,
+                    } => {
+                        assert_eq!(*carrier_hz, 200.0);
+                        assert_eq!(*beat_hz, 10.0);
+                        assert_eq!(*amplitude, 0.3);
+                    }
+                    _ => panic!("expected Binaural"),
+                }
+            }
+            _ => panic!("expected Generator source"),
+        }
+    }
+
+    #[test]
+    fn generator_isochronic_round_trips() {
+        let original = generator_track(GeneratorMode::Isochronic {
+            tone_hz: 440.0,
+            pulse_hz: 12.0,
+            duty_cycle: 0.5,
+            amplitude: 0.25,
+        });
+        let json = serde_json::to_string(&original).unwrap();
+        let restored: Track = serde_json::from_str(&json).unwrap();
+        match &restored.source {
+            TrackSource::Generator {
+                mode:
+                    GeneratorMode::Isochronic {
+                        tone_hz,
+                        pulse_hz,
+                        duty_cycle,
+                        amplitude,
+                    },
+                ..
+            } => {
+                assert_eq!(*tone_hz, 440.0);
+                assert_eq!(*pulse_hz, 12.0);
+                assert_eq!(*duty_cycle, 0.5);
+                assert_eq!(*amplitude, 0.25);
+            }
+            _ => panic!("expected Isochronic generator"),
+        }
+    }
+
+    #[test]
+    fn generator_layered_round_trips_as_reserved_slot() {
+        // The Layered variant has no fields — it's the architectural
+        // slot for the deferred layered-pad mode. Round-trip just
+        // ensures the enum tag survives.
+        let original = generator_track(GeneratorMode::Layered);
+        let json = serde_json::to_string(&original).unwrap();
+        let restored: Track = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            restored.source,
+            TrackSource::Generator {
+                mode: GeneratorMode::Layered,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn is_locked_only_true_for_generator() {
+        // Recorded / SunoStem are not locked.
+        let mut t = fixture_track();
+        assert!(!t.is_locked());
+        t.source = TrackSource::Recorded;
+        assert!(!t.is_locked());
+        // Switching to Generator locks it.
+        t.source = TrackSource::Generator {
+            mode: GeneratorMode::default(),
+            last_bake_at: None,
+            last_bake_master_signature: None,
+        };
+        assert!(t.is_locked());
     }
 }

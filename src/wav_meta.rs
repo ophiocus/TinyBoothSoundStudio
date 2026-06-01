@@ -79,6 +79,11 @@ impl TbssWavMeta {
                 _ => "Recorded".to_string(),
             },
             TrackSource::SunoStem { role, .. } => format!("Suno stem ({})", role.label()),
+            // Generator tracks are not hot-load-swappable (locked), but
+            // the meta builder is called whenever a Track is serialised
+            // alongside a WAV — return a self-descriptive tag.
+            // TBSS-FR-0009.
+            TrackSource::Generator { .. } => "Generator (synthesised)".to_string(),
         };
         Self {
             v: TBSS_META_VERSION,

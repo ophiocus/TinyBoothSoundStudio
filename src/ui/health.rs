@@ -267,6 +267,7 @@ fn role_label(src: &TrackSource) -> String {
     match src {
         TrackSource::Recorded => "recorded".into(),
         TrackSource::SunoStem { role, .. } => role.label().to_string(),
+        TrackSource::Generator { .. } => "generator".into(),
     }
 }
 

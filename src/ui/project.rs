@@ -159,6 +159,46 @@ pub fn show(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
                         };
                         (label, "Recorded by TinyBooth".into())
                     }
+                    crate::project::TrackSource::Generator {
+                        mode, last_bake_at, ..
+                    } => {
+                        // Compact label + hover with mode params. The
+                        // dirty indicator (✱) is driven by the Mix-tab's
+                        // dirty check; here we just surface the source.
+                        // TBSS-FR-0009.
+                        let (kind, detail) = match mode {
+                            crate::project::GeneratorMode::Binaural {
+                                carrier_hz,
+                                beat_hz,
+                                amplitude,
+                            } => (
+                                "Generator · Binaural",
+                                format!(
+                                    "Binaural beats\ncarrier: {carrier_hz:.1} Hz\nbeat: {beat_hz:.2} Hz\nampl: {amplitude:.2}",
+                                ),
+                            ),
+                            crate::project::GeneratorMode::Isochronic {
+                                tone_hz,
+                                pulse_hz,
+                                duty_cycle,
+                                amplitude,
+                            } => (
+                                "Generator · Isochronic",
+                                format!(
+                                    "Isochronic tones\ntone: {tone_hz:.1} Hz\npulse: {pulse_hz:.2} Hz\nduty: {duty_cycle:.2}\nampl: {amplitude:.2}",
+                                ),
+                            ),
+                            crate::project::GeneratorMode::Layered => (
+                                "Generator · Layered (reserved)",
+                                "Layered focus music — design slot; bake not yet implemented.".into(),
+                            ),
+                        };
+                        let h = match last_bake_at {
+                            Some(ts) => format!("{detail}\nlast baked: {}", ts.to_rfc3339()),
+                            None => format!("{detail}\nnever baked"),
+                        };
+                        (kind.to_string(), h)
+                    }
                 };
                 ui.label(src).on_hover_text(hover);
                 ui.label(format!("{} Hz", t.sample_rate));

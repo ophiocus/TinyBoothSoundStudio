@@ -406,6 +406,11 @@ impl TelemetryProfile {
                     _ => ResolvedProfile::UniversalOnly,
                 },
                 TrackSource::Recorded => ResolvedProfile::UniversalOnly,
+                // Generator tracks are procedurally synthesized pure
+                // sines / pulses — pitch / key / drum-kit analysis
+                // would give degenerate results. Skip analysis entirely.
+                // TBSS-FR-0009.
+                TrackSource::Generator { .. } => ResolvedProfile::None,
             },
         }
     }
