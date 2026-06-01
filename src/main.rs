@@ -9,6 +9,7 @@ mod coherence;
 mod config;
 mod dsp;
 mod export;
+mod generator;
 mod git_update;
 mod lufs;
 mod manual;
