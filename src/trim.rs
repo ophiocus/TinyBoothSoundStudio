@@ -117,6 +117,12 @@ pub fn trim_project(project: &mut Project, start_secs: f32, end_secs: f32) -> Re
         .collect();
 
     for (idx, rel) in track_targets {
+        // Locked tracks (TBSS-FR-0009 generators) are baked output;
+        // cropping the WAV would just be overwritten on the next bake.
+        // Silently skip — the user knows generator tracks aren't trimmed.
+        if project.tracks[idx].is_locked() {
+            continue;
+        }
         let abs = project_root.join(&rel);
         match trim_wav_atomic(&abs, start_secs, end_secs) {
             Ok((_orig, new)) => {
@@ -192,6 +198,12 @@ pub fn trim_project_tib(
         .collect();
 
     for (idx, track_id) in targets {
+        // Locked tracks (TBSS-FR-0009 generators) skip — their bytes
+        // are bake output; cropping would just be overwritten on the
+        // next bake.
+        if project.tracks[idx].is_locked() {
+            continue;
+        }
         match trim_revision_in_db(db, &track_id, start_secs, end_secs) {
             Ok(new_frames) => {
                 let sr = project.tracks[idx].sample_rate.max(1) as f32;
@@ -704,6 +716,49 @@ mod tib_trim_tests {
         let mut proj = Project::new("P", path.clone());
         proj.tracks.push(track("t1"));
         assert!(trim_project_tib(&mut proj, &mut db, 0.8, 0.2).is_err());
+        cleanup(&path);
+    }
+
+    /// TBSS-FR-0009 step 4 — locked tracks (generators) are silently
+    /// skipped by trim, leaving their current revision unchanged.
+    #[test]
+    fn trim_tib_skips_locked_generator_tracks() {
+        use crate::project::{GeneratorMode, TrackSource};
+        let path = scratch("lockedskip");
+        let mut db = TibDb::create(&path).unwrap();
+        let orig_normal = seed_track(&db, "t-normal");
+        let orig_gen = seed_track(&db, "t-gen");
+
+        let mut proj = Project::new("P", path.clone());
+        // Normal track — should get cropped.
+        proj.tracks.push(track("t-normal"));
+        // Locked generator track — should be left alone.
+        let mut gen = track("t-gen");
+        gen.source = TrackSource::Generator {
+            mode: GeneratorMode::default(),
+            last_bake_at: None,
+            last_bake_master_signature: None,
+        };
+        assert!(gen.is_locked());
+        proj.tracks.push(gen);
+
+        let report = trim_project_tib(&mut proj, &mut db, 0.2, 0.8).unwrap();
+        assert_eq!(
+            report.trimmed_count, 1,
+            "exactly one track (the non-locked one) should be trimmed"
+        );
+        assert!(report.failures.is_empty(), "skip is silent, not a failure");
+
+        // Normal track moved off orig onto a new destructive revision.
+        let cur_normal = db.current_rev_id("t-normal").unwrap().unwrap();
+        assert_ne!(cur_normal, orig_normal, "normal track was cropped");
+        // Generator track's current_rev_id is unchanged.
+        let cur_gen = db.current_rev_id("t-gen").unwrap().unwrap();
+        assert_eq!(
+            cur_gen, orig_gen,
+            "locked generator track must be untouched"
+        );
+
         cleanup(&path);
     }
 }

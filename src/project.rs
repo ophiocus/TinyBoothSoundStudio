@@ -289,10 +289,10 @@ impl StemRole {
 impl Track {
     /// True when this track's audio bytes are deterministic output of
     /// other state (currently: only `TrackSource::Generator`). Locked
-    /// tracks short-circuit destructive ops — Trim, hot-load swap, the
-    /// delete-track unlink — with a status message; only re-baking
-    /// changes their audio. TBSS-FR-0009 §"Locked-track surface".
-    #[allow(dead_code)] // first consumer is the Trim / hot-swap guard
+    /// tracks short-circuit destructive ops — Trim silently skips them
+    /// (they're not WAVs you can crop), hot-load swap bails with a
+    /// clear message; only re-baking changes their audio.
+    /// TBSS-FR-0009 §"Locked-track surface".
     pub fn is_locked(&self) -> bool {
         matches!(self.source, TrackSource::Generator { .. })
     }

@@ -1265,6 +1265,20 @@ impl TinyBoothApp {
     /// have no resampler) — caller gets a clear status message and
     /// nothing on disk changes. v0.4.20.
     pub fn hot_load_swap(&mut self, idx: usize, source: &Path) -> anyhow::Result<()> {
+        // Generator tracks are baked output, not swappable — re-bake
+        // with new parameters instead. TBSS-FR-0009.
+        if self
+            .project
+            .tracks
+            .get(idx)
+            .map(|t| t.is_locked())
+            .unwrap_or(false)
+        {
+            anyhow::bail!(
+                "generator tracks are baked from parameters, not hot-swapped — \
+                 change the generator settings and re-bake instead"
+            );
+        }
         // .tib projects: a swap is a new destructive revision + a
         // current_rev_id repoint, not a WAV overwrite — so the pre-swap
         // take stays recoverable in history. (TBSS-FR-0007 phase 2c.)
