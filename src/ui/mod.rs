@@ -2,6 +2,7 @@ pub mod admin;
 pub mod audio_devices;
 pub mod correction;
 pub mod export;
+pub mod generator_params;
 pub mod health;
 pub mod import_conflict;
 pub mod import_dialog;

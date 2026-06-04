@@ -36,6 +36,13 @@ pub struct PendingMigration {
     pub suggested_tib: PathBuf,
 }
 
+/// Draft state of the Add-Generator-Track modal (TBSS-FR-0009 step 5).
+/// `mode` is mutated live by the modal as the user adjusts the picker
+/// and per-mode fields; on commit, the track is created + baked.
+pub struct PendingGeneratorParams {
+    pub mode: crate::project::GeneratorMode,
+}
+
 /// True when a track's telemetry is present and analyzed by the current
 /// analyzer version (so a re-dispatch would be wasted work).
 fn telemetry_is_current(t: &Track) -> bool {
@@ -183,6 +190,10 @@ pub struct TinyBoothApp {
     /// prompt. The migrate modal shows while this is `Some`. TBSS-FR-0007
     /// phase 2c.
     pub pending_migration: Option<PendingMigration>,
+
+    /// Draft state for the "Add Generator Track" modal. `Some` while
+    /// the modal is open; cleared on commit / cancel. TBSS-FR-0009.
+    pub pending_generator_modal: Option<PendingGeneratorParams>,
 
     /// Mixer/automation recorder. Captures fader gestures while a strip's
     /// arm toggle is on and the player is in Playing state. Flushed into
@@ -394,6 +405,7 @@ impl TinyBoothApp {
             import_dialog: None,
             import_conflict: None,
             pending_migration: None,
+            pending_generator_modal: None,
             recorder: crate::automation::Recorder::default(),
             mix_console_fraction: 0.42,
             recordings_page: 0,
@@ -1725,7 +1737,6 @@ impl TinyBoothApp {
     /// dirty indicator clears as soon as the stamped signature matches
     /// the current project signature again (immediately post-bake by
     /// construction).
-    #[allow(dead_code)] // first call site is the step-5 UI bake button
     pub fn bake_generator(&mut self, track_idx: usize) -> anyhow::Result<PathBuf> {
         let exported = bake_generator_impl(&mut self.project, &mut self.backing, track_idx)?;
         self.persist_project()?;
@@ -1740,7 +1751,7 @@ impl TinyBoothApp {
     /// [`MasterSignature`] no longer matches the stamp from the last
     /// bake. Returns `false` for non-Generator tracks. Read on every
     /// Mix-tab visit by the dirty-indicator render in step 5.
-    #[allow(dead_code)] // first call site is the step-5 UI dirty render
+    #[allow(dead_code)] // wired in by the per-lane indicator follow-up
     pub fn is_generator_dirty(&self, track_idx: usize) -> bool {
         let Some(track) = self.project.tracks.get(track_idx) else {
             return false;
@@ -1759,6 +1770,112 @@ impl TinyBoothApp {
                 current != *stamped
             }
         }
+    }
+
+    /// Open the Add-Generator-Track modal with default Binaural params.
+    /// Step-5 UI entry point — called from the File menu item.
+    pub fn open_add_generator_modal(&mut self) {
+        self.pending_generator_modal = Some(PendingGeneratorParams {
+            mode: crate::project::GeneratorMode::default(),
+        });
+    }
+
+    /// Resolve the Add-Generator-Track modal. `commit = true` creates
+    /// the track (using the modal's draft `mode`) and immediately tries
+    /// to bake it. If the project has no other tracks to anchor the
+    /// bake duration, the track is added in a "dirty / not yet baked"
+    /// state — surfaced in the status bar — and the user can bake later
+    /// once stems are imported. `commit = false` just closes the modal.
+    pub fn resolve_generator_modal(&mut self, commit: bool) {
+        let Some(pending) = self.pending_generator_modal.take() else {
+            return;
+        };
+        if !commit {
+            return;
+        }
+        match self.add_generator_track(pending.mode) {
+            Ok(_idx) => {
+                // status is set by add_generator_track / bake_generator.
+            }
+            Err(e) => {
+                self.status = Some(format!("could not add generator track: {e:#}"));
+            }
+        }
+    }
+
+    /// Create a new Generator track in `project.tracks` with the given
+    /// `mode`, then attempt to bake it. The bake fails if the project
+    /// has no other tracks to anchor the duration; in that case the
+    /// track is left in its un-baked state and the user can re-bake
+    /// once stems exist.
+    pub fn add_generator_track(
+        &mut self,
+        mode: crate::project::GeneratorMode,
+    ) -> anyhow::Result<usize> {
+        use crate::project::{Track, TrackSource};
+        // Mint a unique `gen-NNN` id.
+        let id = mint_generator_track_id(&self.project);
+        let track = Track {
+            id: id.clone(),
+            name: default_generator_track_name(&mode),
+            file: String::new(), // will be set on bake (folder); .tib leaves empty
+            mute: false,
+            gain_db: -6.0, // conservative default — generator at unity is loud
+            sample_rate: 48_000,
+            channel_source: None,
+            duration_secs: 0.0,
+            profile: None,
+            stereo: true,
+            source: TrackSource::Generator {
+                mode,
+                last_bake_at: None,
+                last_bake_master_signature: None,
+            },
+            correction: None,
+            gain_automation: None,
+            polarity_inverted: false,
+            telemetry: None,
+            telemetry_profile: crate::telemetry::TelemetryProfile::default(),
+        };
+        self.project.tracks.push(track);
+        let idx = self.project.tracks.len() - 1;
+        self.project_dirty = true;
+        // Try to bake immediately. If no other tracks exist, the bake
+        // errors clearly — surface that and leave the track unbaked.
+        match self.bake_generator(idx) {
+            Ok(export) => {
+                self.status = Some(format!(
+                    "Added generator '{id}' → baked, exported {}",
+                    export.display()
+                ));
+            }
+            Err(e) => {
+                self.status = Some(format!(
+                    "Added generator '{id}' (not yet baked — import a stem then re-add: {e:#})"
+                ));
+            }
+        }
+        Ok(idx)
+    }
+}
+
+fn mint_generator_track_id(project: &Project) -> String {
+    for n in 1..1000 {
+        let candidate = format!("gen-{n:03}");
+        if !project.tracks.iter().any(|t| t.id == candidate) {
+            return candidate;
+        }
+    }
+    // Shouldn't happen for any real project — fall back to a UUID-like
+    // tag so we never collide.
+    format!("gen-{}", std::process::id())
+}
+
+fn default_generator_track_name(mode: &crate::project::GeneratorMode) -> String {
+    match mode {
+        crate::project::GeneratorMode::Binaural { .. } => "Binaural Focus".into(),
+        crate::project::GeneratorMode::Isochronic { .. } => "Isochronic Focus".into(),
+        crate::project::GeneratorMode::Layered => "Layered Focus".into(),
     }
 }
 
@@ -2267,6 +2384,20 @@ impl eframe::App for TinyBoothApp {
                         ui.close_menu();
                     }
                     ui.separator();
+                    if ui
+                        .button("Add Generator Track…")
+                        .on_hover_text(
+                            "Add a synthesised focus-music stem — binaural beats or \
+                             isochronic tones — that bakes from parameters and lays \
+                             into the mix at the longest other track's duration. \
+                             TBSS-FR-0009.",
+                        )
+                        .clicked()
+                    {
+                        self.open_add_generator_modal();
+                        ui.close_menu();
+                    }
+                    ui.separator();
                     if ui.button("Quit").clicked() {
                         std::process::exit(0);
                     }
@@ -2579,6 +2710,11 @@ impl eframe::App for TinyBoothApp {
         // Migrate-to-.tib prompt (shown when a folder project is opened).
         if self.pending_migration.is_some() {
             ui::migrate_to_tib::show(self, ctx);
+        }
+
+        // Add-Generator-Track modal (TBSS-FR-0009 step 5).
+        if self.pending_generator_modal.is_some() {
+            ui::generator_params::show(self, ctx);
         }
 
         // Project Health modal (TBSS-FR-0005).
