@@ -1695,6 +1695,362 @@ impl TinyBoothApp {
             }
         }
     }
+
+    // ── TBSS-FR-0009: Generator-track bake plumbing ────────────────
+
+    /// Bake the generator track at `track_idx` — resolve duration from
+    /// the longest other stem, render via [`crate::generator::bake`],
+    /// store the WAV bytes through the project's backing (`.tib` via a
+    /// new destructive revision with FIFO-5 history; folder via a
+    /// `tracks/<id>.wav` write), drop a timestamped copy under
+    /// `<project>/exports/generator-bakes/`, stamp the track's
+    /// `last_bake_at` + `last_bake_master_signature`, persist the
+    /// project, and drop the player so it rebuilds from the new audio.
+    ///
+    /// Returns the path of the timestamped export file. The track's
+    /// dirty indicator clears as soon as the stamped signature matches
+    /// the current project signature again (immediately post-bake by
+    /// construction).
+    #[allow(dead_code)] // first call site is the step-5 UI bake button
+    pub fn bake_generator(&mut self, track_idx: usize) -> anyhow::Result<PathBuf> {
+        let exported = bake_generator_impl(&mut self.project, &mut self.backing, track_idx)?;
+        self.persist_project()?;
+        self.player = None;
+        self.player_error = None;
+        self.player_attempt_failed_for = None;
+        Ok(exported)
+    }
+
+    /// True when the generator track at `track_idx` needs re-baking:
+    /// either it has never been baked, or the current project state's
+    /// [`MasterSignature`] no longer matches the stamp from the last
+    /// bake. Returns `false` for non-Generator tracks. Read on every
+    /// Mix-tab visit by the dirty-indicator render in step 5.
+    #[allow(dead_code)] // first call site is the step-5 UI dirty render
+    pub fn is_generator_dirty(&self, track_idx: usize) -> bool {
+        let Some(track) = self.project.tracks.get(track_idx) else {
+            return false;
+        };
+        let crate::project::TrackSource::Generator {
+            last_bake_master_signature,
+            ..
+        } = &track.source
+        else {
+            return false;
+        };
+        match last_bake_master_signature {
+            None => true, // never baked → dirty
+            Some(stamped) => {
+                let current = crate::project::compute_master_signature(&self.project, track_idx);
+                current != *stamped
+            }
+        }
+    }
+}
+
+/// Free-function form of the bake — does the work without depending on
+/// `TinyBoothApp` state so the bake-and-store cycle is unit-testable.
+/// The caller persists the project + drops the player.
+#[allow(dead_code)] // gated until step-5 UI lands the bake button caller
+fn bake_generator_impl(
+    project: &mut Project,
+    backing: &mut ProjectBacking,
+    track_idx: usize,
+) -> anyhow::Result<PathBuf> {
+    use anyhow::{anyhow, bail};
+
+    // ── 1. Read everything the bake needs in one immutable pass ─────
+    let mode;
+    let track_id;
+    let sample_rate;
+    let dur_secs;
+    let sig;
+    {
+        let track = project
+            .tracks
+            .get(track_idx)
+            .ok_or_else(|| anyhow!("no track at index {track_idx}"))?;
+        mode = match &track.source {
+            crate::project::TrackSource::Generator { mode, .. } => mode.clone(),
+            _ => bail!("track {track_idx} is not a Generator track"),
+        };
+        track_id = track.id.clone();
+        // Duration: longest other track. If nothing else exists, bail
+        // — there's no implicit anchor and silently picking a default
+        // would surprise the user.
+        let longest_other = project
+            .tracks
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != track_idx)
+            .map(|(_, t)| t.duration_secs)
+            .fold(0.0_f32, |a, b| a.max(b));
+        if longest_other <= 0.0 {
+            bail!(
+                "cannot bake generator '{track_id}' — no other track has a length to anchor to. \
+                 Add or import at least one stem first."
+            );
+        }
+        dur_secs = longest_other;
+        // Sample rate: first other track's rate. Falls back to 48 kHz
+        // only when no other tracks (unreachable given the bail above).
+        sample_rate = project
+            .tracks
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != track_idx)
+            .map(|(_, t)| t.sample_rate.max(1))
+            .next()
+            .unwrap_or(48_000);
+        sig = crate::project::compute_master_signature(project, track_idx);
+    }
+
+    // ── 2. Bake the WAV bytes (pure DSP, no I/O) ───────────────────
+    let bytes = crate::generator::bake(&mode, dur_secs, sample_rate)?;
+
+    // ── 3. Store via the backing ───────────────────────────────────
+    // Folder: write tracks/<id>.wav and record the relative path.
+    // .tib: commit as a new destructive revision (free FIFO-5 history
+    // of past bakes — TBSS-FR-0007 phase 2c primitive reuse).
+    let file_rel: String = match backing {
+        ProjectBacking::Tib { db } => {
+            db.commit_destructive_revision(
+                &track_id,
+                "bake",
+                sample_rate,
+                /* stereo */ true,
+                dur_secs,
+                &bytes,
+                /* keep */ 5,
+            )?;
+            db.incremental_vacuum().ok();
+            // .tib tracks carry `file = ""` by convention.
+            String::new()
+        }
+        ProjectBacking::Folder => {
+            let rel = format!("{}/{}.wav", crate::project::TRACKS_DIR, track_id);
+            let abs = project.root.join(&rel);
+            if let Some(parent) = abs.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&abs, &bytes)?;
+            rel
+        }
+    };
+
+    // ── 4. Write the timestamped export ────────────────────────────
+    let now_utc = chrono::Utc::now();
+    let exports_root = match backing {
+        // .tib: project.root is the .tib file path; drop exports/
+        // alongside it. Fall back to project.root itself if no parent
+        // (shouldn't happen with a real path).
+        ProjectBacking::Tib { .. } => project
+            .root
+            .parent()
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(|| project.root.clone()),
+        // Folder: exports/ inside the project root.
+        ProjectBacking::Folder => project.root.clone(),
+    };
+    let exports_dir = exports_root.join("exports").join("generator-bakes");
+    std::fs::create_dir_all(&exports_dir)?;
+    let safe_id: String = track_id
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let ts = now_utc.format("%Y%m%dT%H%M%SZ").to_string();
+    let exported_path = exports_dir.join(format!("{safe_id}-{ts}.wav"));
+    std::fs::write(&exported_path, &bytes)?;
+
+    // ── 5. Stamp the track's in-memory state ───────────────────────
+    {
+        let track = &mut project.tracks[track_idx];
+        track.duration_secs = dur_secs;
+        track.sample_rate = sample_rate;
+        track.stereo = true;
+        if !file_rel.is_empty() {
+            track.file = file_rel;
+        }
+        match &mut track.source {
+            crate::project::TrackSource::Generator {
+                last_bake_at,
+                last_bake_master_signature,
+                ..
+            } => {
+                *last_bake_at = Some(now_utc);
+                *last_bake_master_signature = Some(sig);
+            }
+            _ => unreachable!("checked above"),
+        }
+    }
+
+    Ok(exported_path)
+}
+
+// Conventional fix is to put `#[cfg(test)] mod` last, but
+// `impl eframe::App for TinyBoothApp` lives at the end of this file
+// and is much bigger — moving it to silence a stylistic check is the
+// wrong trade.
+#[allow(clippy::items_after_test_module)]
+#[cfg(test)]
+mod generator_bake_tests {
+    //! Exercises [`bake_generator_impl`] without spinning up an egui
+    //! context — that's the whole point of factoring it as a free
+    //! function. Covers the folder-backing path end-to-end; the .tib
+    //! path is the same shape with TibDb in place of fs::write.
+    use super::*;
+    use crate::project::{GeneratorMode, Project, Track, TrackSource};
+
+    fn temp_root(name: &str) -> PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(format!("tbss-genbake-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&p);
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    fn other_track(id: &str, duration_secs: f32, sample_rate: u32) -> Track {
+        Track {
+            id: id.into(),
+            name: id.into(),
+            file: format!("tracks/{id}.wav"),
+            mute: false,
+            gain_db: 0.0,
+            sample_rate,
+            channel_source: None,
+            duration_secs,
+            profile: None,
+            stereo: true,
+            source: TrackSource::Recorded,
+            correction: None,
+            gain_automation: None,
+            polarity_inverted: false,
+            telemetry: None,
+            telemetry_profile: crate::telemetry::TelemetryProfile::default(),
+        }
+    }
+
+    fn generator_track(id: &str) -> Track {
+        Track {
+            id: id.into(),
+            name: "Focus".into(),
+            file: String::new(),
+            mute: false,
+            gain_db: 0.0,
+            sample_rate: 48_000,
+            channel_source: None,
+            duration_secs: 0.0,
+            profile: None,
+            stereo: true,
+            source: TrackSource::Generator {
+                mode: GeneratorMode::Binaural {
+                    carrier_hz: 200.0,
+                    beat_hz: 10.0,
+                    amplitude: 0.3,
+                },
+                last_bake_at: None,
+                last_bake_master_signature: None,
+            },
+            correction: None,
+            gain_automation: None,
+            polarity_inverted: false,
+            telemetry: None,
+            telemetry_profile: crate::telemetry::TelemetryProfile::default(),
+        }
+    }
+
+    #[test]
+    fn bake_into_folder_project_writes_wav_export_and_stamps_track() {
+        let root = temp_root("ok");
+        let mut project = Project::new("test", root.clone());
+        // One regular track (duration 0.5 s anchors the bake length)
+        // and one Generator track to bake.
+        project.tracks.push(other_track("trk-other", 0.5, 8_000));
+        project.tracks.push(generator_track("trk-gen"));
+        let mut backing = ProjectBacking::Folder;
+
+        let exported =
+            bake_generator_impl(&mut project, &mut backing, 1).expect("bake should succeed");
+
+        // ── audio storage ─────────────────────────────────────────
+        let bake_wav = root.join("tracks").join("trk-gen.wav");
+        assert!(bake_wav.is_file(), "bake WAV at {bake_wav:?} should exist");
+        assert!(
+            exported.is_file(),
+            "timestamped export at {exported:?} should exist"
+        );
+        assert_eq!(
+            std::fs::read(&bake_wav).unwrap(),
+            std::fs::read(&exported).unwrap(),
+            "exported copy must be byte-identical to the bake"
+        );
+        // The export landed under <root>/exports/generator-bakes/.
+        assert!(exported.starts_with(root.join("exports").join("generator-bakes")));
+
+        // ── manifest stamp ────────────────────────────────────────
+        let gen = &project.tracks[1];
+        assert_eq!(gen.file, "tracks/trk-gen.wav");
+        assert_eq!(gen.sample_rate, 8_000, "matches the other track's rate");
+        assert!((gen.duration_secs - 0.5).abs() < 1e-3);
+        match &gen.source {
+            TrackSource::Generator {
+                last_bake_at,
+                last_bake_master_signature,
+                ..
+            } => {
+                assert!(last_bake_at.is_some(), "last_bake_at must be stamped");
+                assert!(
+                    last_bake_master_signature.is_some(),
+                    "master signature must be stamped"
+                );
+                assert_eq!(
+                    last_bake_master_signature
+                        .unwrap()
+                        .longest_other_duration_centisecs,
+                    50, // 0.5 s × 100
+                );
+            }
+            _ => panic!("source should still be Generator"),
+        }
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn bake_with_no_other_tracks_errors_clearly() {
+        let root = temp_root("noanchor");
+        let mut project = Project::new("test", root.clone());
+        project.tracks.push(generator_track("trk-gen"));
+        let mut backing = ProjectBacking::Folder;
+
+        let err = bake_generator_impl(&mut project, &mut backing, 0).unwrap_err();
+        assert!(
+            err.to_string().contains("no other track has a length"),
+            "error must surface the no-anchor reason; got: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn bake_on_non_generator_track_errors() {
+        let root = temp_root("notgen");
+        let mut project = Project::new("test", root.clone());
+        project.tracks.push(other_track("trk-other", 0.5, 8_000));
+        let mut backing = ProjectBacking::Folder;
+
+        let err = bake_generator_impl(&mut project, &mut backing, 0).unwrap_err();
+        assert!(
+            err.to_string().contains("not a Generator track"),
+            "error must refuse non-Generator; got: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
 
 impl eframe::App for TinyBoothApp {

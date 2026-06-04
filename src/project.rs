@@ -298,6 +298,50 @@ impl Track {
     }
 }
 
+/// Compute the master-chain signature for the given project, excluding
+/// the track at `exclude_idx` from the longest-other-duration tally.
+/// Used at bake time to stamp the generator track, and on each Mix-tab
+/// visit to compare the current state against the stamp — any
+/// difference flags the generator as dirty. TBSS-FR-0009.
+///
+/// The "exclude" parameter matters because the generator's own
+/// `duration_secs` follows the longest *other* track at bake time; if
+/// we included it in the tally a freshly-baked generator would already
+/// be its own dominant duration and the signature would loop.
+pub fn compute_master_signature(project: &Project, exclude_idx: usize) -> MasterSignature {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let master_gain_db_bits = project.master_gain_db.to_bits();
+    let master_automation_hash = match &project.master_gain_automation {
+        Some(lane) => {
+            // Hash the serialised JSON — AutomationLane doesn't derive
+            // Hash and adding it would cascade into every f32 field.
+            // Serialisation is deterministic + cheap.
+            let json = serde_json::to_string(lane).unwrap_or_default();
+            let mut h = DefaultHasher::new();
+            json.hash(&mut h);
+            h.finish()
+        }
+        None => 0,
+    };
+    let longest_other_secs = project
+        .tracks
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i != exclude_idx)
+        .map(|(_, t)| t.duration_secs)
+        .fold(0.0_f32, |a, b| a.max(b));
+    let longest_other_duration_centisecs = (longest_other_secs * 100.0).round().max(0.0) as u32;
+
+    MasterSignature {
+        master_gain_db_bits,
+        master_automation_hash,
+        corrections_disabled: project.corrections_disabled,
+        longest_other_duration_centisecs,
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Track {
     pub id: String,
