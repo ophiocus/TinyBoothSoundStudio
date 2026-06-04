@@ -1,8 +1,30 @@
 # TBSS-FR-0009: Generator track — binaural / isochronic / layered focus music as a synthesized stem
 
-**Status**: 📝 Proposed
+**Status**: ✅ Landed (MVP) — shipped in v0.4.43
 **Author(s)**: ophiocus
-**Filed**: 2026-05-29
+**Filed**: 2026-05-29 · **Landed**: 2026-06-04
+
+> **Landed-MVP note (2026-06-04).** All 6 steps of the suggested
+> landing order shipped in v0.4.43: data model + DSP (Binaural +
+> Isochronic) + bake plumbing + locked-track guards + UI
+> (`File → Add Generator Track…` + params modal) + Layered as a
+> disabled architectural slot. **Reading A** of "meld with master
+> chain" — the bake snapshots a `MasterSignature` for dirty detection
+> only; it does not pre-apply the master chain, so playback routes
+> the generator through master like every other track.
+>
+> **Deferred past MVP** (kept as flagged follow-ups, not gating):
+> - **Per-lane dirty indicator** — `is_generator_dirty(idx)` exists
+>   and is wired to the data; the Mix-tab lane render of a small
+>   ✱ icon when the current `MasterSignature` differs from the stamp
+>   is the missing rendering piece.
+> - **Edit-params affordance** — currently you delete + re-add to
+>   change a generator track's mode/params. A "✎ Params" button on
+>   locked tracks in the Project tab is the natural place.
+> - **Layered focus music DSP** — the radio is offered (disabled) so
+>   the data model + dispatch don't need rework when the layered-pad
+>   design lands. `generator::bake` returns `Err` for the variant.
+>
 
 ## Summary
 

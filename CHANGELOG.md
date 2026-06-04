@@ -8,6 +8,40 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); thi
 
 (Nothing yet — known issues all resolved as of v0.4.23.)
 
+## [0.4.43] — 2026-06-04
+
+Two feature requests' worth of work batched into one release:
+the Record-tab recordings browser (TBSS-FR-0008 items 1/2/4 +
+3-partial) and the Generator-track MVP (TBSS-FR-0009 all 6 steps).
+
+### Added — Record-tab recordings browser (TBSS-FR-0008)
+- **Loose WAVs (not in manifest)** — every `*.wav` in the recordings `tracks/` directory that isn't tracked in the manifest is now listed in its own group with filename / size / mtime / 📂 reveal-in-Explorer. Files dropped manually or carried from another machine are no longer invisible. `.swap-tmp` debris is filtered out.
+- **Path-label affordances** — the "Each take saves to <path>" line grows a 📋 copy-to-clipboard button and a 📂 open-in-Explorer button (auto-creates the folder on first run).
+- **Waveform thumbnails per take** — every row in the recordings list shows a 140 × 28 green-on-dark envelope thumbnail, peaks computed on first visit and cached on the app. Zero-sample takes render as an empty black rect — a perfect at-a-glance signal of orphan / partial-write artefacts.
+- **Click-drag region selection** — drag on a thumbnail to pick a `[start, end]` range (translucent orange overlay + thin edge lines). Right-click clears.
+- **💾 Export Selection** — per-row button (disabled until you pick a range) that lossless-crops the selected region via `trim::crop_wav_bytes` (16/24/32-bit int + float supported) and writes it to a user-picked path. The original take is untouched.
+
+### Fixed — Record orphan-WAV cleanup (TBSS-FR-0008 item 3, partial)
+- `audio::start_recording` no longer leaves a header-only `~44 B` orphan WAV in `tracks/` when the cpal stream build or `.play()` fails after the WAV writer was created. Any failure now finalises the writer + `fs::remove_file`s the partial file before propagating the error. The underlying cpal repeat-take race still needs a real-hardware repro to fix at root — when it next happens you'll see the actual error string in the status bar instead of a silent orphan.
+
+### Added — Generator track: binaural / isochronic focus-music stems (TBSS-FR-0009)
+**File → "Add Generator Track…"** opens a modal that lets you synthesise a focus-music stem (binaural beats or isochronic tones) and bake it on demand into the project, alongside your other stems. The bake reads its duration from the longest other track, renders the audio via pure DSP, and stores the WAV through the existing audio path (`.tib` revision or folder WAV) plus a timestamped copy under `<project>/exports/generator-bakes/<id>-<ISO8601>.wav` for a versioned library of bakes.
+
+- **Binaural mode** — sine carrier with a slight L/R freq offset (`carrier ± beat/2`). Continuous, no clicks. Needs headphones. Carrier 40–800 Hz, beat 0.5–40 Hz, amplitude 0..1.
+- **Isochronic mode** — sine carrier × a smoothed `sin²(π·φ/duty)` pulse envelope. Works over speakers. Tone 40–800 Hz, pulse 0.5–40 Hz, duty 0.05–0.95, amplitude 0..1.
+- **Layered focus music** — the third architectural slot from the RFC is surfaced (disabled) so the data model + UI don't need rework when the layered-pad DSP design lands.
+- **"Meld with master chain" interpretation** — **Reading A** (confirmed during design): the bake snapshots a `MasterSignature` for dirty detection only; it does **not** pre-apply the master chain. Playback routes the generator through master like any other track. If you change master settings after a bake, the track marks itself dirty and the user re-bakes.
+- **Locked-track guards** — `Track::is_locked()` is true for generator tracks. Trim silently skips them (their bytes are bake output, not WAVs you crop); hot-load swap bails with "generator tracks are baked, not swapped — change parameters and re-bake instead". Delete-track is unchanged: removing a generator is a valid action; the WAV is regenerable on re-bake.
+
+### Deferred follow-ups (not in v0.4.43)
+- Per-lane **dirty indicator** on the Mix tab when a generator's stamped signature drifts from the current project state. `is_generator_dirty(idx)` exists and is correct; the render is the missing piece.
+- **Edit-params** affordance on locked tracks (currently: delete + re-add to change a generator's mode / params).
+- Loose-WAV **Adopt into manifest** + ▶ play / 🗑 delete parity.
+- Layered focus-music DSP.
+
+### Proof
+New module `src/generator.rs` (pure DSP); new modal `src/ui/generator_params.rs`; data model in `src/project.rs` (`TrackSource::Generator`, `GeneratorMode`, `MasterSignature`, `Track::is_locked()`, `compute_master_signature`); bake plumbing in `src/app.rs` (`bake_generator_impl`, `bake_generator`, `is_generator_dirty`, `add_generator_track`, `resolve_generator_modal`). Suite **121 passing** (up from 95 at v0.4.41): 16 new tests across the generator data model (4), DSP (8), bake plumbing (3), and locked-track skip (1). All gates green at every commit.
+
 ## [0.4.42] — 2026-05-28
 
 ### Added — `.tib` is now a live project format (TBSS-FR-0007 phase 2c)
