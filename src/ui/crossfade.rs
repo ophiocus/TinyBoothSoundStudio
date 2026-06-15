@@ -328,10 +328,8 @@ fn draw_timeline(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
     let tl_dur = (tl_end - tl_start).max(0.001);
     // Keep playheads in their tracks' valid range. b_offset/duration
     // change at runtime; the playheads need to follow.
-    app.crossfade_state.a_playhead_secs =
-        app.crossfade_state.a_playhead_secs.clamp(0.0, a_dur);
-    app.crossfade_state.b_playhead_secs =
-        app.crossfade_state.b_playhead_secs.clamp(0.0, b_dur);
+    app.crossfade_state.a_playhead_secs = app.crossfade_state.a_playhead_secs.clamp(0.0, a_dur);
+    app.crossfade_state.b_playhead_secs = app.crossfade_state.b_playhead_secs.clamp(0.0, b_dur);
     // While a preview is running, ask for a continuous repaint so the
     // playhead moves smoothly instead of waiting for cursor activity.
     if app.crossfade_state.preview.is_some() {
