@@ -8,6 +8,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); thi
 
 (Nothing yet — known issues all resolved as of v0.4.23.)
 
+## [0.4.46] — 2026-06-15
+
+### Added — Crossfade tab: per-track playheads + ms counters
+Each lane now carries a draggable playhead and a `mm:ss.mmm` counter so the operator can see and seek to any point in either track from the timeline alone — no transport-relative math, no audio-burn-just-to-find-the-spot. Layered on top of the v0.4.45 UX pass.
+
+- **Vertical playhead per lane** with a small triangle cap and a narrow 8 px hit zone (sits inside its lane; never conflicts with the existing 10 px fade-handle hit zones, and takes priority over the lane-B translation drag).
+- **Drag a playhead** to seek that track. Dragging stops any active preview — matches DAW seek convention.
+- **Auto-follows the active preview.** ▶ A drives A's playhead; ▶ B drives B's; ▶ Crossfade drives both (each computed as global time minus that track's start, clamped to its own [0, duration]). Preview position is pulled from the cpal session's `Arc<AtomicU64>` frame counter via a new `sync_playheads_from_preview` helper, and the UI requests a 16 ms repaint while audio is flowing so the heads move smoothly.
+- **`mm:ss.mmm` counter** drawn top-right of each lane in monospace so the digits don't jitter as they tick over.
+- ▶ A and ▶ B both rewind their lane's playhead to 0 on press, so each transport press is unambiguously start-to-end.
+
+### Proof
+`CrossfadePreviewMode` enum + `preview_mode`, `a_playhead_secs`, `b_playhead_secs` added to `CrossfadeUiState`. `draw_lane()` extended with playhead rendering; new `fmt_ms` helper formats the counter. Layering of hit-rects keeps fade handles' priority intact. Suite **126 passing**. fmt + clippy `--release --all-targets -D warnings` + release build all clean.
+
 ## [0.4.45] — 2026-06-15
 
 ### Changed — Crossfade tab UX pass (TBSS-FR-0010 follow-up)

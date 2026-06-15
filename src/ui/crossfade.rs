@@ -3,18 +3,34 @@
 //! crossfade mix, export to any format `export.rs` supports.
 //! TBSS-FR-0010.
 
-use crate::app::{CrossfadeUiState, LoadedCrossfadeTrack, TinyBoothApp};
+use crate::app::{CrossfadePreviewMode, CrossfadeUiState, LoadedCrossfadeTrack, TinyBoothApp};
 use crate::crossfade::{compute_mix, CrossfadeCurve, CrossfadeSpec};
 use crate::crossfade_player::CrossfadePreviewSession;
 use eframe::egui;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
 
 /// Pixel width of a fade-handle hit rect — small enough to leave most
 /// of the timeline draggable as track B, large enough to reliably grab.
 const HANDLE_HIT_W: f32 = 10.0;
 
+/// Pixel width of a playhead hit rect — narrower than fade handles so
+/// it sits inside a single lane without colliding with the next-lane
+/// interactions.
+const PLAYHEAD_HIT_W: f32 = 8.0;
+
 const PEAK_BINS: usize = 200;
 const LANE_H: f32 = 60.0;
+
+/// Format a duration in `mm:ss.mmm` for the per-track playhead counter.
+fn fmt_ms(secs: f32) -> String {
+    let total_ms = (secs.max(0.0) * 1000.0).round() as u64;
+    let ms = total_ms % 1000;
+    let total_secs = total_ms / 1000;
+    let s = total_secs % 60;
+    let m = total_secs / 60;
+    format!("{:02}:{:02}.{:03}", m, s, ms)
+}
 
 pub fn show(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
     ui.heading("Crossfade");
@@ -287,6 +303,11 @@ pub fn show(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
 }
 
 fn draw_timeline(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
+    // Pull live playback position onto the playheads BEFORE we read
+    // them for the lane lines/hit-rects, so they reflect the most
+    // recent audio frame this UI tick.
+    sync_playheads_from_preview(&mut app.crossfade_state);
+
     // First read everything we need (so the immutable borrow ends
     // before we start grabbing &mut for the drag handlers).
     let (a_dur, b_dur, tl_start, tl_end) = {
@@ -305,6 +326,18 @@ fn draw_timeline(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
         (a.duration_secs, b.duration_secs, tl_start, tl_end)
     };
     let tl_dur = (tl_end - tl_start).max(0.001);
+    // Keep playheads in their tracks' valid range. b_offset/duration
+    // change at runtime; the playheads need to follow.
+    app.crossfade_state.a_playhead_secs =
+        app.crossfade_state.a_playhead_secs.clamp(0.0, a_dur);
+    app.crossfade_state.b_playhead_secs =
+        app.crossfade_state.b_playhead_secs.clamp(0.0, b_dur);
+    // While a preview is running, ask for a continuous repaint so the
+    // playhead moves smoothly instead of waiting for cursor activity.
+    if app.crossfade_state.preview.is_some() {
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(16));
+    }
 
     let avail_w = ui.available_width().max(200.0);
     let (rect, _outer) = ui.allocate_exact_size(
@@ -341,6 +374,51 @@ fn draw_timeline(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
         if dx != 0.0 {
             let new = app.crossfade_state.b_offset_secs + dx / px_per_sec;
             app.crossfade_state.b_offset_secs = new.clamp(-b_dur, a_dur);
+        }
+    }
+
+    // ── Draggable playheads (one per lane) ─────────────────────────
+    // Allocated AFTER lane_b's drag (so they win over translation) but
+    // BEFORE the fade handles (so the handles still win at their
+    // ±5 px hit-zone). Dragging a playhead stops any active preview —
+    // matches DAW seek convention.
+    let a_ph_x = secs_to_x(app.crossfade_state.a_playhead_secs);
+    let b_ph_x = secs_to_x(app.crossfade_state.b_offset_secs + app.crossfade_state.b_playhead_secs);
+    let a_ph_rect = egui::Rect::from_min_max(
+        egui::pos2(a_ph_x - PLAYHEAD_HIT_W * 0.5, lane_a.top()),
+        egui::pos2(a_ph_x + PLAYHEAD_HIT_W * 0.5, lane_a.bottom()),
+    );
+    let b_ph_rect = egui::Rect::from_min_max(
+        egui::pos2(b_ph_x - PLAYHEAD_HIT_W * 0.5, lane_b.top()),
+        egui::pos2(b_ph_x + PLAYHEAD_HIT_W * 0.5, lane_b.bottom()),
+    );
+    let a_ph_resp = ui.interact(
+        a_ph_rect,
+        ui.id().with("xfade_playhead_a"),
+        egui::Sense::click_and_drag(),
+    );
+    let b_ph_resp = ui.interact(
+        b_ph_rect,
+        ui.id().with("xfade_playhead_b"),
+        egui::Sense::click_and_drag(),
+    );
+    if a_ph_resp.hovered() || b_ph_resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+    }
+    if a_ph_resp.dragged() && px_per_sec > 0.0 {
+        stop_preview(&mut app.crossfade_state);
+        let dx = a_ph_resp.drag_delta().x;
+        if dx != 0.0 {
+            let new = app.crossfade_state.a_playhead_secs + dx / px_per_sec;
+            app.crossfade_state.a_playhead_secs = new.clamp(0.0, a_dur);
+        }
+    }
+    if b_ph_resp.dragged() && px_per_sec > 0.0 {
+        stop_preview(&mut app.crossfade_state);
+        let dx = b_ph_resp.drag_delta().x;
+        if dx != 0.0 {
+            let new = app.crossfade_state.b_playhead_secs + dx / px_per_sec;
+            app.crossfade_state.b_playhead_secs = new.clamp(0.0, b_dur);
         }
     }
 
@@ -407,8 +485,26 @@ fn draw_timeline(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
     let a_ref = st.track_a.as_ref().unwrap();
     let b_ref = st.track_b.as_ref().unwrap();
     let off = st.b_offset_secs;
-    draw_lane(&painter, lane_a, a_ref, 0.0, tl_start, tl_dur, "A");
-    draw_lane(&painter, lane_b, b_ref, off, tl_start, tl_dur, "B");
+    draw_lane(
+        &painter,
+        lane_a,
+        a_ref,
+        0.0,
+        tl_start,
+        tl_dur,
+        "A",
+        st.a_playhead_secs,
+    );
+    draw_lane(
+        &painter,
+        lane_b,
+        b_ref,
+        off,
+        tl_start,
+        tl_dur,
+        "B",
+        st.b_playhead_secs,
+    );
 
     // Vertical handle lines + tiny grip caps centred on the timeline.
     let edge_stroke = egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 200, 80));
@@ -493,6 +589,7 @@ fn snap_fade_to_overlap(st: &mut CrossfadeUiState) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_lane(
     painter: &egui::Painter,
     rect: egui::Rect,
@@ -501,44 +598,81 @@ fn draw_lane(
     tl_start: f32,
     tl_dur: f32,
     label: &str,
+    playhead_secs: f32,
 ) {
     painter.rect_stroke(
         rect,
         2.0,
         egui::Stroke::new(0.5, egui::Color32::from_gray(60)),
     );
-    if track.peaks.is_empty() {
-        return;
+    if !track.peaks.is_empty() {
+        // Where the lane's audio sits on the timeline.
+        let t_left = secs_offset;
+        let t_right = secs_offset + track.duration_secs;
+        let x_left = rect.left() + (t_left - tl_start) / tl_dur * rect.width();
+        let x_right = rect.left() + (t_right - tl_start) / tl_dur * rect.width();
+        let w = (x_right - x_left).max(1.0);
+        let mid = rect.center().y;
+        let half_h = (rect.height() * 0.4).max(2.0);
+        let stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(100, 200, 130));
+        let cols = w as usize;
+        for x in 0..cols {
+            let idx = ((x as f32 / cols.max(1) as f32) * track.peaks.len() as f32) as usize;
+            let idx = idx.min(track.peaks.len() - 1);
+            let p = track.peaks[idx].min(1.0);
+            let xp = x_left + x as f32;
+            painter.line_segment(
+                [
+                    egui::pos2(xp, mid - p * half_h),
+                    egui::pos2(xp, mid + p * half_h),
+                ],
+                stroke,
+            );
+        }
     }
-    // Where the lane's audio sits on the timeline.
-    let t_left = secs_offset;
-    let t_right = secs_offset + track.duration_secs;
-    let x_left = rect.left() + (t_left - tl_start) / tl_dur * rect.width();
-    let x_right = rect.left() + (t_right - tl_start) / tl_dur * rect.width();
-    let w = (x_right - x_left).max(1.0);
-    let mid = rect.center().y;
-    let half_h = (rect.height() * 0.4).max(2.0);
-    let stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(100, 200, 130));
-    let cols = w as usize;
-    for x in 0..cols {
-        let idx = ((x as f32 / cols.max(1) as f32) * track.peaks.len() as f32) as usize;
-        let idx = idx.min(track.peaks.len() - 1);
-        let p = track.peaks[idx].min(1.0);
-        let xp = x_left + x as f32;
+
+    // Playhead — a thin vertical line at the playhead's position on the
+    // timeline. Drawn even when peaks is empty so the user still has a
+    // grabbable target on degenerate (silent / very short) tracks.
+    let ph_x = rect.left() + (secs_offset + playhead_secs - tl_start) / tl_dur * rect.width();
+    if ph_x >= rect.left() - 1.0 && ph_x <= rect.right() + 1.0 {
+        let ph_stroke = egui::Stroke::new(1.5, egui::Color32::from_rgb(120, 200, 255));
         painter.line_segment(
             [
-                egui::pos2(xp, mid - p * half_h),
-                egui::pos2(xp, mid + p * half_h),
+                egui::pos2(ph_x, rect.top()),
+                egui::pos2(ph_x, rect.bottom()),
             ],
-            stroke,
+            ph_stroke,
         );
+        // Small triangle cap at top so the playhead reads as a head,
+        // not just a vertical line through both lanes' shading.
+        let cap = 5.0;
+        painter.add(egui::Shape::convex_polygon(
+            vec![
+                egui::pos2(ph_x, rect.top() + cap),
+                egui::pos2(ph_x - cap, rect.top()),
+                egui::pos2(ph_x + cap, rect.top()),
+            ],
+            egui::Color32::from_rgb(120, 200, 255),
+            egui::Stroke::NONE,
+        ));
     }
+
     painter.text(
         rect.left_top() + egui::vec2(6.0, 6.0),
         egui::Align2::LEFT_TOP,
         label,
         egui::FontId::monospace(11.0),
         egui::Color32::from_gray(160),
+    );
+    // mm:ss.mmm counter — top-right of the lane, monospace so digits
+    // don't jitter as they tick over.
+    painter.text(
+        rect.right_top() + egui::vec2(-6.0, 6.0),
+        egui::Align2::RIGHT_TOP,
+        fmt_ms(playhead_secs),
+        egui::FontId::monospace(11.0),
+        egui::Color32::from_rgb(180, 210, 235),
     );
 }
 
@@ -677,9 +811,21 @@ fn start_preview_track(st: &mut CrossfadeUiState, is_a: bool) {
         st.track_b.as_ref()
     };
     let Some(t) = track else { return };
+    // Rewind the matching track's playhead so playback always starts
+    // from the head, matching DAW transport convention.
+    if is_a {
+        st.a_playhead_secs = 0.0;
+    } else {
+        st.b_playhead_secs = 0.0;
+    }
     match CrossfadePreviewSession::play(t.samples.clone(), t.sample_rate, t.channels) {
         Ok(s) => {
             st.preview = Some(s);
+            st.preview_mode = Some(if is_a {
+                CrossfadePreviewMode::PlayA
+            } else {
+                CrossfadePreviewMode::PlayB
+            });
             st.status = Some(format!("Playing track {}", if is_a { "A" } else { "B" }));
         }
         Err(e) => {
@@ -701,6 +847,7 @@ fn start_preview_mix(st: &mut CrossfadeUiState) {
     match CrossfadePreviewSession::play(mix.samples, sr, 2) {
         Ok(s) => {
             st.preview = Some(s);
+            st.preview_mode = Some(CrossfadePreviewMode::Mix);
             st.status = Some("Playing crossfade".into());
         }
         Err(e) => {
@@ -711,6 +858,49 @@ fn start_preview_mix(st: &mut CrossfadeUiState) {
 
 fn stop_preview(st: &mut CrossfadeUiState) {
     st.preview = None;
+    st.preview_mode = None;
+}
+
+/// Pull the live cpal playback position out of the preview session and
+/// onto the per-track playheads. No-op when nothing is playing.
+///
+/// - `PlayA` / `PlayB`: position is in the played track's frames, maps
+///   directly to that track's playhead (other lane is left alone).
+/// - `Mix`: position is in mix-output frames whose origin is
+///   `min(0, b_offset)`. Each track's playhead is the global time minus
+///   that track's start, clamped to its own [0, duration].
+fn sync_playheads_from_preview(st: &mut CrossfadeUiState) {
+    let Some(sess) = st.preview.as_ref() else {
+        return;
+    };
+    let Some(mode) = st.preview_mode else {
+        return;
+    };
+    let sr = sess.sample_rate.max(1) as f32;
+    let pos_secs = sess.position.load(Ordering::Relaxed) as f32 / sr;
+    match mode {
+        CrossfadePreviewMode::PlayA => {
+            if let Some(a) = st.track_a.as_ref() {
+                st.a_playhead_secs = pos_secs.clamp(0.0, a.duration_secs);
+            }
+        }
+        CrossfadePreviewMode::PlayB => {
+            if let Some(b) = st.track_b.as_ref() {
+                st.b_playhead_secs = pos_secs.clamp(0.0, b.duration_secs);
+            }
+        }
+        CrossfadePreviewMode::Mix => {
+            let off = st.b_offset_secs;
+            let tl_start = 0.0_f32.min(off);
+            let global = tl_start + pos_secs;
+            if let Some(a) = st.track_a.as_ref() {
+                st.a_playhead_secs = (global).clamp(0.0, a.duration_secs);
+            }
+            if let Some(b) = st.track_b.as_ref() {
+                st.b_playhead_secs = (global - off).clamp(0.0, b.duration_secs);
+            }
+        }
+    }
 }
 
 fn build_mix(st: &CrossfadeUiState) -> anyhow::Result<crate::crossfade::CrossfadeMix> {

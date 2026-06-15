@@ -58,6 +58,15 @@ pub struct LoadedCrossfadeTrack {
     pub peaks: Vec<f32>,
 }
 
+/// Which preview is currently driving `CrossfadeUiState::preview`. Maps
+/// the live playback position onto the per-track playheads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CrossfadePreviewMode {
+    PlayA,
+    PlayB,
+    Mix,
+}
+
 /// Crossfade-tab UI state — survives tab switches. TBSS-FR-0010.
 pub struct CrossfadeUiState {
     pub track_a: Option<LoadedCrossfadeTrack>,
@@ -75,6 +84,15 @@ pub struct CrossfadeUiState {
     /// Active preview playback session. `Some` while audio is flowing;
     /// `None` between presses.
     pub preview: Option<crate::crossfade_player::CrossfadePreviewSession>,
+    /// What kind of preview is currently in `preview`. `None` when no
+    /// preview is active.
+    pub preview_mode: Option<CrossfadePreviewMode>,
+    /// Playhead position within Track A, in track-local seconds
+    /// (0..a.duration_secs). Tracks the active preview when one is
+    /// driving A, otherwise holds the user's last drag position.
+    pub a_playhead_secs: f32,
+    /// Playhead position within Track B, in track-local seconds.
+    pub b_playhead_secs: f32,
     /// Reserved for future mix-result caching. The MVP recomputes the
     /// mix on every ▶ Crossfade press and Export click — fast enough
     /// for typical inputs.
@@ -95,6 +113,9 @@ impl Default for CrossfadeUiState {
             fade_end_secs: 0.0,
             curve: crate::crossfade::CrossfadeCurve::EqualPower,
             preview: None,
+            preview_mode: None,
+            a_playhead_secs: 0.0,
+            b_playhead_secs: 0.0,
             mix_cache_signature: 0,
             status: None,
             export_format: crate::export::ExportFormat::Wav,
