@@ -93,6 +93,17 @@ pub struct CrossfadeUiState {
     pub a_playhead_secs: f32,
     /// Playhead position within Track B, in track-local seconds.
     pub b_playhead_secs: f32,
+    /// Left edge of the zoomed view, in global timeline seconds
+    /// (origin = `min(0, b_offset)`). Honored only when `zoom_pct < 100`.
+    pub zoom_start_secs: f32,
+    /// Percentage of the total timeline visible. 100 = fully zoomed
+    /// out (no zoom); smaller = more zoomed in. Clamped to ≥0.1 so the
+    /// view never collapses to a single column.
+    pub zoom_pct: f32,
+    /// Timeline-seconds where the in-progress rubber-band drag started
+    /// on the zoom strip. `None` between drags. Survives across frames
+    /// inside a single drag so we can render the rubber band.
+    pub zoom_drag_anchor_secs: Option<f32>,
     /// Reserved for future mix-result caching. The MVP recomputes the
     /// mix on every ▶ Crossfade press and Export click — fast enough
     /// for typical inputs.
@@ -116,6 +127,9 @@ impl Default for CrossfadeUiState {
             preview_mode: None,
             a_playhead_secs: 0.0,
             b_playhead_secs: 0.0,
+            zoom_start_secs: 0.0,
+            zoom_pct: 100.0,
+            zoom_drag_anchor_secs: None,
             mix_cache_signature: 0,
             status: None,
             export_format: crate::export::ExportFormat::Wav,

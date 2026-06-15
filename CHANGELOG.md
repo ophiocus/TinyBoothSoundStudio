@@ -8,6 +8,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); thi
 
 (Nothing yet — known issues all resolved as of v0.4.23.)
 
+## [0.4.47] — 2026-06-15
+
+### Added — Crossfade tab: temporary zoom (drag-strip + form fields)
+Sub-second crossfade work on minutes-long material was effectively impossible at the v0.4.46 scale — a 60-second timeline rendering in ~800 px gives ≈75 ms per pixel, which means the fade handles can't resolve anything finer than that. The new zoom turns the entire lane area into a sub-section of the global timeline so 100 ms / 50 ms / 10 ms fades become draggable directly.
+
+- **Zoom strip** (16 px minimap drawn above the lanes). It always shows the FULL timeline with thin per-track shadow lines so you can see where you are. Drag any horizontal range on the strip and the lanes zoom to that range. The current view is outlined on the strip in cyan so you can re-orient at a glance.
+- **Form fields, always visible**: `Zoom start` (seconds, DragValue) + `Zoom %` (0.1 … 100, DragValue). Both editable whether you're zoomed in or not — type a value to enter zoom precisely, or scrub.
+- **✖ Reset zoom** button — only enabled while zoomed. One click returns to the full view.
+- **Nothing else changes its behaviour.** Sliders, fade-handle drag, playhead drag, ms counters, ▶ A / ▶ B / ▶ Crossfade preview, Export — all of it works exactly as before, just remapped to the zoomed pixel scale. Drag a fade handle while zoomed in 100× and you get 100× finer per-pixel resolution.
+
+### Implementation note
+Centralised in a `view_range()` helper called once per frame; everything downstream consumes `view_start / view_dur` instead of `tl_start / tl_dur`. Fade-handle hit zones constrained to the lanes area so they don't bleed into the strip's drag rect. Strip drag uses egui `drag_stopped()` (renamed from the deprecated `drag_released()`).
+
+### Proof
+`zoom_start_secs`, `zoom_pct`, `zoom_drag_anchor_secs` added to `CrossfadeUiState` (defaults: `0.0 / 100.0 / None` — no behavioural change for users who don't touch the new controls). Suite **126 passing**. fmt + clippy `--release --all-targets -D warnings` + release build all clean.
+
 ## [0.4.46] — 2026-06-15
 
 ### Added — Crossfade tab: per-track playheads + ms counters

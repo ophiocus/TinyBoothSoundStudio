@@ -21,6 +21,27 @@ const PLAYHEAD_HIT_W: f32 = 8.0;
 
 const PEAK_BINS: usize = 200;
 const LANE_H: f32 = 60.0;
+/// Height of the zoom minimap strip drawn above the lanes. Tall enough
+/// to grab, short enough not to crowd out the waveforms.
+const ZOOM_STRIP_H: f32 = 16.0;
+/// Gap between the strip and lane A (matches the gap between the lanes).
+const STRIP_GAP: f32 = 4.0;
+
+/// Resolve the visible time range given the current zoom state. When
+/// `zoom_pct` is at the no-zoom sentinel (100), returns the full
+/// `[tl_start, tl_end]`. Otherwise clamps `zoom_start_secs` so the
+/// resolved range always fits inside the global timeline.
+fn view_range(st: &CrossfadeUiState, tl_start: f32, tl_end: f32) -> (f32, f32) {
+    let tl_dur = (tl_end - tl_start).max(0.001);
+    let pct = st.zoom_pct.clamp(0.1, 100.0);
+    if pct >= 100.0 - 0.0005 {
+        return (tl_start, tl_end);
+    }
+    let view_span = (tl_dur * pct / 100.0).max(0.001).min(tl_dur);
+    let max_start = tl_end - view_span;
+    let view_start = st.zoom_start_secs.clamp(tl_start, max_start);
+    (view_start, view_start + view_span)
+}
 
 /// Format a duration in `mm:ss.mmm` for the per-track playhead counter.
 fn fmt_ms(secs: f32) -> String {
@@ -201,6 +222,57 @@ pub fn show(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
 
     ui.add_space(8.0);
 
+    // ── Zoom controls ──────────────────────────────────────────────
+    // Form fields are always visible (per spec); they work even when
+    // not loaded — they just have nothing to act on. The X button
+    // returns the view to "no zoom".
+    ui.horizontal(|ui| {
+        ui.label("Zoom start:");
+        ui.add(
+            egui::DragValue::new(&mut app.crossfade_state.zoom_start_secs)
+                .speed(0.01)
+                .suffix(" s"),
+        )
+        .on_hover_text("Left edge of the zoomed view, in timeline seconds.");
+        ui.add_space(8.0);
+        ui.label("Zoom %:");
+        ui.add(
+            egui::DragValue::new(&mut app.crossfade_state.zoom_pct)
+                .speed(0.25)
+                .suffix(" %"),
+        )
+        .on_hover_text(
+            "Percentage of the full timeline visible. 100 % = no zoom. \
+             Smaller % = more zoomed in (sub-second precision).",
+        );
+        // Hard clamp so the form can't break the view math.
+        app.crossfade_state.zoom_pct = app.crossfade_state.zoom_pct.clamp(0.1, 100.0);
+        let zoomed = app.crossfade_state.zoom_pct < 100.0 - 0.0005;
+        ui.add_enabled_ui(zoomed, |ui| {
+            if ui
+                .button("✖ Reset zoom")
+                .on_hover_text("Return to full-timeline view.")
+                .clicked()
+            {
+                app.crossfade_state.zoom_pct = 100.0;
+                app.crossfade_state.zoom_drag_anchor_secs = None;
+            }
+        });
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.label(
+                egui::RichText::new(if zoomed {
+                    "drag on the strip above the lanes to set a new region"
+                } else {
+                    "drag on the strip above the lanes to zoom"
+                })
+                .weak()
+                .small(),
+            );
+        });
+    });
+
+    ui.add_space(4.0);
+
     // ── Waveform visualisation ─────────────────────────────────────
     draw_timeline(app, ui);
 
@@ -337,24 +409,152 @@ fn draw_timeline(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
             .request_repaint_after(std::time::Duration::from_millis(16));
     }
 
+    // Resolve the visible time range from the current zoom state. All
+    // downstream pixel math uses this — handles, playheads, waveforms
+    // all zoom for free.
+    let (view_start, view_end) = view_range(&app.crossfade_state, tl_start, tl_end);
+    let view_dur = (view_end - view_start).max(0.001);
+
     let avail_w = ui.available_width().max(200.0);
-    let (rect, _outer) = ui.allocate_exact_size(
-        egui::vec2(avail_w, LANE_H * 2.0 + 6.0),
-        egui::Sense::hover(),
-    );
+    let total_h = ZOOM_STRIP_H + STRIP_GAP + LANE_H * 2.0 + 6.0;
+    let (rect, _outer) = ui.allocate_exact_size(egui::vec2(avail_w, total_h), egui::Sense::hover());
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 4.0, egui::Color32::from_rgb(14, 14, 18));
 
-    let lane_a = egui::Rect::from_min_max(
+    let strip_rect = egui::Rect::from_min_max(
         rect.left_top(),
-        egui::pos2(rect.right(), rect.top() + LANE_H),
+        egui::pos2(rect.right(), rect.top() + ZOOM_STRIP_H),
+    );
+    let lanes_top = rect.top() + ZOOM_STRIP_H + STRIP_GAP;
+    let lane_a = egui::Rect::from_min_max(
+        egui::pos2(rect.left(), lanes_top),
+        egui::pos2(rect.right(), lanes_top + LANE_H),
     );
     let lane_b = egui::Rect::from_min_max(
-        egui::pos2(rect.left(), rect.top() + LANE_H + 6.0),
+        egui::pos2(rect.left(), lanes_top + LANE_H + 6.0),
         rect.right_bottom(),
     );
-    let px_per_sec = rect.width() / tl_dur;
-    let secs_to_x = |s: f32| -> f32 { rect.left() + (s - tl_start) * px_per_sec };
+    let lanes_rect = egui::Rect::from_min_max(lane_a.left_top(), lane_b.right_bottom());
+    let px_per_sec = lanes_rect.width() / view_dur;
+    let secs_to_x = |s: f32| -> f32 { lanes_rect.left() + (s - view_start) * px_per_sec };
+
+    // ── Zoom strip (minimap + rubber-band drag) ────────────────────
+    // Drag here selects the new view range. Always drawn at the full
+    // [tl_start, tl_end] scale so it doubles as an overview minimap.
+    let strip_px_per_sec = strip_rect.width() / tl_dur;
+    let strip_x_to_secs =
+        |x: f32| -> f32 { tl_start + ((x - strip_rect.left()) / strip_px_per_sec) };
+    let strip_secs_to_x = |s: f32| -> f32 { strip_rect.left() + (s - tl_start) * strip_px_per_sec };
+    painter.rect_filled(strip_rect, 2.0, egui::Color32::from_rgb(22, 22, 28));
+    painter.rect_stroke(
+        strip_rect,
+        2.0,
+        egui::Stroke::new(0.5, egui::Color32::from_gray(60)),
+    );
+    let strip_resp = ui.interact(
+        strip_rect,
+        ui.id().with("xfade_zoom_strip"),
+        egui::Sense::click_and_drag(),
+    );
+    if strip_resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+    }
+    if strip_resp.drag_started() {
+        if let Some(p) = strip_resp.interact_pointer_pos() {
+            let t = strip_x_to_secs(p.x).clamp(tl_start, tl_end);
+            app.crossfade_state.zoom_drag_anchor_secs = Some(t);
+        }
+    }
+    if strip_resp.drag_stopped() {
+        if let (Some(anchor), Some(p)) = (
+            app.crossfade_state.zoom_drag_anchor_secs,
+            strip_resp.interact_pointer_pos(),
+        ) {
+            let t = strip_x_to_secs(p.x).clamp(tl_start, tl_end);
+            let (a, b) = if anchor <= t {
+                (anchor, t)
+            } else {
+                (t, anchor)
+            };
+            let span = (b - a).max(0.0);
+            // Require ≥ 5 ms drag to count as a zoom request — a stray
+            // click on the strip shouldn't collapse the view to a point.
+            if span >= 0.005 {
+                app.crossfade_state.zoom_start_secs = a;
+                app.crossfade_state.zoom_pct = (span / tl_dur * 100.0).clamp(0.1, 100.0);
+            }
+        }
+        app.crossfade_state.zoom_drag_anchor_secs = None;
+    }
+
+    // Strip overlay: current view box (when zoomed) or rubber band (during drag).
+    if let Some(anchor) = app.crossfade_state.zoom_drag_anchor_secs {
+        if let Some(p) = ui.ctx().input(|i| i.pointer.hover_pos()) {
+            let cur = strip_x_to_secs(p.x).clamp(tl_start, tl_end);
+            let (a, b) = if anchor <= cur {
+                (anchor, cur)
+            } else {
+                (cur, anchor)
+            };
+            let r = egui::Rect::from_min_max(
+                egui::pos2(strip_secs_to_x(a), strip_rect.top() + 1.0),
+                egui::pos2(strip_secs_to_x(b), strip_rect.bottom() - 1.0),
+            );
+            painter.rect_filled(
+                r,
+                1.0,
+                egui::Color32::from_rgba_unmultiplied(120, 200, 255, 70),
+            );
+            painter.rect_stroke(
+                r,
+                1.0,
+                egui::Stroke::new(1.0, egui::Color32::from_rgb(120, 200, 255)),
+            );
+        }
+    } else if app.crossfade_state.zoom_pct < 100.0 - 0.0005 {
+        let r = egui::Rect::from_min_max(
+            egui::pos2(strip_secs_to_x(view_start), strip_rect.top() + 1.0),
+            egui::pos2(strip_secs_to_x(view_end), strip_rect.bottom() - 1.0),
+        );
+        painter.rect_filled(
+            r,
+            1.0,
+            egui::Color32::from_rgba_unmultiplied(120, 200, 255, 45),
+        );
+        painter.rect_stroke(
+            r,
+            1.0,
+            egui::Stroke::new(1.0, egui::Color32::from_rgb(120, 200, 255)),
+        );
+    }
+    // Strip-side waveform shadow — single thin line per track's range
+    // so the user can see WHERE the audio is on the global timeline.
+    let strip_mid = strip_rect.center().y;
+    let a_x0 = strip_secs_to_x(0.0).max(strip_rect.left());
+    let a_x1 = strip_secs_to_x(a_dur).min(strip_rect.right());
+    let off_secs = app.crossfade_state.b_offset_secs;
+    let b_x0 = strip_secs_to_x(off_secs).max(strip_rect.left());
+    let b_x1 = strip_secs_to_x(off_secs + b_dur).min(strip_rect.right());
+    let shadow_a = egui::Stroke::new(1.0, egui::Color32::from_rgb(100, 200, 130));
+    let shadow_b = egui::Stroke::new(1.0, egui::Color32::from_rgb(170, 130, 200));
+    if a_x1 > a_x0 {
+        painter.line_segment(
+            [
+                egui::pos2(a_x0, strip_mid - 3.0),
+                egui::pos2(a_x1, strip_mid - 3.0),
+            ],
+            shadow_a,
+        );
+    }
+    if b_x1 > b_x0 {
+        painter.line_segment(
+            [
+                egui::pos2(b_x0, strip_mid + 3.0),
+                egui::pos2(b_x1, strip_mid + 3.0),
+            ],
+            shadow_b,
+        );
+    }
 
     // ── Drag track B's waveform area ───────────────────────────────
     // Allocated FIRST so the handle rects (below) take priority when
@@ -428,8 +628,8 @@ fn draw_timeline(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
         let x0 = secs_to_x(fs);
         let x1 = secs_to_x(fe);
         let fade_rect = egui::Rect::from_min_max(
-            egui::pos2(x0.max(rect.left()), lane_a.top()),
-            egui::pos2(x1.min(rect.right()), lane_b.bottom()),
+            egui::pos2(x0.max(lanes_rect.left()), lane_a.top()),
+            egui::pos2(x1.min(lanes_rect.right()), lane_b.bottom()),
         );
         painter.rect_filled(
             fade_rect,
@@ -440,13 +640,15 @@ fn draw_timeline(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
 
     let fs_x = secs_to_x(fs);
     let fe_x = secs_to_x(fe);
+    // Hit zones confined to the lanes area so they don't bleed up into
+    // the zoom strip (whose drag handler owns its own rect).
     let fs_rect = egui::Rect::from_min_max(
-        egui::pos2(fs_x - HANDLE_HIT_W * 0.5, rect.top()),
-        egui::pos2(fs_x + HANDLE_HIT_W * 0.5, rect.bottom()),
+        egui::pos2(fs_x - HANDLE_HIT_W * 0.5, lanes_rect.top()),
+        egui::pos2(fs_x + HANDLE_HIT_W * 0.5, lanes_rect.bottom()),
     );
     let fe_rect = egui::Rect::from_min_max(
-        egui::pos2(fe_x - HANDLE_HIT_W * 0.5, rect.top()),
-        egui::pos2(fe_x + HANDLE_HIT_W * 0.5, rect.bottom()),
+        egui::pos2(fe_x - HANDLE_HIT_W * 0.5, lanes_rect.top()),
+        egui::pos2(fe_x + HANDLE_HIT_W * 0.5, lanes_rect.bottom()),
     );
     let fs_resp = ui.interact(
         fs_rect,
@@ -488,8 +690,8 @@ fn draw_timeline(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
         lane_a,
         a_ref,
         0.0,
-        tl_start,
-        tl_dur,
+        view_start,
+        view_dur,
         "A",
         st.a_playhead_secs,
     );
@@ -498,36 +700,36 @@ fn draw_timeline(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
         lane_b,
         b_ref,
         off,
-        tl_start,
-        tl_dur,
+        view_start,
+        view_dur,
         "B",
         st.b_playhead_secs,
     );
 
-    // Vertical handle lines + tiny grip caps centred on the timeline.
+    // Vertical handle lines + tiny grip caps centred on the lanes.
     let edge_stroke = egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 200, 80));
     painter.line_segment(
         [
-            egui::pos2(fs_x, rect.top()),
-            egui::pos2(fs_x, rect.bottom()),
+            egui::pos2(fs_x, lanes_rect.top()),
+            egui::pos2(fs_x, lanes_rect.bottom()),
         ],
         edge_stroke,
     );
     painter.line_segment(
         [
-            egui::pos2(fe_x, rect.top()),
-            egui::pos2(fe_x, rect.bottom()),
+            egui::pos2(fe_x, lanes_rect.top()),
+            egui::pos2(fe_x, lanes_rect.bottom()),
         ],
         edge_stroke,
     );
     let cap = egui::vec2(8.0, 8.0);
     painter.rect_filled(
-        egui::Rect::from_center_size(egui::pos2(fs_x, rect.center().y), cap),
+        egui::Rect::from_center_size(egui::pos2(fs_x, lanes_rect.center().y), cap),
         2.0,
         egui::Color32::from_rgb(255, 200, 80),
     );
     painter.rect_filled(
-        egui::Rect::from_center_size(egui::pos2(fe_x, rect.center().y), cap),
+        egui::Rect::from_center_size(egui::pos2(fe_x, lanes_rect.center().y), cap),
         2.0,
         egui::Color32::from_rgb(255, 200, 80),
     );
@@ -593,8 +795,8 @@ fn draw_lane(
     rect: egui::Rect,
     track: &LoadedCrossfadeTrack,
     secs_offset: f32,
-    tl_start: f32,
-    tl_dur: f32,
+    view_start: f32,
+    view_dur: f32,
     label: &str,
     playhead_secs: f32,
 ) {
@@ -607,8 +809,8 @@ fn draw_lane(
         // Where the lane's audio sits on the timeline.
         let t_left = secs_offset;
         let t_right = secs_offset + track.duration_secs;
-        let x_left = rect.left() + (t_left - tl_start) / tl_dur * rect.width();
-        let x_right = rect.left() + (t_right - tl_start) / tl_dur * rect.width();
+        let x_left = rect.left() + (t_left - view_start) / view_dur * rect.width();
+        let x_right = rect.left() + (t_right - view_start) / view_dur * rect.width();
         let w = (x_right - x_left).max(1.0);
         let mid = rect.center().y;
         let half_h = (rect.height() * 0.4).max(2.0);
@@ -632,7 +834,7 @@ fn draw_lane(
     // Playhead — a thin vertical line at the playhead's position on the
     // timeline. Drawn even when peaks is empty so the user still has a
     // grabbable target on degenerate (silent / very short) tracks.
-    let ph_x = rect.left() + (secs_offset + playhead_secs - tl_start) / tl_dur * rect.width();
+    let ph_x = rect.left() + (secs_offset + playhead_secs - view_start) / view_dur * rect.width();
     if ph_x >= rect.left() - 1.0 && ph_x <= rect.right() + 1.0 {
         let ph_stroke = egui::Stroke::new(1.5, egui::Color32::from_rgb(120, 200, 255));
         painter.line_segment(
