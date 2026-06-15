@@ -14,11 +14,6 @@ use std::sync::atomic::Ordering;
 /// of the timeline draggable as track B, large enough to reliably grab.
 const HANDLE_HIT_W: f32 = 10.0;
 
-/// Pixel width of a playhead hit rect — narrower than fade handles so
-/// it sits inside a single lane without colliding with the next-lane
-/// interactions.
-const PLAYHEAD_HIT_W: f32 = 8.0;
-
 const PEAK_BINS: usize = 200;
 const LANE_H: f32 = 60.0;
 /// Height of the zoom minimap strip drawn above the lanes. Tall enough
@@ -586,67 +581,41 @@ fn draw_timeline(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
         ));
     }
 
-    // ── Drag track B's waveform area ───────────────────────────────
-    // Allocated FIRST so the handle rects (below) take priority when
-    // the pointer is within their narrow hit zones.
-    let b_drag_resp = ui.interact(
+    // ── Click/drag anywhere on a lane = seek that lane's playhead ─
+    // Allocated BEFORE the fade handles so the handles' narrow hit
+    // zones still win when overlapping. A click anywhere = jump
+    // playhead to pointer; a drag = continuous seek. Either way the
+    // active preview is stopped (DAW seek convention).
+    let a_lane_resp = ui.interact(
+        lane_a,
+        ui.id().with("xfade_lane_a_seek"),
+        egui::Sense::click_and_drag(),
+    );
+    let b_lane_resp = ui.interact(
         lane_b,
-        ui.id().with("xfade_track_b_drag"),
+        ui.id().with("xfade_lane_b_seek"),
         egui::Sense::click_and_drag(),
     );
-    if b_drag_resp.hovered() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+    if a_lane_resp.hovered() || b_lane_resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
     }
-    if b_drag_resp.dragged() && px_per_sec > 0.0 {
-        let dx = b_drag_resp.drag_delta().x;
-        if dx != 0.0 {
-            let new = app.crossfade_state.b_offset_secs + dx / px_per_sec;
-            app.crossfade_state.b_offset_secs = new.clamp(-b_dur, a_dur);
+    let a_active = a_lane_resp.clicked() || a_lane_resp.dragged();
+    if a_active {
+        if let Some(p) = a_lane_resp.interact_pointer_pos() {
+            stop_preview(&mut app.crossfade_state);
+            let t = view_start + (p.x - lanes_rect.left()) / lanes_rect.width() * view_dur;
+            app.crossfade_state.a_playhead_secs = t.clamp(0.0, a_dur);
         }
     }
-
-    // ── Draggable playheads (one per lane) ─────────────────────────
-    // Allocated AFTER lane_b's drag (so they win over translation) but
-    // BEFORE the fade handles (so the handles still win at their
-    // ±5 px hit-zone). Dragging a playhead stops any active preview —
-    // matches DAW seek convention.
-    let a_ph_x = secs_to_x(app.crossfade_state.a_playhead_secs);
-    let b_ph_x = secs_to_x(app.crossfade_state.b_offset_secs + app.crossfade_state.b_playhead_secs);
-    let a_ph_rect = egui::Rect::from_min_max(
-        egui::pos2(a_ph_x - PLAYHEAD_HIT_W * 0.5, lane_a.top()),
-        egui::pos2(a_ph_x + PLAYHEAD_HIT_W * 0.5, lane_a.bottom()),
-    );
-    let b_ph_rect = egui::Rect::from_min_max(
-        egui::pos2(b_ph_x - PLAYHEAD_HIT_W * 0.5, lane_b.top()),
-        egui::pos2(b_ph_x + PLAYHEAD_HIT_W * 0.5, lane_b.bottom()),
-    );
-    let a_ph_resp = ui.interact(
-        a_ph_rect,
-        ui.id().with("xfade_playhead_a"),
-        egui::Sense::click_and_drag(),
-    );
-    let b_ph_resp = ui.interact(
-        b_ph_rect,
-        ui.id().with("xfade_playhead_b"),
-        egui::Sense::click_and_drag(),
-    );
-    if a_ph_resp.hovered() || b_ph_resp.hovered() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
-    }
-    if a_ph_resp.dragged() && px_per_sec > 0.0 {
-        stop_preview(&mut app.crossfade_state);
-        let dx = a_ph_resp.drag_delta().x;
-        if dx != 0.0 {
-            let new = app.crossfade_state.a_playhead_secs + dx / px_per_sec;
-            app.crossfade_state.a_playhead_secs = new.clamp(0.0, a_dur);
-        }
-    }
-    if b_ph_resp.dragged() && px_per_sec > 0.0 {
-        stop_preview(&mut app.crossfade_state);
-        let dx = b_ph_resp.drag_delta().x;
-        if dx != 0.0 {
-            let new = app.crossfade_state.b_playhead_secs + dx / px_per_sec;
-            app.crossfade_state.b_playhead_secs = new.clamp(0.0, b_dur);
+    let b_active = b_lane_resp.clicked() || b_lane_resp.dragged();
+    if b_active {
+        if let Some(p) = b_lane_resp.interact_pointer_pos() {
+            stop_preview(&mut app.crossfade_state);
+            // B's playhead is track-local (0..b_dur). Convert pointer
+            // time on the global timeline back into B-local seconds.
+            let t_global = view_start + (p.x - lanes_rect.left()) / lanes_rect.width() * view_dur;
+            let t_local = t_global - app.crossfade_state.b_offset_secs;
+            app.crossfade_state.b_playhead_secs = t_local.clamp(0.0, b_dur);
         }
     }
 

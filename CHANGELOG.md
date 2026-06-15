@@ -8,6 +8,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); thi
 
 (Nothing yet — known issues all resolved as of v0.4.23.)
 
+## [0.4.49] — 2026-06-15
+
+### Changed — Crossfade tab: click-anywhere-on-lane = seek
+The 8 px playhead hit zone was a usability dead-end — invisible until you happened to be on it. Replaced with whole-lane seek: click or drag anywhere on Track A → A's playhead jumps to pointer time. Same for Track B. The cursor turns to a crosshair when hovering a lane so the affordance is obvious; the active preview stops on seek (DAW convention).
+
+- **Removed** the v0.4.45 "drag track B's waveform area to translate B-offset" affordance — it now conflicts with click-to-seek. B-offset is still set via the slider and the per-pixel-precise form value above the lanes; users gain a sub-second seek surface and don't lose offset control.
+- **Removed** the dedicated playhead drag rects — the whole lane IS the playhead's hit zone now.
+- Fade handles keep their 10 px hit zones and still win over the lane seek because they're allocated after the lane interactions in the same frame (egui's last-allocated-overlapping-rect-wins rule).
+- B's lane click maps the pointer's global time back to B-local seconds via `t_global - b_offset` so B's playhead stays in its own coordinate system (matches how ▶ B seeks).
+
+### Proof
+`lane_a` + `lane_b` get `click_and_drag` interactions handled via `clicked() || dragged()` + `interact_pointer_pos()` for absolute jump semantics (not drag-delta). Dead `PLAYHEAD_HIT_W` constant removed. Suite **126 passing**. fmt + clippy `--release --all-targets -D warnings` + release build all clean.
+
 ## [0.4.48] — 2026-06-15
 
 ### Changed — Crossfade tab: playhead drives seek-on-play + always visible
