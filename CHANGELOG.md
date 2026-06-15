@@ -8,6 +8,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); thi
 
 (Nothing yet — known issues all resolved as of v0.4.23.)
 
+## [0.4.48] — 2026-06-15
+
+### Changed — Crossfade tab: playhead drives seek-on-play + always visible
+The playheads were positional indicators only — ▶ A / ▶ B / ▶ Crossfade always rewound to 0 and there was no way to audition just the fade transition without listening from the start. Combined with the zoom strip, this made fine fade-tuning a pain. Fixed.
+
+- **Each lane's playhead is now its own transport's seek-to point.** Drag A's playhead to 12.345 s, press ▶ A → playback starts at 12.345 s. Same for B's playhead and ▶ B. For ▶ Crossfade, the **topmost (A) playhead is the master cursor** — it's translated to the mix output frame so the crossfade transport starts wherever A is. The earlier "rewind to 0 on press" behaviour is gone.
+- Implementation: `CrossfadePreviewSession::play(...)` takes a new `start_frame: u64` and initialises its cpal position atomic there. The existing `sync_playheads_from_preview` already divides position by sample rate to get seconds, so nothing else needed to change downstream.
+- **Playheads stay visible when zoomed in tight.** Previously the playhead disappeared the moment it fell outside the visible view — invisible to the user. Now: if the head is left of view, a small ◀-pointing arrow lives on the lane's left edge; if it's right of view, a ▶-pointing arrow on the right edge. The arrows tell you which direction to scroll/pan to find the playhead.
+- **Playhead markers on the zoom strip.** Both A's and B's playhead positions render as small triangle tips on the global-timeline strip (A points down from the top edge, B points up from the bottom), so you can always see where each head sits on the full timeline regardless of zoom.
+
+### Proof
+`CrossfadePreviewSession::play` signature gained `start_frame: u64`. `start_preview_track` and `start_preview_mix` compute the start frame from playhead → sample-rate-scaled. `draw_lane` always draws the playhead (with off-screen edge arrows); zoom strip gets two new triangle markers. Suite **126 passing**. fmt + clippy `--release --all-targets -D warnings` + release build all clean.
+
 ## [0.4.47] — 2026-06-15
 
 ### Added — Crossfade tab: temporary zoom (drag-strip + form fields)

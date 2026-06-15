@@ -556,6 +556,36 @@ fn draw_timeline(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
         );
     }
 
+    // Strip-side playhead markers — visible regardless of zoom so the
+    // user can always see where each head is on the global timeline.
+    // A points DOWN from the top edge; B points UP from the bottom edge.
+    let a_ph_strip_x = strip_secs_to_x(app.crossfade_state.a_playhead_secs);
+    let b_ph_strip_x =
+        strip_secs_to_x(app.crossfade_state.b_offset_secs + app.crossfade_state.b_playhead_secs);
+    let mk = 4.0;
+    if a_ph_strip_x >= strip_rect.left() - 1.0 && a_ph_strip_x <= strip_rect.right() + 1.0 {
+        painter.add(egui::Shape::convex_polygon(
+            vec![
+                egui::pos2(a_ph_strip_x, strip_rect.top() + mk),
+                egui::pos2(a_ph_strip_x - mk, strip_rect.top()),
+                egui::pos2(a_ph_strip_x + mk, strip_rect.top()),
+            ],
+            egui::Color32::from_rgb(120, 200, 255),
+            egui::Stroke::NONE,
+        ));
+    }
+    if b_ph_strip_x >= strip_rect.left() - 1.0 && b_ph_strip_x <= strip_rect.right() + 1.0 {
+        painter.add(egui::Shape::convex_polygon(
+            vec![
+                egui::pos2(b_ph_strip_x, strip_rect.bottom() - mk),
+                egui::pos2(b_ph_strip_x - mk, strip_rect.bottom()),
+                egui::pos2(b_ph_strip_x + mk, strip_rect.bottom()),
+            ],
+            egui::Color32::from_rgb(120, 200, 255),
+            egui::Stroke::NONE,
+        ));
+    }
+
     // ── Drag track B's waveform area ───────────────────────────────
     // Allocated FIRST so the handle rects (below) take priority when
     // the pointer is within their narrow hit zones.
@@ -831,12 +861,16 @@ fn draw_lane(
         }
     }
 
-    // Playhead — a thin vertical line at the playhead's position on the
-    // timeline. Drawn even when peaks is empty so the user still has a
-    // grabbable target on degenerate (silent / very short) tracks.
+    // Playhead — a thin vertical line at the playhead's position on
+    // the timeline. Drawn even when peaks is empty so the user still
+    // has a grabbable target on degenerate (silent / very short) tracks.
+    // When zoomed in such that the playhead sits off-screen, draw a
+    // small triangle at the matching lane edge pointing OUTWARD so the
+    // user can see which direction the head is in.
     let ph_x = rect.left() + (secs_offset + playhead_secs - view_start) / view_dur * rect.width();
+    let ph_color = egui::Color32::from_rgb(120, 200, 255);
     if ph_x >= rect.left() - 1.0 && ph_x <= rect.right() + 1.0 {
-        let ph_stroke = egui::Stroke::new(1.5, egui::Color32::from_rgb(120, 200, 255));
+        let ph_stroke = egui::Stroke::new(1.5, ph_color);
         painter.line_segment(
             [
                 egui::pos2(ph_x, rect.top()),
@@ -844,8 +878,6 @@ fn draw_lane(
             ],
             ph_stroke,
         );
-        // Small triangle cap at top so the playhead reads as a head,
-        // not just a vertical line through both lanes' shading.
         let cap = 5.0;
         painter.add(egui::Shape::convex_polygon(
             vec![
@@ -853,9 +885,36 @@ fn draw_lane(
                 egui::pos2(ph_x - cap, rect.top()),
                 egui::pos2(ph_x + cap, rect.top()),
             ],
-            egui::Color32::from_rgb(120, 200, 255),
+            ph_color,
             egui::Stroke::NONE,
         ));
+    } else {
+        // Off-screen: edge marker. Left-pointing triangle on the right
+        // edge means the head is past the right of view; right-pointing
+        // on the left edge means it's behind the left of view.
+        let mid_y = rect.center().y;
+        let s = 6.0;
+        if ph_x < rect.left() {
+            painter.add(egui::Shape::convex_polygon(
+                vec![
+                    egui::pos2(rect.left() + 2.0, mid_y),
+                    egui::pos2(rect.left() + 2.0 + s, mid_y - s),
+                    egui::pos2(rect.left() + 2.0 + s, mid_y + s),
+                ],
+                ph_color,
+                egui::Stroke::NONE,
+            ));
+        } else {
+            painter.add(egui::Shape::convex_polygon(
+                vec![
+                    egui::pos2(rect.right() - 2.0, mid_y),
+                    egui::pos2(rect.right() - 2.0 - s, mid_y - s),
+                    egui::pos2(rect.right() - 2.0 - s, mid_y + s),
+                ],
+                ph_color,
+                egui::Stroke::NONE,
+            ));
+        }
     }
 
     painter.text(
@@ -1011,14 +1070,16 @@ fn start_preview_track(st: &mut CrossfadeUiState, is_a: bool) {
         st.track_b.as_ref()
     };
     let Some(t) = track else { return };
-    // Rewind the matching track's playhead so playback always starts
-    // from the head, matching DAW transport convention.
-    if is_a {
-        st.a_playhead_secs = 0.0;
+    // Start from the lane's own playhead (DAW seek-to-cursor). The
+    // user can drag the playhead back to 0 if they want to replay
+    // from the head.
+    let playhead_secs = if is_a {
+        st.a_playhead_secs
     } else {
-        st.b_playhead_secs = 0.0;
-    }
-    match CrossfadePreviewSession::play(t.samples.clone(), t.sample_rate, t.channels) {
+        st.b_playhead_secs
+    };
+    let start_frame = (playhead_secs.max(0.0) * t.sample_rate as f32).round() as u64;
+    match CrossfadePreviewSession::play(t.samples.clone(), t.sample_rate, t.channels, start_frame) {
         Ok(s) => {
             st.preview = Some(s);
             st.preview_mode = Some(if is_a {
@@ -1036,6 +1097,14 @@ fn start_preview_track(st: &mut CrossfadeUiState, is_a: bool) {
 
 fn start_preview_mix(st: &mut CrossfadeUiState) {
     stop_preview(st);
+    // Topmost (A) playhead drives the crossfade transport. Convert
+    // its track-local time (A starts at global 0) to the mix output
+    // origin, which is `min(0, b_offset)` — so when B starts before A,
+    // the mix's frame 0 sits to the left of A's frame 0.
+    let off = st.b_offset_secs;
+    let tl_start = 0.0_f32.min(off);
+    let global_secs = st.a_playhead_secs;
+    let mix_secs = (global_secs - tl_start).max(0.0);
     let mix = match build_mix(st) {
         Ok(m) => m,
         Err(e) => {
@@ -1044,7 +1113,8 @@ fn start_preview_mix(st: &mut CrossfadeUiState) {
         }
     };
     let sr = mix.sample_rate;
-    match CrossfadePreviewSession::play(mix.samples, sr, 2) {
+    let start_frame = (mix_secs * sr as f32).round() as u64;
+    match CrossfadePreviewSession::play(mix.samples, sr, 2, start_frame) {
         Ok(s) => {
             st.preview = Some(s);
             st.preview_mode = Some(CrossfadePreviewMode::Mix);

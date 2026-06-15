@@ -28,8 +28,17 @@ pub struct CrossfadePreviewSession {
 
 impl CrossfadePreviewSession {
     /// Start playback of `samples` (interleaved per `channels`,
-    /// nominally stereo). Returns the live session; drop it to stop.
-    pub fn play(samples: Vec<f32>, sample_rate: u32, channels: u16) -> Result<Self> {
+    /// nominally stereo) at `start_frame`. Returns the live session;
+    /// drop it to stop. Pass `start_frame = 0` to play from the head;
+    /// pass a non-zero value to seek (the position atomic is
+    /// initialised there, so the cpal callback resumes from that
+    /// frame and `is_finished` continues to work).
+    pub fn play(
+        samples: Vec<f32>,
+        sample_rate: u32,
+        channels: u16,
+        start_frame: u64,
+    ) -> Result<Self> {
         let dev = crate::audio::output_device_by_name(None)
             .ok_or_else(|| anyhow!("no audio output device available"))?;
 
@@ -57,7 +66,7 @@ impl CrossfadePreviewSession {
         let out_channels = config.channels as usize;
 
         let samples = Arc::new(samples);
-        let position = Arc::new(AtomicU64::new(0));
+        let position = Arc::new(AtomicU64::new(start_frame));
         let samples_cb = samples.clone();
         let position_cb = position.clone();
         let in_channels = channels as usize;
