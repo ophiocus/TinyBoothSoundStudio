@@ -8,6 +8,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); thi
 
 (Nothing yet — known issues all resolved as of v0.4.23.)
 
+## [0.4.45] — 2026-06-15
+
+### Changed — Crossfade tab UX pass (TBSS-FR-0010 follow-up)
+The Crossfade tab gets a proper direct-manipulation surface in place of the slider-only MVP, and the underlying mix model switches from "fade = overlap" to a flexible **transition model**.
+
+- **Drag track B's waveform** anywhere on its lane to set the start offset. The slider stays as a fine-tune backup; the two stay in sync.
+- **Drag fade-region handles independently.** Two vertical handles (orange grip caps) mark the fade's start and end. Drag either to size the fade where you want it — the fade no longer has to span the entire overlap. A 30 s overlap with a 1 s fade in the middle is now expressible; so is an instant cut (`fade_start == fade_end`).
+- **Transition model**: before `fade_start` only A plays (B muted even if present); after `fade_end` only B plays (A muted). Inside the fade range, both contribute via the equal-power or linear curve. This is the standard DAW behaviour — what you'd want for using the tab as a transition tool, not a layering tool.
+- **Snap fade to overlap** button resets the fade range to span the current A/B overlap (the previous MVP default, now an explicit affordance).
+- Loading a track auto-snaps the fade range to whatever overlap then exists, so the default still does the obvious thing.
+- Status row shows the current fade as `fade_start → fade_end (duration)`.
+
+### Fixed — `ship.ps1` poller no longer dies spuriously
+Three consecutive releases (v0.4.42 / 0.4.43 / 0.4.44) the ship script's poller died mid-poll with no error output, while the actual CI build + publish succeeded fine. Wrapped the `gh release view` invocation in an outer `try/catch` so any per-poll transient (deprecation warning, API blip, anything that surfaces through `$ErrorActionPreference = 'Stop'`) gets caught and the loop retries on the next poll. The deadline still bounds total wait. No effect on the release itself; eliminates the false-failure notifications.
+
+### Proof
+DSP rewritten around `fade_start_frame_abs` + `fade_end_frame_abs` independent of track positions (`CrossfadeSpec` and `CrossfadeMix` updated). 5 unit tests rewritten / added to cover the transition model: equal-power weights sum-to-1-in-power, linear amplitude sum, silent → silent, fade outside overlap mutes non-active track correctly, zero-length fade is an instant cut. UI gains drag-detection via `ui.interact(rect, …, click_and_drag)` for track B's lane and the two handle rects, with cursor-icon hints. Suite **126 passing**. fmt + clippy `--release --all-targets -D warnings` + release build all clean.
+
 ## [0.4.44] — 2026-06-04
 
 ### Added — Crossfade tab (TBSS-FR-0010)

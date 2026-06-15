@@ -9,6 +9,10 @@ use crate::crossfade_player::CrossfadePreviewSession;
 use eframe::egui;
 use std::path::{Path, PathBuf};
 
+/// Pixel width of a fade-handle hit rect — small enough to leave most
+/// of the timeline draggable as track B, large enough to reliably grab.
+const HANDLE_HIT_W: f32 = 10.0;
+
 const PEAK_BINS: usize = 200;
 const LANE_H: f32 = 60.0;
 
@@ -133,9 +137,17 @@ pub fn show(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
                 egui::Slider::new(&mut app.crossfade_state.b_offset_secs, min_off..=max_off)
                     .suffix(" s")
                     .clamp_to_range(true),
-            );
+            )
+            .on_hover_text("Or drag track B's waveform directly on the timeline.");
             if ui.small_button("0").on_hover_text("Reset to 0 s").clicked() {
                 app.crossfade_state.b_offset_secs = 0.0;
+            }
+            if ui
+                .button("Snap fade to overlap")
+                .on_hover_text("Reset the fade region to span the entire overlap between A and B.")
+                .clicked()
+            {
+                snap_fade_to_overlap(&mut app.crossfade_state);
             }
         });
         ui.horizontal(|ui| {
@@ -154,6 +166,20 @@ pub fn show(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
             .on_hover_text(
                 "Linear ramp — sums to 1 in amplitude. Right for phase-coherent material.",
             );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let fs = app.crossfade_state.fade_start_secs;
+                let fe = app.crossfade_state.fade_end_secs;
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Fade: {:.2}s → {:.2}s ({:.2}s)",
+                        fs,
+                        fe,
+                        (fe - fs).max(0.0)
+                    ))
+                    .monospace()
+                    .weak(),
+                );
+            });
         });
     });
 
@@ -260,26 +286,28 @@ pub fn show(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
     }
 }
 
-fn draw_timeline(app: &TinyBoothApp, ui: &mut egui::Ui) {
-    let st = &app.crossfade_state;
-    let Some(a) = st.track_a.as_ref() else {
-        ui.label(egui::RichText::new("Load Track A and Track B to see the timeline.").weak());
-        return;
+fn draw_timeline(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
+    // First read everything we need (so the immutable borrow ends
+    // before we start grabbing &mut for the drag handlers).
+    let (a_dur, b_dur, tl_start, tl_end) = {
+        let st = &app.crossfade_state;
+        let Some(a) = st.track_a.as_ref() else {
+            ui.label(egui::RichText::new("Load Track A and Track B to see the timeline.").weak());
+            return;
+        };
+        let Some(b) = st.track_b.as_ref() else {
+            ui.label(egui::RichText::new("Load Track B to see the crossfade timeline.").weak());
+            return;
+        };
+        let off = st.b_offset_secs;
+        let tl_start = 0.0_f32.min(off);
+        let tl_end = a.duration_secs.max(off + b.duration_secs);
+        (a.duration_secs, b.duration_secs, tl_start, tl_end)
     };
-    let Some(b) = st.track_b.as_ref() else {
-        ui.label(egui::RichText::new("Load Track B to see the crossfade timeline.").weak());
-        return;
-    };
-
-    // Timeline span in seconds.
-    let off = st.b_offset_secs;
-    let tl_start = 0.0_f32.min(off);
-    let tl_end = a.duration_secs.max(off + b.duration_secs);
     let tl_dur = (tl_end - tl_start).max(0.001);
 
     let avail_w = ui.available_width().max(200.0);
-    // Two stacked lanes.
-    let (rect, _) = ui.allocate_exact_size(
+    let (rect, _outer) = ui.allocate_exact_size(
         egui::vec2(avail_w, LANE_H * 2.0 + 6.0),
         egui::Sense::hover(),
     );
@@ -294,40 +322,128 @@ fn draw_timeline(app: &TinyBoothApp, ui: &mut egui::Ui) {
         egui::pos2(rect.left(), rect.top() + LANE_H + 6.0),
         rect.right_bottom(),
     );
+    let px_per_sec = rect.width() / tl_dur;
+    let secs_to_x = |s: f32| -> f32 { rect.left() + (s - tl_start) * px_per_sec };
 
-    // Map (seconds_relative_to_tl_start) → pixel x.
-    let secs_to_x = |s: f32| -> f32 { lane_a.left() + (s - tl_start) / tl_dur * lane_a.width() };
+    // ── Drag track B's waveform area ───────────────────────────────
+    // Allocated FIRST so the handle rects (below) take priority when
+    // the pointer is within their narrow hit zones.
+    let b_drag_resp = ui.interact(
+        lane_b,
+        ui.id().with("xfade_track_b_drag"),
+        egui::Sense::click_and_drag(),
+    );
+    if b_drag_resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+    }
+    if b_drag_resp.dragged() && px_per_sec > 0.0 {
+        let dx = b_drag_resp.drag_delta().x;
+        if dx != 0.0 {
+            let new = app.crossfade_state.b_offset_secs + dx / px_per_sec;
+            app.crossfade_state.b_offset_secs = new.clamp(-b_dur, a_dur);
+        }
+    }
 
-    // Overlap region (in tl-relative seconds).
-    let overlap_start_secs = (0.0_f32).max(off);
-    let overlap_end_secs = a.duration_secs.min(off + b.duration_secs);
-    let has_overlap = overlap_end_secs > overlap_start_secs;
-    if has_overlap {
-        let x0 = secs_to_x(overlap_start_secs);
-        let x1 = secs_to_x(overlap_end_secs);
-        let overlap_rect = egui::Rect::from_min_max(
-            egui::pos2(x0, lane_a.top()),
-            egui::pos2(x1, lane_b.bottom()),
+    // ── Fade-region shading + draggable handles ────────────────────
+    let fs = app.crossfade_state.fade_start_secs;
+    let fe = app.crossfade_state.fade_end_secs;
+    let fade_present = fe > fs;
+    if fade_present {
+        let x0 = secs_to_x(fs);
+        let x1 = secs_to_x(fe);
+        let fade_rect = egui::Rect::from_min_max(
+            egui::pos2(x0.max(rect.left()), lane_a.top()),
+            egui::pos2(x1.min(rect.right()), lane_b.bottom()),
         );
         painter.rect_filled(
-            overlap_rect,
+            fade_rect,
             2.0,
-            egui::Color32::from_rgba_unmultiplied(255, 200, 80, 30),
+            egui::Color32::from_rgba_unmultiplied(255, 200, 80, 40),
         );
     }
 
-    // Draw each lane's waveform + label.
-    draw_lane(&painter, lane_a, a, 0.0, tl_start, tl_dur, "A");
-    draw_lane(&painter, lane_b, b, off, tl_start, tl_dur, "B");
+    let fs_x = secs_to_x(fs);
+    let fe_x = secs_to_x(fe);
+    let fs_rect = egui::Rect::from_min_max(
+        egui::pos2(fs_x - HANDLE_HIT_W * 0.5, rect.top()),
+        egui::pos2(fs_x + HANDLE_HIT_W * 0.5, rect.bottom()),
+    );
+    let fe_rect = egui::Rect::from_min_max(
+        egui::pos2(fe_x - HANDLE_HIT_W * 0.5, rect.top()),
+        egui::pos2(fe_x + HANDLE_HIT_W * 0.5, rect.bottom()),
+    );
+    let fs_resp = ui.interact(
+        fs_rect,
+        ui.id().with("xfade_handle_start"),
+        egui::Sense::click_and_drag(),
+    );
+    let fe_resp = ui.interact(
+        fe_rect,
+        ui.id().with("xfade_handle_end"),
+        egui::Sense::click_and_drag(),
+    );
+    if fs_resp.hovered() || fe_resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+    }
+    if fs_resp.dragged() && px_per_sec > 0.0 {
+        let dx = fs_resp.drag_delta().x;
+        if dx != 0.0 {
+            let new = app.crossfade_state.fade_start_secs + dx / px_per_sec;
+            app.crossfade_state.fade_start_secs =
+                new.clamp(tl_start, app.crossfade_state.fade_end_secs);
+        }
+    }
+    if fe_resp.dragged() && px_per_sec > 0.0 {
+        let dx = fe_resp.drag_delta().x;
+        if dx != 0.0 {
+            let new = app.crossfade_state.fade_end_secs + dx / px_per_sec;
+            app.crossfade_state.fade_end_secs =
+                new.clamp(app.crossfade_state.fade_start_secs, tl_end);
+        }
+    }
 
-    // Draw the fade curve over the overlap, faintly.
-    if has_overlap {
+    // ── Render lanes + waveforms + handle visuals ──────────────────
+    let st = &app.crossfade_state;
+    let a_ref = st.track_a.as_ref().unwrap();
+    let b_ref = st.track_b.as_ref().unwrap();
+    let off = st.b_offset_secs;
+    draw_lane(&painter, lane_a, a_ref, 0.0, tl_start, tl_dur, "A");
+    draw_lane(&painter, lane_b, b_ref, off, tl_start, tl_dur, "B");
+
+    // Vertical handle lines + tiny grip caps centred on the timeline.
+    let edge_stroke = egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 200, 80));
+    painter.line_segment(
+        [
+            egui::pos2(fs_x, rect.top()),
+            egui::pos2(fs_x, rect.bottom()),
+        ],
+        edge_stroke,
+    );
+    painter.line_segment(
+        [
+            egui::pos2(fe_x, rect.top()),
+            egui::pos2(fe_x, rect.bottom()),
+        ],
+        edge_stroke,
+    );
+    let cap = egui::vec2(8.0, 8.0);
+    painter.rect_filled(
+        egui::Rect::from_center_size(egui::pos2(fs_x, rect.center().y), cap),
+        2.0,
+        egui::Color32::from_rgb(255, 200, 80),
+    );
+    painter.rect_filled(
+        egui::Rect::from_center_size(egui::pos2(fe_x, rect.center().y), cap),
+        2.0,
+        egui::Color32::from_rgb(255, 200, 80),
+    );
+
+    // Curve preview drawn over the fade range.
+    if fade_present {
         let mid_a = lane_a.center().y;
         let mid_b = lane_b.center().y;
         let h = LANE_H * 0.35;
-        let x0 = secs_to_x(overlap_start_secs);
-        let x1 = secs_to_x(overlap_end_secs);
-        let width = (x1 - x0).max(1.0);
+        let width = (fe_x - fs_x).max(1.0);
         let stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(255, 200, 80));
         let steps = (width as usize).max(8);
         let mut prev_a: Option<egui::Pos2> = None;
@@ -343,7 +459,7 @@ fn draw_timeline(app: &TinyBoothApp, ui: &mut egui::Ui) {
                 }
                 CrossfadeCurve::Linear => (1.0 - t, t),
             };
-            let x = x0 + width * t;
+            let x = fs_x + width * t;
             let pa = egui::pos2(x, mid_a + h - wa * h * 2.0);
             let pb = egui::pos2(x, mid_b + h - wb * h * 2.0);
             if let Some(p) = prev_a {
@@ -355,6 +471,25 @@ fn draw_timeline(app: &TinyBoothApp, ui: &mut egui::Ui) {
             prev_a = Some(pa);
             prev_b = Some(pb);
         }
+    }
+}
+
+/// Reset the fade range to span the current A/B overlap. Called when
+/// tracks are first loaded and via the "Snap fade to overlap" button.
+fn snap_fade_to_overlap(st: &mut CrossfadeUiState) {
+    let (Some(a), Some(b)) = (st.track_a.as_ref(), st.track_b.as_ref()) else {
+        return;
+    };
+    let off = st.b_offset_secs;
+    let overlap_start = 0.0_f32.max(off);
+    let overlap_end = a.duration_secs.min(off + b.duration_secs);
+    if overlap_end > overlap_start {
+        st.fade_start_secs = overlap_start;
+        st.fade_end_secs = overlap_end;
+    } else {
+        // No overlap — collapse to a point at A's end (instant cut).
+        st.fade_start_secs = a.duration_secs;
+        st.fade_end_secs = a.duration_secs;
     }
 }
 
@@ -439,6 +574,8 @@ fn handle_load(app: &mut TinyBoothApp, path: &Path, is_a: bool) {
             }
             // Drop any preview — it's pointed at stale samples.
             stop_preview(&mut app.crossfade_state);
+            // Snap the fade region to whatever overlap now exists.
+            snap_fade_to_overlap(&mut app.crossfade_state);
         }
         Err(e) => {
             app.crossfade_state.status = Some(format!("load failed: {e:#}"));
@@ -583,12 +720,17 @@ fn build_mix(st: &CrossfadeUiState) -> anyhow::Result<crate::crossfade::Crossfad
     if a.sample_rate != b.sample_rate {
         return Err(anyhow!("sample-rate mismatch"));
     }
-    let b_offset_frames = (st.b_offset_secs * a.sample_rate as f32).round() as i64;
+    let sr = a.sample_rate;
+    let b_offset_frames = (st.b_offset_secs * sr as f32).round() as i64;
+    let fade_start_frame_abs = (st.fade_start_secs * sr as f32).round() as i64;
+    let fade_end_frame_abs = (st.fade_end_secs * sr as f32).round() as i64;
     let spec = CrossfadeSpec {
         a_samples: &a.samples,
         b_samples: &b.samples,
-        sample_rate: a.sample_rate,
+        sample_rate: sr,
         b_offset_frames,
+        fade_start_frame_abs,
+        fade_end_frame_abs,
         curve: st.curve,
     };
     Ok(compute_mix(&spec))

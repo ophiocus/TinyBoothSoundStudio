@@ -90,14 +90,28 @@ while ($true) {
     # assets` as TWO arguments (`publishedAt,` and `assets`), and gh
     # rejects the second one with `Unknown JSON field: " assets"`.
     # That silently failed the v0.4.23 poll for 14+ minutes.
+    #
+    # v0.4.45 — wrap the entire `gh` invocation in a try/catch.
+    # `$ErrorActionPreference = 'Stop'` makes ANY native-command
+    # diagnostic emission (deprecation warning, transient API blip)
+    # throw and kill the script. Three releases in a row (v0.4.42,
+    # 0.4.43, 0.4.44) the poller died spuriously mid-poll while the
+    # actual ship succeeded fine. Tolerate per-poll failures — the
+    # outer loop's deadline still bounds total wait.
     $json = $null
-    $raw = (gh release view $Tag --json 'publishedAt,assets' 2>$null | Out-String).Trim()
-    if ($LASTEXITCODE -eq 0 -and $raw) {
-        try {
-            $json = $raw | ConvertFrom-Json
-        } catch {
-            $json = $null
+    try {
+        $raw = (gh release view $Tag --json 'publishedAt,assets' 2>$null | Out-String).Trim()
+        if ($LASTEXITCODE -eq 0 -and $raw) {
+            try {
+                $json = $raw | ConvertFrom-Json
+            } catch {
+                $json = $null
+            }
         }
+    } catch {
+        # Treat any unexpected error during the poll as a transient.
+        Write-Host "  …poll glitched ($($_.Exception.Message)) — retrying" -ForegroundColor DarkYellow
+        $json = $null
     }
 
     $pubAt = if ($json) { $json.publishedAt } else { $null }

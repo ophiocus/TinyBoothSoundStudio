@@ -65,15 +65,19 @@ pub struct CrossfadeUiState {
     /// Track B's start offset relative to A's frame 0, in seconds.
     /// Positive = B starts after A's start; negative = B starts before.
     pub b_offset_secs: f32,
+    /// Absolute time (A's coordinate system) where the crossfade
+    /// transition begins. Before this point, only A plays.
+    pub fade_start_secs: f32,
+    /// Absolute time where the crossfade transition ends. After this
+    /// point, only B plays. The fade region is `[fade_start, fade_end)`.
+    pub fade_end_secs: f32,
     pub curve: crate::crossfade::CrossfadeCurve,
     /// Active preview playback session. `Some` while audio is flowing;
     /// `None` between presses.
     pub preview: Option<crate::crossfade_player::CrossfadePreviewSession>,
     /// Reserved for future mix-result caching. The MVP recomputes the
     /// mix on every ▶ Crossfade press and Export click — fast enough
-    /// for typical inputs (a few seconds for multi-minute songs at
-    /// 48 kHz). Held for forward-compat so adding the cache doesn't
-    /// require a state-struct migration.
+    /// for typical inputs.
     #[allow(dead_code)]
     pub mix_cache_signature: u64,
     pub status: Option<String>,
@@ -87,6 +91,8 @@ impl Default for CrossfadeUiState {
             track_a: None,
             track_b: None,
             b_offset_secs: 0.0,
+            fade_start_secs: 0.0,
+            fade_end_secs: 0.0,
             curve: crate::crossfade::CrossfadeCurve::EqualPower,
             preview: None,
             mix_cache_signature: 0,
