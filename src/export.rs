@@ -398,6 +398,22 @@ pub fn ffmpeg_available() -> bool {
     find_ffmpeg().is_some()
 }
 
+/// Write a pre-computed interleaved-stereo f32 buffer to disk via the
+/// same WAV / ffmpeg pipeline `export()` uses. Reused by the Crossfade
+/// tab (TBSS-FR-0010) — there's no `Project` to read from there.
+pub fn write_crossfade(
+    samples: &[f32],
+    sample_rate: u32,
+    channels: u16,
+    options: &ExportOptions,
+) -> Result<()> {
+    match options.format {
+        ExportFormat::Wav => write_wav_16(&options.out_path, samples, sample_rate, channels)?,
+        _ => encode_via_ffmpeg(samples, sample_rate, channels, options)?,
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tib_export_tests {
     //! TBSS-FR-0007 phase 2c step 6: exporting a `.tib` project must

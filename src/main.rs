@@ -7,6 +7,8 @@ mod automation;
 mod cleanup;
 mod coherence;
 mod config;
+mod crossfade;
+mod crossfade_player;
 mod dsp;
 mod export;
 mod generator;

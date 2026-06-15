@@ -8,6 +8,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); thi
 
 (Nothing yet — known issues all resolved as of v0.4.23.)
 
+## [0.4.44] — 2026-06-04
+
+### Added — Crossfade tab (TBSS-FR-0010)
+A dedicated tab for two-track crossfades. Load any two WAVs from disk, position track B's start relative to A with a slider, audition the result, and export the mix in any of the formats `export.rs` already supports (WAV / FLAC / MP3 / Ogg / Opus / M4A).
+- **Sources** — independent of the active project. Two "Load…" buttons, file dialog → decode-once → cache as stereo f32. Mono inputs are duplicated to L=R on load. Sample-rate mismatch between A and B is refused with a clear status message (the player has no resampler — same constraint as everything else).
+- **Timeline** — single shared time axis showing both waveforms with the **overlap region highlighted** and the **fade curve drawn** faintly over the overlap. The axis spans `[min(0, b_offset), max(a_duration, b_offset + b_duration)]` so negative offsets (B before A) work too.
+- **Curve picker** — Equal-power (`cos²/sin²`, default — sums to 1 in power, right for unrelated material) or Linear (sums to 1 in amplitude, right for phase-coherent material).
+- **Transport** — `▶ A`, `▶ B`, `▶ Crossfade`, `■ Stop`. Each `▶` press builds a fresh `CrossfadePreviewSession` over its own cpal output stream (matched to the source rate; falls back to device default). Drop = stop. The preview is auto-released as soon as playback reaches the end of its buffer.
+- **Export** — format combo + `Export…` button. Renders the full timeline at the curve and writes via the shared `export::write_crossfade` helper (same WAV / ffmpeg pipeline the Export tab uses). Default filename `<A-stem>_x_<B-stem>.<ext>`.
+
+### Deferred follow-ups (not in v0.4.44)
+- Drag the track-B waveform left/right to set the offset directly (slider gets us shipping).
+- Resampling so mixed-rate WAVs can load.
+- Two-stage transitions (fade-in at the start of A + fade-out at end of B on top of the A↔B crossfade — that's a full timeline editor).
+
+### Proof
+New module `src/crossfade.rs` (pure DSP), new `src/crossfade_player.rs` (minimal cpal output session), new `src/ui/crossfade.rs` (the tab). 5 new DSP tests (no-overlap concatenation, equal-power weights sum to 1 in power, negative-offset timeline shift, silent-input → silent-output, linear-curve amplitude sum). Suite **126 passing**. fmt + clippy `--release --all-targets -D warnings` + release build all clean.
+
 ## [0.4.43] — 2026-06-04
 
 Two feature requests' worth of work batched into one release:

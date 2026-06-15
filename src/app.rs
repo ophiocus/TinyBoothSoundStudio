@@ -43,6 +43,59 @@ pub struct PendingGeneratorParams {
     pub mode: crate::project::GeneratorMode,
 }
 
+/// One source loaded into the Crossfade tab — decoded once at load,
+/// re-used for waveform render + preview + export. TBSS-FR-0010.
+pub struct LoadedCrossfadeTrack {
+    pub path: PathBuf,
+    /// Interleaved stereo f32. Mono sources are duplicated to L=R at
+    /// load time so downstream paths only ever see stereo.
+    pub samples: Vec<f32>,
+    pub sample_rate: u32,
+    pub channels: u16,
+    pub duration_secs: f32,
+    /// Pre-computed peak vector for the waveform thumbnail (200 bins,
+    /// abs-max per bin across both channels).
+    pub peaks: Vec<f32>,
+}
+
+/// Crossfade-tab UI state — survives tab switches. TBSS-FR-0010.
+pub struct CrossfadeUiState {
+    pub track_a: Option<LoadedCrossfadeTrack>,
+    pub track_b: Option<LoadedCrossfadeTrack>,
+    /// Track B's start offset relative to A's frame 0, in seconds.
+    /// Positive = B starts after A's start; negative = B starts before.
+    pub b_offset_secs: f32,
+    pub curve: crate::crossfade::CrossfadeCurve,
+    /// Active preview playback session. `Some` while audio is flowing;
+    /// `None` between presses.
+    pub preview: Option<crate::crossfade_player::CrossfadePreviewSession>,
+    /// Reserved for future mix-result caching. The MVP recomputes the
+    /// mix on every ▶ Crossfade press and Export click — fast enough
+    /// for typical inputs (a few seconds for multi-minute songs at
+    /// 48 kHz). Held for forward-compat so adding the cache doesn't
+    /// require a state-struct migration.
+    #[allow(dead_code)]
+    pub mix_cache_signature: u64,
+    pub status: Option<String>,
+    /// Export format picker — same enum the Export tab uses.
+    pub export_format: crate::export::ExportFormat,
+}
+
+impl Default for CrossfadeUiState {
+    fn default() -> Self {
+        Self {
+            track_a: None,
+            track_b: None,
+            b_offset_secs: 0.0,
+            curve: crate::crossfade::CrossfadeCurve::EqualPower,
+            preview: None,
+            mix_cache_signature: 0,
+            status: None,
+            export_format: crate::export::ExportFormat::Wav,
+        }
+    }
+}
+
 /// True when a track's telemetry is present and analyzed by the current
 /// analyzer version (so a re-dispatch would be wasted work).
 fn telemetry_is_current(t: &Track) -> bool {
@@ -93,6 +146,8 @@ pub enum Tab {
     Project,
     Mix,
     Export,
+    /// Two-track crossfade preview + export. TBSS-FR-0010.
+    Crossfade,
 }
 
 pub struct TinyBoothApp {
@@ -194,6 +249,10 @@ pub struct TinyBoothApp {
     /// Draft state for the "Add Generator Track" modal. `Some` while
     /// the modal is open; cleared on commit / cancel. TBSS-FR-0009.
     pub pending_generator_modal: Option<PendingGeneratorParams>,
+
+    /// Crossfade-tab state — sources, offset, curve, preview session.
+    /// Survives tab switches. TBSS-FR-0010.
+    pub crossfade_state: CrossfadeUiState,
 
     /// Mixer/automation recorder. Captures fader gestures while a strip's
     /// arm toggle is on and the player is in Playing state. Flushed into
@@ -406,6 +465,7 @@ impl TinyBoothApp {
             import_conflict: None,
             pending_migration: None,
             pending_generator_modal: None,
+            crossfade_state: CrossfadeUiState::default(),
             recorder: crate::automation::Recorder::default(),
             mix_console_fraction: 0.42,
             recordings_page: 0,
@@ -2487,6 +2547,7 @@ impl eframe::App for TinyBoothApp {
                 ui.selectable_value(&mut self.tab, Tab::Project, "Project");
                 ui.selectable_value(&mut self.tab, Tab::Mix, "Mix");
                 ui.selectable_value(&mut self.tab, Tab::Export, "Export");
+                ui.selectable_value(&mut self.tab, Tab::Crossfade, "Crossfade");
 
                 ui.separator();
                 // 🌀 Visualizer toggle (v0.4.11). Selectable so it
@@ -2664,6 +2725,7 @@ impl eframe::App for TinyBoothApp {
                 Tab::Project => ui::project::show(self, ui),
                 Tab::Mix => ui::mix::show(self, ui),
                 Tab::Export => ui::export::show(self, ui),
+                Tab::Crossfade => ui::crossfade::show(self, ui),
             }
         });
 

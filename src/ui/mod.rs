@@ -1,6 +1,7 @@
 pub mod admin;
 pub mod audio_devices;
 pub mod correction;
+pub mod crossfade;
 pub mod export;
 pub mod generator_params;
 pub mod health;
