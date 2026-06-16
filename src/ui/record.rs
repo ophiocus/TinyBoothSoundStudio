@@ -456,7 +456,7 @@ fn show_loose_wavs(app: &mut TinyBoothApp, rec: &Project, ui: &mut egui::Ui) {
     if loose.is_empty() {
         return;
     }
-    loose.sort_by(|a, b| b.2.cmp(&a.2)); // newest first
+    loose.sort_by_key(|t| std::cmp::Reverse(t.2)); // newest first
 
     ui.add_space(10.0);
     ui.separator();
