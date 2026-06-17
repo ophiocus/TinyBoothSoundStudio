@@ -111,7 +111,9 @@ pub fn show(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
 
     if a_clicked {
         if let Some(p) = rfd::FileDialog::new()
+            .add_filter("WAV or TinyBooth stem (.tib)", &["wav", "tib"])
             .add_filter("WAV", &["wav"])
+            .add_filter("TinyBooth project (.tib)", &["tib"])
             .pick_file()
         {
             handle_load(app, &p, true);
@@ -119,7 +121,9 @@ pub fn show(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
     }
     if b_clicked {
         if let Some(p) = rfd::FileDialog::new()
+            .add_filter("WAV or TinyBooth stem (.tib)", &["wav", "tib"])
             .add_filter("WAV", &["wav"])
+            .add_filter("TinyBooth project (.tib)", &["tib"])
             .pick_file()
         {
             handle_load(app, &p, false);
@@ -905,7 +909,17 @@ fn draw_lane(
 }
 
 fn handle_load(app: &mut TinyBoothApp, path: &Path, is_a: bool) {
-    match load_wav_as_stereo(path) {
+    let is_tib = path
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|s| s.eq_ignore_ascii_case("tib"))
+        .unwrap_or(false);
+    let loaded = if is_tib {
+        load_tib_mix_run_as_stereo(path)
+    } else {
+        load_wav_as_stereo(path)
+    };
+    match loaded {
         Ok(loaded) => {
             // If the OTHER track is loaded at a different rate, reject.
             let other_rate = if is_a {
@@ -949,6 +963,40 @@ fn load_wav_as_stereo(path: &Path) -> anyhow::Result<LoadedCrossfadeTrack> {
     use anyhow::Context as _;
     let reader =
         hound::WavReader::open(path).with_context(|| format!("opening {}", path.display()))?;
+    decode_wav_reader_as_stereo(reader, path)
+}
+
+/// Open a `.tib` and decode its embedded `mix_run` WAV blob into the
+/// same `LoadedCrossfadeTrack` shape the .wav path produces. Surfaces
+/// a clear error when the project hasn't been bounced yet (Crossfade
+/// can't stitch silence). TBSS-FR-0011 §B.
+fn load_tib_mix_run_as_stereo(path: &Path) -> anyhow::Result<LoadedCrossfadeTrack> {
+    use anyhow::{anyhow, Context as _};
+    let db = crate::tib::TibDb::open(path.to_path_buf())
+        .with_context(|| format!("opening .tib {}", path.display()))?;
+    let bytes = db
+        .read_mix_run_audio()
+        .context("reading mix_run audio")?
+        .ok_or_else(|| {
+            anyhow!(
+                "{} has no bounced mix yet — open the project in TinyBooth and click Bounce first",
+                path.file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("this .tib")
+            )
+        })?;
+    let reader =
+        hound::WavReader::new(std::io::Cursor::new(bytes)).context("decoding mix_run WAV bytes")?;
+    decode_wav_reader_as_stereo(reader, path)
+}
+
+/// Common WAV → interleaved-stereo-f32 path shared by the .wav and
+/// .tib (mix_run blob) loaders. Forces stereo by duplicating mono and
+/// keeps the source path on the returned struct for UI labels.
+fn decode_wav_reader_as_stereo<R: std::io::Read>(
+    reader: hound::WavReader<R>,
+    path: &Path,
+) -> anyhow::Result<LoadedCrossfadeTrack> {
     let spec = reader.spec();
     let channels = spec.channels.max(1);
     let sample_rate = spec.sample_rate;

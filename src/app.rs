@@ -969,6 +969,58 @@ impl TinyBoothApp {
         }
     }
 
+    /// Render the project's master mix in-memory and store it in the
+    /// open `.tib`'s `mix_run` row (TBSS-FR-0011 §A). The cache becomes
+    /// addressable as a single buffered stem — consumed first by the
+    /// Crossfade tab (§B) for stitching multiple finished projects
+    /// without re-running the source DSP.
+    ///
+    /// No-op on folder-backed projects: the cache lives inside `.tib`.
+    pub fn bounce_master_mix_to_tib(&mut self) {
+        let ProjectBacking::Tib { db } = &mut self.backing else {
+            self.status =
+                Some("Bounce needs a .tib project — Save the project as .tib first.".into());
+            return;
+        };
+        if self.project.tracks.is_empty() {
+            self.status = Some("nothing to bounce — project has no tracks".into());
+            return;
+        }
+        let signature = crate::export::compute_mixrun_signature(&self.project, Some(db));
+        let (wav_bytes, sample_rate, channels, frames) =
+            match crate::export::render_master_mix_to_wav_bytes(&self.project, Some(db)) {
+                Ok(t) => t,
+                Err(e) => {
+                    self.status = Some(format!("Bounce failed: {e:#}"));
+                    return;
+                }
+            };
+        if let Err(e) = db.write_mix_run(sample_rate, channels, frames, &signature, &wav_bytes) {
+            self.status = Some(format!("Bounce failed (write): {e:#}"));
+            return;
+        }
+        let secs = frames as f32 / sample_rate.max(1) as f32;
+        self.status = Some(format!(
+            "Bounced master ({sample_rate} Hz · {channels} ch · {secs:.2} s) → .tib mix_run"
+        ));
+    }
+
+    /// Snapshot the current mix-run cache state for the Mix-tab pip.
+    /// Returns `(present, fresh)`:
+    /// `present` = a `mix_run` row exists; `fresh` = its stamped
+    /// signature still matches the live project's mix-relevant state.
+    /// Folder projects always return `(false, false)`. TBSS-FR-0011 §A.
+    pub fn mix_run_status(&self) -> (bool, bool) {
+        let ProjectBacking::Tib { db } = &self.backing else {
+            return (false, false);
+        };
+        let Ok(Some(header)) = db.read_mix_run_header() else {
+            return (false, false);
+        };
+        let live = crate::export::compute_mixrun_signature(&self.project, Some(db));
+        (true, live == header.source_signature)
+    }
+
     /// Pack the active (folder) project into a single `.tib` SQLite file
     /// (TBSS-FR-0007). Additive + non-destructive — the folder project is
     /// untouched; this just writes a self-contained sibling artifact.

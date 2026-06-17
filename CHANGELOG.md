@@ -8,6 +8,36 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); thi
 
 (Nothing yet — known issues all resolved as of v0.4.23.)
 
+## [0.4.50] — 2026-06-16
+
+### Added — `.tib` as buffered stem + Crossfade-of-.tib (TBSS-FR-0011)
+
+Finished `.tib` projects become composable units. Bounce once → drop the `.tib` into the Crossfade tab as a stem → stitch multiple finished pieces without re-rendering the source or staging intermediate `.wav` files.
+
+#### `.tib` schema v2 — `mix_run` cache
+Single-row `mix_run` table holds a 16-bit WAV byte stream plus `sample_rate`, `channels`, `frames`, `source_signature`, `created`. The source signature is a stable hash over every project field that affects what the master mix renders (each track's `current_rev_id` + mute + gain + polarity + automation + correction; project master gain & automation & `corrections_disabled`). Stamped at Bounce time; compared live on the Mix tab to flag the cache as fresh or stale. **Schema bump 1 → 2 with in-place migration** — older `.tib` files get the table added on first open with `CREATE TABLE IF NOT EXISTS` + a single `UPDATE meta SET schema_version = 2`.
+
+#### Mix tab — `⤓ Bounce` button
+New button in the Mix-tab transport row. Renders the master mix into memory using the existing `mixdown` DSP, encodes as WAV, writes to the `mix_run` row. State pip on the button:
+- no cache → `⤓ Bounce`
+- cache present + fresh → `⤓ Bounce  ✓`
+- cache present + stale → `⤓ Bounce  ⚠ stale`
+
+Disabled on folder-backed projects (the cache lives inside `.tib` — Save → As `.tib` first; tooltip says so).
+
+#### Crossfade tab — accepts `.tib`
+Load… dialog filter widens to `WAV or TinyBooth stem (.tib)`. Loading a `.tib` opens the SQLite container, reads the `mix_run` blob, decodes it through the same `decode_wav_reader_as_stereo` helper the .wav path uses — so zoom, click-seek playheads, fade handles, ms counters, preview, and export all work unchanged. If the picked `.tib` has no bounce yet: clear status `<file> has no bounced mix yet — open the project in TinyBooth and click Bounce first`.
+
+#### Implementation surface
+- `tib.rs`: `MixRunHeader` struct + four CRUD methods (`read_mix_run_header`, `read_mix_run_audio` via incremental BLOB I/O, `write_mix_run` upsert, `delete_mix_run`).
+- `export.rs`: new public `render_master_mix` + `render_master_mix_to_wav_bytes` + `compute_mixrun_signature` (serde-derived `MixSig` hashed via `DefaultHasher` to a 64-bit hex). The existing `mixdown` stays private — the new entry points just stop at different points in the same pipeline.
+- `app.rs`: `bounce_master_mix_to_tib()` + `mix_run_status()` glue.
+- `ui/mix.rs`: Bounce button in `transport_bar` (after the bulk-correction strip).
+- `ui/crossfade.rs`: extension dispatch in `handle_load` + new `load_tib_mix_run_as_stereo`.
+
+### Proof
+New `mix_run_round_trips_and_upsert_replaces` test in `tib::tests` covers write → read → upsert-replaces → delete. Suite **127 passing** (was 126). fmt + clippy `--release --all-targets -D warnings` clean under the CI-pinned Rust 1.95.0 toolchain.
+
 ## [0.4.49] — 2026-06-15
 
 ### Changed — Crossfade tab: click-anywhere-on-lane = seek

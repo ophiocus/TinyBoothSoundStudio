@@ -35,7 +35,10 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 /// Current on-disk schema version, stored in `meta.schema_version`.
-pub const SCHEMA_VERSION: i64 = 1;
+/// v2 (TBSS-FR-0011): adds the `mix_run` cache table holding a buffered
+/// master mixdown of the project. Older .tib files (v1) are migrated
+/// on open with `CREATE TABLE IF NOT EXISTS mix_run …` + a bump.
+pub const SCHEMA_VERSION: i64 = 2;
 
 /// Page size for the database. 16 KiB suits the large WAV BLOBs we store
 /// (TBSS-FR-0007 §BLOBs). Must be set before the first write.
@@ -90,6 +93,31 @@ CREATE TABLE config_revs (
   correction TEXT, gain_db REAL, polarity_inverted INTEGER, gain_automation TEXT
 );
 CREATE INDEX idx_config_revs_track ON config_revs(track_id);
+CREATE TABLE mix_run (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  sample_rate INTEGER NOT NULL,
+  channels INTEGER NOT NULL,
+  frames INTEGER NOT NULL,
+  source_signature TEXT NOT NULL,
+  created TEXT NOT NULL,
+  audio BLOB NOT NULL
+);
+";
+
+/// Migration to bring a v1 schema up to v2: adds the `mix_run` table.
+/// Idempotent — uses `CREATE TABLE IF NOT EXISTS` so re-running on a
+/// v2 file is harmless. Bumps `meta.schema_version` to 2.
+const MIGRATE_V1_TO_V2_SQL: &str = "\
+CREATE TABLE IF NOT EXISTS mix_run (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  sample_rate INTEGER NOT NULL,
+  channels INTEGER NOT NULL,
+  frames INTEGER NOT NULL,
+  source_signature TEXT NOT NULL,
+  created TEXT NOT NULL,
+  audio BLOB NOT NULL
+);
+UPDATE meta SET schema_version = 2;
 ";
 
 /// Revision kind — `Orig` (pristine import, never pruned) or
@@ -98,6 +126,22 @@ CREATE INDEX idx_config_revs_track ON config_revs(track_id);
 pub enum RevKind {
     Orig,
     Destructive,
+}
+
+/// Metadata-only view of the `mix_run` row. Audio bytes live in the
+/// `audio` BLOB column and are pulled separately via incremental I/O
+/// when actually needed for decode/playback.
+/// TBSS-FR-0011 §A.
+#[derive(Debug, Clone)]
+pub struct MixRunHeader {
+    pub sample_rate: u32,
+    pub channels: u16,
+    pub frames: u64,
+    /// Stable hash of the project's mix-relevant state at bounce time —
+    /// compared against the live project's signature to flag stale.
+    pub source_signature: String,
+    /// SQLite `datetime('now')` string (UTC).
+    pub created: String,
 }
 
 impl RevKind {
@@ -179,6 +223,14 @@ impl TibDb {
             anyhow::bail!(
                 "this .tib is schema v{v}, newer than this app supports (v{SCHEMA_VERSION}) — update TinyBooth"
             );
+        }
+        // Forward-migrate older schemas in-place. Each step is small
+        // and idempotent; chain them so a v1 file becomes v2 on first
+        // open. TBSS-FR-0011 §A.
+        if v < 2 {
+            db.conn
+                .execute_batch(MIGRATE_V1_TO_V2_SQL)
+                .context("migrating .tib v1 → v2 (mix_run table)")?;
         }
         Ok(db)
     }
@@ -425,6 +477,98 @@ impl TibDb {
         Ok(())
     }
 
+    // ── mix-run cache (TBSS-FR-0011 §A) ───────────────────────────────
+
+    /// Read the mix-run header (everything but the audio BLOB) — used
+    /// by the Mix tab to render the "fresh / stale / none" pip without
+    /// pulling the (possibly large) audio bytes off disk.
+    pub fn read_mix_run_header(&self) -> Result<Option<MixRunHeader>> {
+        self.conn
+            .query_row(
+                "SELECT sample_rate, channels, frames, source_signature, created
+                 FROM mix_run WHERE id = 1",
+                [],
+                |r| {
+                    Ok(MixRunHeader {
+                        sample_rate: r.get::<_, i64>(0)? as u32,
+                        channels: r.get::<_, i64>(1)? as u16,
+                        frames: r.get::<_, i64>(2)? as u64,
+                        source_signature: r.get(3)?,
+                        created: r.get(4)?,
+                    })
+                },
+            )
+            .optional()
+            .context("reading mix_run header")
+    }
+
+    /// Read the mix-run audio BLOB (a WAV byte stream). Uses incremental
+    /// BLOB I/O so rusqlite doesn't materialise a second copy.
+    pub fn read_mix_run_audio(&self) -> Result<Option<Vec<u8>>> {
+        let exists = self
+            .conn
+            .query_row("SELECT 1 FROM mix_run WHERE id = 1", [], |_| Ok(()))
+            .optional()
+            .context("checking mix_run presence")?;
+        if exists.is_none() {
+            return Ok(None);
+        }
+        let blob = self
+            .conn
+            .blob_open(DatabaseName::Main, "mix_run", "audio", 1, true)
+            .context("opening mix_run BLOB")?;
+        let mut buf = Vec::with_capacity(blob.len());
+        let mut blob = blob;
+        blob.read_to_end(&mut buf).context("reading mix_run BLOB")?;
+        Ok(Some(buf))
+    }
+
+    /// Upsert the single mix-run row. Audio bytes are a complete WAV
+    /// stream (header + PCM) so consumers can decode via `WavReader`
+    /// without needing the metadata columns. The metadata columns
+    /// duplicate the WAV header values for cheap stale/fresh checks
+    /// and projections in the UI.
+    pub fn write_mix_run(
+        &mut self,
+        sample_rate: u32,
+        channels: u16,
+        frames: u64,
+        source_signature: &str,
+        audio_wav_bytes: &[u8],
+    ) -> Result<()> {
+        self.conn
+            .execute(
+                "INSERT INTO mix_run (id, sample_rate, channels, frames, source_signature, created, audio)
+                 VALUES (1, ?1, ?2, ?3, ?4, datetime('now'), ?5)
+                 ON CONFLICT(id) DO UPDATE SET
+                   sample_rate = excluded.sample_rate,
+                   channels    = excluded.channels,
+                   frames      = excluded.frames,
+                   source_signature = excluded.source_signature,
+                   created     = excluded.created,
+                   audio       = excluded.audio",
+                params![
+                    sample_rate as i64,
+                    channels as i64,
+                    frames as i64,
+                    source_signature,
+                    audio_wav_bytes,
+                ],
+            )
+            .context("writing mix_run row")?;
+        Ok(())
+    }
+
+    /// Drop the mix-run row, e.g. when the user explicitly invalidates
+    /// it. Stale detection is by signature comparison, not by deletion
+    /// — this is the "throw away the cache entirely" path.
+    pub fn delete_mix_run(&mut self) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM mix_run WHERE id = 1", [])
+            .context("deleting mix_run row")?;
+        Ok(())
+    }
+
     /// Count revisions of a given kind for a track (test/diagnostic).
     pub fn revision_count(&self, track_id: &str, kind: RevKind) -> Result<i64> {
         self.conn
@@ -499,6 +643,41 @@ mod tests {
         assert_eq!(db.schema_version().unwrap(), SCHEMA_VERSION);
         // WAL persists in the file header across reopen.
         assert_eq!(db.pragma_string("journal_mode").unwrap(), "wal");
+        cleanup(&p);
+    }
+
+    #[test]
+    fn mix_run_round_trips_and_upsert_replaces() {
+        // TBSS-FR-0011 §A: write a mix_run blob, read it back,
+        // overwrite it, confirm the new blob replaces the old.
+        let p = scratch("mixrun");
+        let mut db = TibDb::create(&p).unwrap();
+        assert!(db.read_mix_run_header().unwrap().is_none());
+        assert!(db.read_mix_run_audio().unwrap().is_none());
+
+        let wav1: Vec<u8> = (0..1024).map(|i| (i % 251) as u8).collect();
+        db.write_mix_run(48_000, 2, 256, "sig-v1", &wav1).unwrap();
+        let h1 = db.read_mix_run_header().unwrap().unwrap();
+        assert_eq!(h1.sample_rate, 48_000);
+        assert_eq!(h1.channels, 2);
+        assert_eq!(h1.frames, 256);
+        assert_eq!(h1.source_signature, "sig-v1");
+        assert_eq!(db.read_mix_run_audio().unwrap().unwrap(), wav1);
+
+        // Upsert replaces in place — no duplicate row, no leftover bytes.
+        let wav2: Vec<u8> = (0..2048).map(|i| ((i * 7) % 251) as u8).collect();
+        db.write_mix_run(44_100, 1, 1024, "sig-v2", &wav2).unwrap();
+        let h2 = db.read_mix_run_header().unwrap().unwrap();
+        assert_eq!(h2.sample_rate, 44_100);
+        assert_eq!(h2.channels, 1);
+        assert_eq!(h2.frames, 1024);
+        assert_eq!(h2.source_signature, "sig-v2");
+        assert_eq!(db.read_mix_run_audio().unwrap().unwrap(), wav2);
+
+        // Delete drops the row cleanly.
+        db.delete_mix_run().unwrap();
+        assert!(db.read_mix_run_header().unwrap().is_none());
+        assert!(db.read_mix_run_audio().unwrap().is_none());
         cleanup(&p);
     }
 

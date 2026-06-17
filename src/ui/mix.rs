@@ -340,6 +340,12 @@ fn transport_bar(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
     let mut click_disable_persisted = false;
     let mut click_reset_all = false;
     let mut click_toggle_bypass = false;
+    let mut click_bounce = false;
+
+    // Bounce-cache state for the Mix pip. Read once before the layout
+    // closure so the borrow ends cleanly.
+    let backing_is_tib = app.is_tib();
+    let (mix_run_present, mix_run_fresh) = app.mix_run_status();
 
     ui.horizontal(|ui| {
         ui.heading("Mix");
@@ -415,6 +421,40 @@ fn transport_bar(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
                 click_toggle_bypass = true;
             }
         });
+        ui.separator();
+        // Bounce — render the master mix into the .tib's mix_run cache
+        // so downstream consumers (Crossfade tab) can load this project
+        // as a single buffered stem. TBSS-FR-0011 §A.
+        ui.add_enabled_ui(backing_is_tib && n_tracks > 0, |ui| {
+            let (label, hover) = if !backing_is_tib {
+                (
+                    "⤓ Bounce".to_string(),
+                    "Bounce needs a .tib project. Save → As .tib first.".to_string(),
+                )
+            } else if !mix_run_present {
+                (
+                    "⤓ Bounce".to_string(),
+                    "Render the master mix once and stash it in this .tib so the Crossfade tab can load this project as a single stem.".to_string(),
+                )
+            } else if mix_run_fresh {
+                (
+                    "⤓ Bounce  ✓".to_string(),
+                    "Mix-run cache is up to date. Click to re-bounce anyway.".to_string(),
+                )
+            } else {
+                (
+                    "⤓ Bounce  ⚠ stale".to_string(),
+                    "Project state changed since the last bounce. Click to refresh the cache.".to_string(),
+                )
+            };
+            if ui
+                .add(egui::Button::new(label).min_size(egui::vec2(110.0, 28.0)))
+                .on_hover_text(hover)
+                .clicked()
+            {
+                click_bounce = true;
+            }
+        });
     });
 
     if click_play {
@@ -441,6 +481,9 @@ fn transport_bar(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
     }
     if click_toggle_bypass {
         app.toggle_global_bypass();
+    }
+    if click_bounce {
+        app.bounce_master_mix_to_tib();
     }
 }
 

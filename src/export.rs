@@ -78,6 +78,105 @@ pub struct ExportOptions {
     pub out_path: PathBuf,
 }
 
+/// Render the master mix into memory without writing it anywhere.
+/// Same DSP as [`export`] — just stops before the encode step. Used by
+/// the Bounce path (TBSS-FR-0011 §A) to stash the result in the .tib's
+/// `mix_run` row.
+pub fn render_master_mix(project: &Project, db: Option<&TibDb>) -> Result<(Vec<f32>, u32, u16)> {
+    let active: Vec<&Track> = project.tracks.iter().filter(|t| !t.mute).collect();
+    if active.is_empty() {
+        return Err(anyhow!("nothing to render — no unmuted tracks"));
+    }
+    mixdown(project, &active, db)
+}
+
+/// Render the master mix and encode it as a 16-bit WAV byte stream
+/// (complete with header) so consumers can decode via `WavReader::new`.
+/// Returns `(wav_bytes, sample_rate, channels, frames)`. TBSS-FR-0011 §A.
+pub fn render_master_mix_to_wav_bytes(
+    project: &Project,
+    db: Option<&TibDb>,
+) -> Result<(Vec<u8>, u32, u16, u64)> {
+    let (samples, sample_rate, channels) = render_master_mix(project, db)?;
+    let frames = (samples.len() as u64) / (channels as u64).max(1);
+    let mut buf = std::io::Cursor::new(Vec::<u8>::with_capacity(samples.len() * 2 + 44));
+    {
+        let spec = WavSpec {
+            channels,
+            sample_rate,
+            bits_per_sample: 16,
+            sample_format: SampleFormat::Int,
+        };
+        let mut w = WavWriter::new(&mut buf, spec).context("creating in-memory WAV writer")?;
+        for s in &samples {
+            let clamped = s.clamp(-1.0, 1.0);
+            w.write_sample((clamped * i16::MAX as f32) as i16)?;
+        }
+        w.finalize().context("finalising in-memory WAV")?;
+    }
+    Ok((buf.into_inner(), sample_rate, channels, frames))
+}
+
+/// Compute a stable hash over the project state that influences the
+/// rendered master mix. The Bounce path stamps the `.tib`'s `mix_run`
+/// row with this signature; the Mix tab compares the live signature
+/// against the stored one to flag the cache as fresh / stale.
+/// TBSS-FR-0011 §A.
+///
+/// Includes everything that materially affects the mix bytes:
+///   * each track's current revision id (.tib backing) or relative
+///     file path (folder backing) — captures "the audio source changed"
+///   * each track's mute / gain_db / polarity / gain_automation / correction
+///   * project master_gain_db / master_gain_automation / corrections_disabled
+///
+/// Excludes UI-only state (selected tab, viewport zoom, etc.).
+pub fn compute_mixrun_signature(project: &Project, db: Option<&TibDb>) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    #[derive(serde::Serialize)]
+    struct TrackSig<'a> {
+        id: &'a str,
+        rev: Option<i64>,
+        file: &'a str,
+        mute: bool,
+        gain_db_bits: u32,
+        polarity: bool,
+        automation: &'a Option<crate::automation::AutomationLane>,
+        correction: &'a Option<crate::dsp::Profile>,
+    }
+    #[derive(serde::Serialize)]
+    struct MixSig<'a> {
+        master_gain_db_bits: u32,
+        master_automation: &'a Option<crate::automation::AutomationLane>,
+        corrections_disabled: bool,
+        tracks: Vec<TrackSig<'a>>,
+    }
+    let tracks: Vec<TrackSig> = project
+        .tracks
+        .iter()
+        .map(|t| TrackSig {
+            id: &t.id,
+            rev: db.and_then(|d| d.current_rev_id(&t.id).ok().flatten()),
+            file: &t.file,
+            mute: t.mute,
+            gain_db_bits: t.gain_db.to_bits(),
+            polarity: t.polarity_inverted,
+            automation: &t.gain_automation,
+            correction: &t.correction,
+        })
+        .collect();
+    let sig = MixSig {
+        master_gain_db_bits: project.master_gain_db.to_bits(),
+        master_automation: &project.master_gain_automation,
+        corrections_disabled: project.corrections_disabled,
+        tracks,
+    };
+    let json = serde_json::to_string(&sig).unwrap_or_default();
+    let mut h = DefaultHasher::new();
+    json.hash(&mut h);
+    format!("{:016x}", h.finish())
+}
+
 /// Mix unmuted tracks at the project's sample rate and write `options.out_path`
 /// in the requested format. The output is stereo iff any unmuted source track
 /// is stereo; otherwise mono. Mono inputs in a stereo mix are centre-panned,
