@@ -138,6 +138,10 @@ pub fn show(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
         stop_preview(&mut app.crossfade_state);
     }
 
+    // Guided-bounce modal — shown when the user picked a .tib that has
+    // no `mix_run` row yet. TBSS-FR-0011 §C.
+    render_bounce_flow_modal(app, ui.ctx());
+
     ui.add_space(8.0);
 
     // ── Offset + curve controls ────────────────────────────────────
@@ -908,12 +912,199 @@ fn draw_lane(
     );
 }
 
+/// Render the guided-bounce modal when [`crate::app::CrossfadeBounceFlow`]
+/// is active. Three actions: Bounce as-is, Auto-apply Suno-Clean + Bounce,
+/// Open project to tune (active project switch + Mix tab). TBSS-FR-0011 §C.
+fn render_bounce_flow_modal(app: &mut TinyBoothApp, ctx: &egui::Context) {
+    if app.crossfade_bounce_flow.is_none() {
+        return;
+    }
+    // Snapshot what the buttons need before opening the Window, so the
+    // closure borrows nothing mutable from `app`.
+    let (project_name, track_count, n_without_corr, prev_error) = {
+        let f = app.crossfade_bounce_flow.as_ref().unwrap();
+        (
+            f.project_name.clone(),
+            f.track_count,
+            f.n_without_corr,
+            f.error.clone(),
+        )
+    };
+    let mut click_as_is = false;
+    let mut click_seed = false;
+    let mut click_tune = false;
+    let mut click_cancel = false;
+    egui::Window::new("Bounce this project first")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+        .show(ctx, |ui| {
+            ui.label(
+                egui::RichText::new(if project_name.is_empty() {
+                    "(unnamed .tib)".to_string()
+                } else {
+                    project_name.clone()
+                })
+                .strong(),
+            );
+            ui.label(
+                egui::RichText::new(format!(
+                    "{} track{} · {} without a correction chain",
+                    track_count,
+                    if track_count == 1 { "" } else { "s" },
+                    n_without_corr,
+                ))
+                .weak()
+                .small(),
+            );
+            ui.separator();
+            ui.label(
+                "This .tib has no bounced mix yet. The Crossfade tab needs a single \
+                 stem to load. Pick how to render it:",
+            );
+            ui.add_space(6.0);
+
+            // 1) Bounce as-is — default focus.
+            let as_is_resp = ui
+                .add(
+                    egui::Button::new(egui::RichText::new("⤓  Bounce as-is").strong())
+                        .min_size(egui::vec2(280.0, 32.0)),
+                )
+                .on_hover_text(
+                    "Render the master mix using each track's current correction chain. \
+                     Transparent: tracks at correction = None stay uncorrected. \
+                     Best when you've already tuned the project.",
+                );
+            if as_is_resp.clicked() {
+                click_as_is = true;
+            }
+            ui.add_space(4.0);
+
+            // 2) Auto-apply Suno-Clean — only enabled when there are
+            //    uncorrected tracks to seed.
+            ui.add_enabled_ui(n_without_corr > 0, |ui| {
+                let label = if n_without_corr > 0 {
+                    format!("✓  Apply Suno-Clean to {n_without_corr}, then Bounce")
+                } else {
+                    "✓  Apply Suno-Clean (nothing to seed)".to_string()
+                };
+                if ui
+                    .add(egui::Button::new(label).min_size(egui::vec2(280.0, 32.0)))
+                    .on_hover_text(
+                        "Seed Suno-Clean (or the project's default correction) on every \
+                         track currently without a chain, save the project, then bounce. \
+                         Persistent — the corrections stay applied.",
+                    )
+                    .clicked()
+                {
+                    click_seed = true;
+                }
+            });
+            ui.add_space(4.0);
+
+            // 3) Open project to tune.
+            if ui
+                .add(
+                    egui::Button::new("⋯  Open project to tune…").min_size(egui::vec2(280.0, 32.0)),
+                )
+                .on_hover_text(
+                    "Switch to the Mix tab with this .tib as the active project. \
+                     Tune corrections per-track, click Bounce there, then come back \
+                     to Crossfade and reload.",
+                )
+                .clicked()
+            {
+                click_tune = true;
+            }
+            ui.add_space(8.0);
+
+            if let Some(err) = prev_error.as_ref() {
+                ui.colored_label(
+                    egui::Color32::from_rgb(230, 120, 120),
+                    format!("Last attempt failed: {err}"),
+                );
+            }
+            ui.horizontal(|ui| {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("Cancel").clicked() {
+                        click_cancel = true;
+                    }
+                });
+            });
+        });
+
+    // Apply the click (outside the window closure so `app` is borrowable).
+    if click_cancel {
+        app.crossfade_bounce_flow = None;
+        return;
+    }
+    if click_tune {
+        if let Some(flow) = app.crossfade_bounce_flow.take() {
+            app.open_project_path(&flow.tib_path);
+            app.tab = crate::app::Tab::Mix;
+            app.status = Some(format!(
+                "Opened {} — tune corrections, click Bounce, then reload from the Crossfade tab.",
+                flow.tib_path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("(unnamed)")
+            ));
+        }
+        return;
+    }
+    if click_as_is || click_seed {
+        let (path, is_a) = {
+            let f = app.crossfade_bounce_flow.as_ref().unwrap();
+            (f.tib_path.clone(), f.is_a)
+        };
+        match app.bounce_tib_for_crossfade(&path, click_seed) {
+            Ok(()) => {
+                app.crossfade_bounce_flow = None;
+                // Re-run the normal load — `mix_run` is now populated,
+                // so handle_load takes the existing-cache path.
+                handle_load(app, &path, is_a);
+            }
+            Err(e) => {
+                if let Some(f) = app.crossfade_bounce_flow.as_mut() {
+                    f.error = Some(format!("{e:#}"));
+                }
+            }
+        }
+    }
+}
+
 fn handle_load(app: &mut TinyBoothApp, path: &Path, is_a: bool) {
     let is_tib = path
         .extension()
         .and_then(|s| s.to_str())
         .map(|s| s.eq_ignore_ascii_case("tib"))
         .unwrap_or(false);
+    // For .tib: peek for a bounced mix_run row. Missing → open the
+    // guided-bounce modal instead of erroring out. TBSS-FR-0011 §C.
+    if is_tib {
+        match probe_tib_for_bounce_flow(path) {
+            Ok(TibProbe::HasMixRun) => { /* fall through to normal load */ }
+            Ok(TibProbe::Empty {
+                project_name,
+                track_count,
+                n_without_corr,
+            }) => {
+                app.crossfade_bounce_flow = Some(crate::app::CrossfadeBounceFlow {
+                    tib_path: path.to_path_buf(),
+                    is_a,
+                    project_name,
+                    track_count,
+                    n_without_corr,
+                    error: None,
+                });
+                return;
+            }
+            Err(e) => {
+                app.crossfade_state.status = Some(format!("load failed: {e:#}"));
+                return;
+            }
+        }
+    }
     let loaded = if is_tib {
         load_tib_mix_run_as_stereo(path)
     } else {
@@ -964,6 +1155,48 @@ fn load_wav_as_stereo(path: &Path) -> anyhow::Result<LoadedCrossfadeTrack> {
     let reader =
         hound::WavReader::open(path).with_context(|| format!("opening {}", path.display()))?;
     decode_wav_reader_as_stereo(reader, path)
+}
+
+/// Cheap pre-flight on a `.tib` file: does it already have a bounced
+/// `mix_run` row? If not, return the bits the bounce-flow modal needs
+/// to render — project name, track count, count of tracks currently
+/// at `correction = None` (used to disable the Auto-Suno-Clean button
+/// when there's nothing to seed). TBSS-FR-0011 §C.
+enum TibProbe {
+    HasMixRun,
+    Empty {
+        project_name: String,
+        track_count: usize,
+        n_without_corr: usize,
+    },
+}
+
+fn probe_tib_for_bounce_flow(path: &Path) -> anyhow::Result<TibProbe> {
+    use anyhow::Context as _;
+    let db = crate::tib::TibDb::open(path.to_path_buf())
+        .with_context(|| format!("opening .tib {}", path.display()))?;
+    if db.read_mix_run_header()?.is_some() {
+        return Ok(TibProbe::HasMixRun);
+    }
+    let conn = db.conn();
+    let project_name: String = conn
+        .query_row("SELECT COALESCE(name, '') FROM meta", [], |r| r.get(0))
+        .context("reading meta.name")?;
+    let track_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM tracks", [], |r| r.get(0))
+        .context("counting tracks")?;
+    let n_without_corr: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM tracks WHERE correction IS NULL",
+            [],
+            |r| r.get(0),
+        )
+        .context("counting tracks without correction")?;
+    Ok(TibProbe::Empty {
+        project_name,
+        track_count: track_count.max(0) as usize,
+        n_without_corr: n_without_corr.max(0) as usize,
+    })
 }
 
 /// Open a `.tib` and decode its embedded `mix_run` WAV blob into the

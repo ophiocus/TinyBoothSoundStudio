@@ -43,6 +43,28 @@ pub struct PendingGeneratorParams {
     pub mode: crate::project::GeneratorMode,
 }
 
+/// Guided-bounce-from-Crossfade modal state. TBSS-FR-0011 §C.
+/// Populated when the user tries to load a `.tib` that has no
+/// `mix_run` row yet — instead of erroring, the Crossfade tab shows
+/// a three-button choice (Bounce as-is / Auto-apply Suno-Clean +
+/// Bounce / Open project to tune…). `None` = no modal active.
+pub struct CrossfadeBounceFlow {
+    /// The `.tib` the user picked.
+    pub tib_path: PathBuf,
+    /// Which Crossfade slot to fill once the bounce lands.
+    pub is_a: bool,
+    /// Project name (read from `meta.name` for the modal title).
+    pub project_name: String,
+    /// Tracks in the project — purely informational.
+    pub track_count: usize,
+    /// Tracks currently at `correction = None` — disables the
+    /// Auto-Suno-Clean button when zero (everything already has a chain).
+    pub n_without_corr: usize,
+    /// Latest error from a failed bounce attempt within this flow,
+    /// shown in the modal so the user can retry without losing context.
+    pub error: Option<String>,
+}
+
 /// One source loaded into the Crossfade tab — decoded once at load,
 /// re-used for waveform render + preview + export. TBSS-FR-0010.
 pub struct LoadedCrossfadeTrack {
@@ -295,6 +317,12 @@ pub struct TinyBoothApp {
     /// Survives tab switches. TBSS-FR-0010.
     pub crossfade_state: CrossfadeUiState,
 
+    /// Guided "this .tib has no bounced mix yet" flow — populated when
+    /// the Crossfade tab's Load… picks a .tib without a `mix_run` row.
+    /// `Some` makes the modal render on the next frame.
+    /// TBSS-FR-0011 §C.
+    pub crossfade_bounce_flow: Option<CrossfadeBounceFlow>,
+
     /// Mixer/automation recorder. Captures fader gestures while a strip's
     /// arm toggle is on and the player is in Playing state. Flushed into
     /// the project on Stop / disarm.
@@ -507,6 +535,7 @@ impl TinyBoothApp {
             pending_migration: None,
             pending_generator_modal: None,
             crossfade_state: CrossfadeUiState::default(),
+            crossfade_bounce_flow: None,
             recorder: crate::automation::Recorder::default(),
             mix_console_fraction: 0.42,
             recordings_page: 0,
@@ -1003,6 +1032,63 @@ impl TinyBoothApp {
         self.status = Some(format!(
             "Bounced master ({sample_rate} Hz · {channels} ch · {secs:.2} s) → .tib mix_run"
         ));
+    }
+
+    /// Bounce a *foreign* `.tib` (not the active project) from the
+    /// Crossfade-load flow. Opens the file in isolation, optionally
+    /// seeds Suno-Clean on tracks currently at `correction = None`,
+    /// renders the master mix, writes the `mix_run` row, and closes.
+    /// The currently-loaded project is not touched. TBSS-FR-0011 §C.
+    pub fn bounce_tib_for_crossfade(
+        &mut self,
+        path: &Path,
+        seed_suno_clean: bool,
+    ) -> anyhow::Result<()> {
+        let seed = if seed_suno_clean {
+            Some(self.pick_seed_correction_profile()?)
+        } else {
+            None
+        };
+        let mut db = crate::tib::TibDb::open(path.to_path_buf())?;
+        let mut project = crate::tib_project::load_project(&db, path.to_path_buf())?;
+        if let Some(seed_profile) = seed.as_ref() {
+            let mut changed = false;
+            for t in &mut project.tracks {
+                if t.correction.is_none() {
+                    t.correction = Some(seed_profile.clone());
+                    changed = true;
+                }
+            }
+            if changed {
+                crate::tib_project::save_metadata(&project, db.conn())?;
+            }
+        }
+        let signature = crate::export::compute_mixrun_signature(&project, Some(&db));
+        let (wav_bytes, sample_rate, channels, frames) =
+            crate::export::render_master_mix_to_wav_bytes(&project, Some(&db))?;
+        db.write_mix_run(sample_rate, channels, frames, &signature, &wav_bytes)?;
+        Ok(())
+    }
+
+    /// Same seed-resolution cascade `enable_all_corrections` uses, but
+    /// returns the profile instead of mutating tracks. Used by the
+    /// Crossfade-bounce flow. TBSS-FR-0011 §C.
+    fn pick_seed_correction_profile(&self) -> anyhow::Result<crate::dsp::Profile> {
+        if let Some(p) = self.project.default_correction.clone() {
+            return Ok(p);
+        }
+        if let Some(p) = self
+            .profiles
+            .iter()
+            .find(|p| p.name == "Suno-Clean")
+            .cloned()
+        {
+            return Ok(p);
+        }
+        self.profiles
+            .first()
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("no correction profiles available to seed from"))
     }
 
     /// Snapshot the current mix-run cache state for the Mix-tab pip.

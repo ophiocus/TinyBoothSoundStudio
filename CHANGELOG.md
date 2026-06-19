@@ -8,6 +8,26 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); thi
 
 (Nothing yet — known issues all resolved as of v0.4.23.)
 
+## [0.4.51] — 2026-06-16
+
+### Added — Crossfade tab: guided Bounce-from-Load flow (TBSS-FR-0011 §C)
+
+Loading a `.tib` that has no bounced mix used to return a flat error and force the user to leave the Crossfade tab. v0.4.51 turns that into a guided three-way choice:
+
+- **⤓ Bounce as-is** *(default focus)* — render the master mix using each track's current correction chain. Transparent: tracks with no correction stay uncorrected. Best when you've already tuned the project.
+- **✓ Apply Suno-Clean to N, then Bounce** — seeds the user's default-correction profile (or Suno-Clean from the built-in presets, or the first available profile — same cascade the Mix-tab "Enable all corrections" button uses) on every track currently without a chain, saves the project, then bounces. Persistent: corrections stay applied.
+- **⋯ Open project to tune…** — switches to the Mix tab with the `.tib` as the active project; user dials each track individually, hits the Mix-tab Bounce there, then reloads in Crossfade.
+- **Cancel** — dismiss, no project changes.
+
+Failed bounces (e.g. all tracks muted) keep the modal open with the error inline so the user can pick a different path without re-opening the file picker.
+
+### Implementation surface
+- `app.rs`: `CrossfadeBounceFlow` state struct (tib_path / is_a / project_name / track_count / n_without_corr / error) + `crossfade_bounce_flow: Option<CrossfadeBounceFlow>` field on `TinyBoothApp`. New methods `bounce_tib_for_crossfade(path, seed_suno_clean)` (opens foreign `.tib` in isolation, optionally seeds the seed-correction profile + saves manifest, renders, writes `mix_run` — current project untouched) and `pick_seed_correction_profile()` (same cascade as `enable_all_corrections`: project default → Suno-Clean → first available).
+- `ui/crossfade.rs`: pre-flight `probe_tib_for_bounce_flow(path) -> TibProbe` that opens the `.tib`, returns `HasMixRun` or `Empty { project_name, track_count, n_without_corr }`. `handle_load` populates the flow state instead of erroring when `mix_run` is missing. `render_bounce_flow_modal(app, ctx)` draws the `egui::Window` centered on screen with the three actions; on bounce-success, re-invokes `handle_load` which takes the existing-cache path.
+
+### Proof
+fmt + clippy `--release --all-targets -D warnings` clean under the CI-pinned Rust 1.95.0 toolchain. Suite **127 passing**.
+
 ## [0.4.50] — 2026-06-16
 
 ### Added — `.tib` as buffered stem + Crossfade-of-.tib (TBSS-FR-0011)
