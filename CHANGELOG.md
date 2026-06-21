@@ -8,6 +8,48 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); thi
 
 (Nothing yet — known issues all resolved as of v0.4.23.)
 
+## [0.4.52] — 2026-06-16
+
+### Added — TinyBooth Album (`.tba`) — TBSS-FR-0012 MVP
+
+The biggest scope-shift since `.tib` itself: a sibling SQLite project format whose data model IS "arrangement of N stems", and an Album tab whose UI IS for editing that. After FR-0011 made `.tib` loadable as a single buffered stem, the natural next layer is a project file that composes N of those stems on a timeline — albums, mix tapes, long-form pieces, anything where the unit is a finished `.tib` and the compose-step is positioning + fades + gain.
+
+#### `.tba` file format
+SQLite v1 schema mirroring `.tib`'s conventions (WAL, 16 KiB pages, foreign keys on). Three tables:
+- `meta` — name, created, schema_version.
+- `clips(id, ord, source_path, start_secs, fade_in_secs, fade_out_secs, gain_db)` — one row per arrangement slot. `source_path` is an absolute path to a `.tib` source (relative-path resolution deferred to v0.4.53).
+- `mix_run(id=1, sample_rate, channels, frames, source_signature, created, audio BLOB)` — **structurally identical** to `.tib`'s `mix_run`. The bounced album's master goes here as a 16-bit WAV byte stream, so the Crossfade tab's existing `.tib` load path also accepts a `.tba` as a stem with zero changes downstream. Albums-loaded-as-clips-in-another-album is recursive composition for free.
+
+#### Album tab
+New `Tab::Album` variant + entry in the top tab strip:
+- **Header row**: editable album name, Open / Save / Save As, dirty-indicator (`Save *`), filename of the loaded `.tba`.
+- **Top-down timeline visualisation**: each clip rendered as a colored band at `[start, start+5s]` (the 5 s is a placeholder pending probe-clip-duration on add — landing in v0.4.53), with shaded fade-in / fade-out edges and the source filename baked into the band.
+- **Clip list editor**: scrollable grid with `#`, source filename, `Start (s)`, `Fade in (s)`, `Fade out (s)`, `Gain (dB)` DragValues, ▲▼ reorder buttons and ✖ remove. `➕ Add Clip…` button at the bottom opens an rfd dialog filtered to `.tib`.
+- **Transport**: ▶ Preview (renders + plays via the shared `CrossfadePreviewSession`), ■ Stop, ⤓ Bounce (with `✓ / ⚠ stale / —` pip mirroring the Mix-tab Bounce button), Export… (any format `export.rs` already supports).
+
+#### Render DSP
+Pure-function `album::render(clips) -> AlbumMix`. For each clip: equal-power fade-in (`sin²(t·π/2)`) over the first `fade_in_secs · sr` frames + equal-power fade-out over the last `fade_out_secs · sr` frames, multiplied by per-clip linear gain, summed into a single output buffer at the clip's `start_secs`. Soft-limit if any sample exceeds `[-1, 1]`. Adjacent clips' overlapping fades produce an emergent equal-power crossfade — no explicit transition object, the curves sum to constant power by construction.
+
+All clips must share a sample rate (matches the constraint everywhere else in the app — no resampling). Mismatched-rate clips error clearly. Sources without a bounced `mix_run` error with the same "open and Bounce first" message the Crossfade tab uses.
+
+#### Module layout
+Two new top-level modules + one new UI module + one new bridge module, mirroring the `.tib` / `Project` / `tib_project` / `ui::mix` layering:
+- `tba.rs` — SQLite storage (`TbaDb`, `ClipRow`, `MixRunHeader`, schema, CRUD + mix_run).
+- `album.rs` — in-memory `Album` + `AlbumClip` + render DSP (`load_clips`, `render`, `compute_mixrun_signature`, `encode_mix_to_wav_bytes`).
+- `tba_album.rs` — `Album` ↔ `.tba` shuttle (`load_album`, `save_album`).
+- `ui/album.rs` — the Album tab.
+- `app.rs` — `AlbumUiState` field + `Tab::Album` variant + tab-strip selectable + central-panel dispatch.
+
+### Proof
+9 new tests landed: `album::tests` covers render-empty errors, single-clip pass-through, two-clip equal-power overlap sums to ~1.0, per-clip gain, and signature stability + change-invalidation. `tba::tests` covers create+clips round-trip, mix_run round-trip + upsert + delete, reopen-round-trips. `tba_album::tests` covers Album → `.tba` → Album. Suite **136 passing** (up from 127). fmt + clippy `--release --all-targets -D warnings` clean under the CI-pinned Rust 1.95.0 toolchain.
+
+### Deferred
+- Timeline drag editing (drag clips + fade handles on the timeline strip — Crossfade-tab-style).
+- `.wav` as a clip source (v0.4.52 takes `.tib` only).
+- Relative source paths (portable albums).
+- Per-clip post-correction at album-render time.
+- Probe-each-clip's-decoded-duration on Add so the timeline band reflects real length instead of the 5 s placeholder.
+
 ## [0.4.51] — 2026-06-16
 
 ### Added — Crossfade tab: guided Bounce-from-Load flow (TBSS-FR-0011 §C)

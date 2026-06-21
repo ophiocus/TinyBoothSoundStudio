@@ -43,6 +43,44 @@ pub struct PendingGeneratorParams {
     pub mode: crate::project::GeneratorMode,
 }
 
+/// Album-tab UI state. The currently-open `.tba` (if any), the live
+/// in-memory `Album` being edited, and a shared transport for preview.
+/// TBSS-FR-0012.
+pub struct AlbumUiState {
+    /// Filesystem path the album was loaded from / will save to.
+    /// `None` for a fresh untitled album that hasn't been saved yet.
+    pub path: Option<PathBuf>,
+    /// The open SQLite handle. Held so each Save is a small per-row
+    /// update rather than reopening the file.
+    pub db: Option<crate::tba::TbaDb>,
+    /// In-memory model the UI mutates.
+    pub album: crate::album::Album,
+    /// True when the in-memory model has un-saved edits relative to
+    /// the .tba on disk.
+    pub dirty: bool,
+    /// Active preview playback session — shared with the Crossfade tab
+    /// (same `CrossfadePreviewSession` type), but lives here so the
+    /// two tabs can play independently.
+    pub preview: Option<crate::crossfade_player::CrossfadePreviewSession>,
+    pub status: Option<String>,
+    /// Last-used Export format picker (reuses the existing enum).
+    pub export_format: crate::export::ExportFormat,
+}
+
+impl Default for AlbumUiState {
+    fn default() -> Self {
+        Self {
+            path: None,
+            db: None,
+            album: crate::album::Album::default(),
+            dirty: false,
+            preview: None,
+            status: None,
+            export_format: crate::export::ExportFormat::Wav,
+        }
+    }
+}
+
 /// Guided-bounce-from-Crossfade modal state. TBSS-FR-0011 §C.
 /// Populated when the user tries to load a `.tib` that has no
 /// `mix_run` row yet — instead of erroring, the Crossfade tab shows
@@ -211,6 +249,8 @@ pub enum Tab {
     Export,
     /// Two-track crossfade preview + export. TBSS-FR-0010.
     Crossfade,
+    /// N-stem composition editor — TinyBooth Album. TBSS-FR-0012.
+    Album,
 }
 
 pub struct TinyBoothApp {
@@ -322,6 +362,11 @@ pub struct TinyBoothApp {
     /// `Some` makes the modal render on the next frame.
     /// TBSS-FR-0011 §C.
     pub crossfade_bounce_flow: Option<CrossfadeBounceFlow>,
+
+    /// Album-tab state — the open `.tba`, in-memory `Album`, and the
+    /// shared preview session. `None` when no album is loaded yet.
+    /// TBSS-FR-0012.
+    pub album_state: AlbumUiState,
 
     /// Mixer/automation recorder. Captures fader gestures while a strip's
     /// arm toggle is on and the player is in Playing state. Flushed into
@@ -536,6 +581,7 @@ impl TinyBoothApp {
             pending_generator_modal: None,
             crossfade_state: CrossfadeUiState::default(),
             crossfade_bounce_flow: None,
+            album_state: AlbumUiState::default(),
             recorder: crate::automation::Recorder::default(),
             mix_console_fraction: 0.42,
             recordings_page: 0,
@@ -2727,6 +2773,7 @@ impl eframe::App for TinyBoothApp {
                 ui.selectable_value(&mut self.tab, Tab::Mix, "Mix");
                 ui.selectable_value(&mut self.tab, Tab::Export, "Export");
                 ui.selectable_value(&mut self.tab, Tab::Crossfade, "Crossfade");
+                ui.selectable_value(&mut self.tab, Tab::Album, "Album");
 
                 ui.separator();
                 // 🌀 Visualizer toggle (v0.4.11). Selectable so it
@@ -2905,6 +2952,7 @@ impl eframe::App for TinyBoothApp {
                 Tab::Mix => ui::mix::show(self, ui),
                 Tab::Export => ui::export::show(self, ui),
                 Tab::Crossfade => ui::crossfade::show(self, ui),
+                Tab::Album => ui::album::show(self, ui),
             }
         });
 

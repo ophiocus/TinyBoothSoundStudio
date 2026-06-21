@@ -1,5 +1,6 @@
 #![windows_subsystem = "windows"]
 
+mod album;
 mod analysis;
 mod app;
 mod audio;
@@ -19,6 +20,8 @@ mod player;
 mod project;
 mod suno_import;
 mod suno_meta;
+mod tba;
+mod tba_album;
 mod telemetry;
 mod tib;
 mod tib_project;
