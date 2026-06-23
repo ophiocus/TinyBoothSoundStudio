@@ -1,7 +1,7 @@
 //! Chladni cymatics pattern — superposition of sin·sin eigenmodes
 //! weighted by FFT bands (Chladni 1787).
 
-use crate::ui::visualizer::{hsv_to_rgb, slider, FrameCtx, VizModule};
+use crate::{hsv_to_rgb, slider, FrameCtx, VizModule};
 use eframe::egui;
 
 #[derive(Debug, Clone)]

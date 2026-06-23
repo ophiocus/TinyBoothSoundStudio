@@ -2,7 +2,7 @@
 //! centroid, and crest factor. Insight = inaudible structure mapped to a
 //! preattentive channel: over-compression, monotony, and noisiness pop.
 
-use crate::ui::visualizer::{slider, FrameCtx, VizModule};
+use crate::{slider, FrameCtx, VizModule};
 use eframe::egui;
 use std::collections::VecDeque;
 

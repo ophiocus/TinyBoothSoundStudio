@@ -2,7 +2,7 @@
 //! portrait. Cosine similarity of the chroma trajectory against itself;
 //! repeats become off-diagonal stripes, sections become blocks.
 
-use crate::ui::visualizer::{bin_hz, blit_image, magma, slider, FrameCtx, VizModule};
+use crate::{bin_hz, blit_image, magma, slider, FrameCtx, VizModule};
 use eframe::egui;
 use std::collections::VecDeque;
 

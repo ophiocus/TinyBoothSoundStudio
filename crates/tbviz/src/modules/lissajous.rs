@@ -1,7 +1,7 @@
 //! Lissajous goniometer with phosphor trails — L vs R XY plot.
 //! Phase relationships at the sample timescale.
 
-use crate::ui::visualizer::{slider, FrameCtx, VizModule};
+use crate::{slider, FrameCtx, VizModule};
 use eframe::egui;
 
 #[derive(Debug, Clone)]

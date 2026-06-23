@@ -1,7 +1,7 @@
 //! Lorenz attractor (audio-modulated). RK4 integration of the Lorenz
 //! ODE with σ/ρ/β tugged by spectral centroid + RMS.
 
-use crate::ui::visualizer::{hsv_to_rgb, slider, FrameCtx, VizModule};
+use crate::{hsv_to_rgb, slider, FrameCtx, VizModule};
 use eframe::egui;
 
 #[derive(Debug, Clone)]

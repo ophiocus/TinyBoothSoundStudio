@@ -2,7 +2,7 @@
 //! embedding of the signal. Diagonal stripes = periodicity, blocks =
 //! stationarity, fading texture = drift, dust = chaos/noise.
 
-use crate::ui::visualizer::{blit_image, magma, slider, FrameCtx, VizModule};
+use crate::{blit_image, magma, slider, FrameCtx, VizModule};
 use eframe::egui;
 
 const N: usize = 200;

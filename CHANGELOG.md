@@ -8,6 +8,37 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); thi
 
 (Nothing yet — known issues all resolved as of v0.4.23.)
 
+## [0.4.72] — 2026-06-23
+
+### Changed — Visualizer engine extracted to a shared `tbviz` crate (TinyAmp groundwork)
+
+The visualizer (the `VizModule` trait, `FrameCtx`, all 20 modules, and the
+shared helpers) moved out of `src/ui/visualizer/` into a new **workspace
+library crate `crates/tbviz`**. This is the keystone for **TinyAmp** — a
+forthcoming portable player + heavyweight visualizer host — so both apps
+share one engine with zero drift instead of copy-pasting modules.
+
+No user-facing change: the 🌀 Visualizer behaves identically.
+
+- `tbviz` is host-agnostic — it knows nothing about projects, players, or
+  files. Two couplings were severed: it carries its own `spectrum()` DSP
+  (so `FrameCtx::build(samples, sr, time, dt)` is self-contained) and
+  inlines the coherence thresholds (mirroring `telemetry::COH_*`).
+- `tbviz::show(state, ui, samples, sample_rate)` replaces the old
+  app-coupled entry point; a `close_requested` flag bridges the in-engine
+  Close button back to the host.
+- TinyBooth's `src/ui/visualizer.rs` is now a thin shim: it re-exports
+  `VisualizerState` and feeds the live player tap to `tbviz::show`.
+- `ci.yml` clippy + test gained `--workspace` so the new member (incl.
+  `tbviz`'s hand-rolled TDA persistence test) is actually gated in CI.
+
+### Proof
+Workspace builds; `tbviz` carries 7 tests (HSV, registry uniqueness,
+centroid, Lorenz RK4 stability, TDA persistence circle/line); the binary
+keeps 131. fmt + clippy `--workspace --release --all-targets -D warnings`
+clean under the CI-pinned Rust 1.95.0. Files moved via `git mv` to
+preserve history.
+
 ## [0.4.71] — 2026-06-22
 
 ### Added — Visualizer: the last research engines (20 modes total)

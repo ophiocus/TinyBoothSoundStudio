@@ -7,7 +7,7 @@
 //! that isn't available offline; this delivers the same question —
 //! "what is the signal emphasising right now?" — from first principles.)
 
-use crate::ui::visualizer::{blit_image, magma, slider, FrameCtx, VizModule};
+use crate::{blit_image, magma, slider, FrameCtx, VizModule};
 use eframe::egui;
 use std::collections::VecDeque;
 

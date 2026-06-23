@@ -2,7 +2,7 @@
 //! pitch classes, arrange them by the circle of fifths, and draw the
 //! resultant "key vector" needle. Harmony made a glowing compass.
 
-use crate::ui::visualizer::{bin_hz, hsv_to_rgb, slider, FrameCtx, VizModule};
+use crate::{bin_hz, hsv_to_rgb, slider, FrameCtx, VizModule};
 use eframe::egui;
 use std::f32::consts::TAU;
 

@@ -4,7 +4,7 @@
 //! disk (depth → hyperbolic radius, so deeper branches get exponentially
 //! more room), and let you Möbius-pan/zoom for infinite focus + context.
 
-use crate::ui::visualizer::{bin_hz, hsv_to_rgb, slider, FrameCtx, VizModule};
+use crate::{bin_hz, hsv_to_rgb, slider, FrameCtx, VizModule};
 use eframe::egui;
 use std::collections::VecDeque;
 

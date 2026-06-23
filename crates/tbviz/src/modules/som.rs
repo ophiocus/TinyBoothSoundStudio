@@ -3,7 +3,7 @@
 //! shows cluster structure; a comet marks where the current sound sits.
 //! The autonomous-dimensioning showpiece.
 
-use crate::ui::visualizer::{blit_image, magma, slider, FrameCtx, VizModule};
+use crate::{blit_image, magma, slider, FrameCtx, VizModule};
 use eframe::egui;
 use std::collections::VecDeque;
 

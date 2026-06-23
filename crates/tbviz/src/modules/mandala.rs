@@ -2,7 +2,7 @@
 //! tracking frequency, mirrored across X for symmetry. Note-timescale
 //! tonal balance.
 
-use crate::ui::visualizer::{hsv_to_rgb, slider, FrameCtx, VizModule};
+use crate::{hsv_to_rgb, slider, FrameCtx, VizModule};
 use eframe::egui;
 use std::f32::consts::TAU;
 

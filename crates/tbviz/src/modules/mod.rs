@@ -1,5 +1,5 @@
 //! Built-in visualizer modules. Each implements
-//! [`crate::ui::visualizer::VizModule`] and is registered in
+//! [`crate::VizModule`] and is registered in
 //! `super::default_modules()`.
 
 pub mod chladni;

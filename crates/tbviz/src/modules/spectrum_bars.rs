@@ -1,7 +1,7 @@
 //! Spectrum analyzer (#2) — log-frequency magnitude bars with EMA
 //! smoothing and falling peak-hold. The calm, expected studio readout.
 
-use crate::ui::visualizer::{hsv_to_rgb, slider, FrameCtx, VizModule};
+use crate::{hsv_to_rgb, slider, FrameCtx, VizModule};
 use eframe::egui;
 
 #[derive(Debug, Clone)]

@@ -2,7 +2,7 @@
 //! drives speed, onsets inject bursts, spectral centroid sets hue.
 //! Sound's energy made visible as emergent motion.
 
-use crate::ui::visualizer::{hsv_to_rgb, slider, FrameCtx, VizModule};
+use crate::{hsv_to_rgb, slider, FrameCtx, VizModule};
 use eframe::egui;
 
 #[derive(Debug, Clone)]

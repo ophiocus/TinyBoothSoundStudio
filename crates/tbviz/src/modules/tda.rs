@@ -7,7 +7,7 @@
 //!
 //! A clean tone grows one long bar; noise none; a tritone an extra hole.
 
-use crate::ui::visualizer::{slider, FrameCtx, VizModule};
+use crate::{slider, FrameCtx, VizModule};
 use eframe::egui;
 use std::collections::HashMap;
 

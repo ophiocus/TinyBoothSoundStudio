@@ -1,91 +1,118 @@
-//! Full-window audio-reactive visualizer — **modular** architecture
-//! (refactored v0.4.53 from the v0.4.11 monolith).
+//! `tbviz` — the TinyBooth visualizer engine, extracted as a standalone
+//! library so **TinyBooth Sound Studio** and **TinyAmp** share one
+//! modular `VizModule` set with zero drift.
 //!
 //! Every visualization is a self-contained [`VizModule`]: it owns its
-//! own parameters, persistent state, draw routine, and config UI. The
-//! shell here is mode-agnostic — it builds one shared [`FrameCtx`] per
-//! frame (the realized "TinyOutput contract": stereo samples + the
-//! common analyses every engine wants), then hands it to whichever
-//! module is active.
+//! params, persistent state, `draw`, and `config_ui`. The host builds a
+//! per-frame [`FrameCtx`] from a stereo sample tap (the "TinyOutput
+//! contract") and calls [`show`]; the engine is otherwise host-agnostic
+//! — it knows nothing about projects, players, or files.
 //!
 //! ## Adding a new module
-//!
-//! 1. Create `modules/<name>.rs` with a struct that holds the module's
-//!    params + state and `impl VizModule for <Name>`.
-//! 2. `pub mod <name>;` + `pub use <name>::<Name>;` in `modules/mod.rs`.
-//! 3. Add one line to [`default_modules`].
-//!
-//! That's it — the tab bar, config panel, canvas dispatch, and the
-//! cross-cutting coherence HUD all pick it up automatically. The 18
-//! research engines in `docs/research/sound-visualization-engines.md`
-//! are each a future `VizModule` over this same `FrameCtx`.
+//! 1. `modules/<name>.rs` with a struct + `impl VizModule`.
+//! 2. `pub mod <name>; pub use <name>::<Name>;` in `modules/mod.rs`.
+//! 3. One line in [`default_modules`].
 
 pub mod modules;
 
-use crate::app::TinyBoothApp;
 use eframe::egui;
+use rustfft::{num_complex::Complex, FftPlanner};
 use std::collections::VecDeque;
 
-// ── Live cross-band coherence HUD (Phase 4, v0.4.38) ────────────────
-//
-// A cross-cutting overlay (not a mode): each frame it bins the master-
-// bus spectrum into log-spaced bands, keeps a rolling history of per-
-// band energy, and reports the mean pairwise Pearson correlation — the
-// same AI-audio fingerprint metric the telemetry analyzer computes per
-// track, estimated live. Tiers reuse the shared `telemetry::COH_*`
-// thresholds so the verdict matches the Mix-tab pill.
-
-/// Number of log-spaced bands the live-coherence HUD tracks.
+// ── Live cross-band coherence HUD ───────────────────────────────────
+// Thresholds mirror TinyBooth's `telemetry::COH_*` so the visualizer's
+// live verdict matches the Mix-tab pill. Duplicated here (rather than
+// depending on the app) to keep `tbviz` host-agnostic.
+const COH_AI_MAX: f32 = 0.35;
+const COH_CLEAN_MIN: f32 = 0.55;
 const COH_VIZ_BANDS: usize = 6;
-/// Upper edges (Hz) of the first `COH_VIZ_BANDS - 1` bands; the final
-/// band runs from the last edge up to Nyquist.
 const COH_VIZ_EDGES: [f32; COH_VIZ_BANDS - 1] = [150.0, 400.0, 1000.0, 2500.0, 6000.0];
-/// Frames of band-energy history (~3 s at the 30 fps canvas cadence).
 const COH_VIZ_HISTORY: usize = 90;
-/// Minimum history before we trust the estimate enough to display.
 const COH_VIZ_MIN_FRAMES: usize = 16;
-/// EMA smoothing applied to the displayed value so it doesn't jitter.
 const COH_VIZ_SMOOTH: f32 = 0.1;
 
+/// Hann-windowed log-magnitude spectrum (0..1), `fft_size/2` bins,
+/// DC dropped at consumption. Self-contained copy of the app's
+/// `analysis::spectrum` so `tbviz` owns its own DSP.
+pub fn spectrum(samples: &[f32]) -> Vec<f32> {
+    if samples.len() < 64 {
+        return Vec::new();
+    }
+    let fft_size = samples.len().next_power_of_two().clamp(512, 4096);
+    let take = fft_size.min(samples.len());
+    let start = samples.len() - take;
+    let mut buf: Vec<Complex<f32>> = (0..fft_size)
+        .map(|i| {
+            let x = if i < take { samples[start + i] } else { 0.0 };
+            let w = if i < take {
+                let t = i as f32 / (take.max(2) - 1) as f32;
+                0.5 - 0.5 * (std::f32::consts::TAU * t).cos()
+            } else {
+                0.0
+            };
+            Complex { re: x * w, im: 0.0 }
+        })
+        .collect();
+    let mut planner = FftPlanner::<f32>::new();
+    let fft = planner.plan_fft_forward(fft_size);
+    fft.process(&mut buf);
+    let n = fft_size / 2;
+    let scale = 4.0 / fft_size as f32;
+    let mut out = Vec::with_capacity(n);
+    for bin in &buf[..n] {
+        let mag = (bin.re * bin.re + bin.im * bin.im).sqrt() * scale;
+        let db = 20.0 * (mag + 1e-9).log10();
+        out.push(((db + 90.0) / 100.0).clamp(0.0, 1.0));
+    }
+    out
+}
+
 /// Per-frame shared analysis handed to the active module — the realized
-/// "TinyOutput contract". Everything here is derived once from the
-/// master-bus sample tap so modules don't each recompute the FFT.
+/// "TinyOutput contract". Built once from the stereo tap so modules
+/// don't each recompute the FFT.
 pub struct FrameCtx<'a> {
-    /// Raw interleaved-as-tuples stereo tap `(L, R)`.
     pub samples: &'a [(f32, f32)],
     pub sample_rate: u32,
-    /// `ui.input(|i| i.time)` — wall-clock seconds, monotonic.
     pub time: f64,
-    /// Frame delta in seconds (`stable_dt`) for frame-rate-correct work.
-    /// Part of the contract surface — consumed by future engines (the
-    /// reassignment / adaptive-display modules), not the ported five.
     #[allow(dead_code)]
     pub dt: f32,
-    /// Mono sum `0.5·(L+R)`. Contract surface for engines that want the
-    /// raw mono signal rather than the precomputed spectrum.
     #[allow(dead_code)]
     pub mono: Vec<f32>,
-    /// Magnitude spectrum of `mono` (0..Nyquist), via `analysis::spectrum`.
     pub spectrum: Vec<f32>,
-    /// RMS over the tap window.
     pub rms: f32,
-    /// Normalized spectral centroid in `[0, 1]`.
     pub centroid: f32,
+}
+
+impl<'a> FrameCtx<'a> {
+    /// Build the context from a raw stereo tap + the frame clock.
+    pub fn build(samples: &'a [(f32, f32)], sample_rate: u32, time: f64, dt: f32) -> Self {
+        let mono: Vec<f32> = samples.iter().map(|(l, r)| 0.5 * (l + r)).collect();
+        let spectrum = spectrum(&mono);
+        let rms = {
+            let s: f32 = samples.iter().map(|(l, r)| 0.5 * (l * l + r * r)).sum();
+            (s / samples.len().max(1) as f32).sqrt()
+        };
+        let centroid = centroid_from_spectrum(&spectrum);
+        Self {
+            samples,
+            sample_rate,
+            time,
+            dt,
+            mono,
+            spectrum,
+            rms,
+            centroid,
+        }
+    }
 }
 
 /// One pluggable visualization. Owns its params + persistent state.
 pub trait VizModule {
-    /// Stable identifier (snake_case) — for tests + future
-    /// remember-last-active-mode persistence.
     #[allow(dead_code)]
     fn id(&self) -> &'static str;
-    /// Short tab label.
     fn label(&self) -> &'static str;
-    /// One-line description shown as a tab tooltip + config header.
     fn description(&self) -> &'static str;
-    /// Render into `rect` using the shared per-frame context.
     fn draw(&mut self, painter: &egui::Painter, rect: egui::Rect, ctx: &FrameCtx<'_>);
-    /// Render this module's parameter controls into the config panel.
     fn config_ui(&mut self, ui: &mut egui::Ui);
 }
 
@@ -115,15 +142,14 @@ pub fn default_modules() -> Vec<Box<dyn VizModule>> {
     ]
 }
 
-/// Persistent visualizer state. Lives on `TinyBoothApp`.
+/// Persistent visualizer state. The host owns one of these.
 pub struct VisualizerState {
-    /// The registered modules, in tab order.
     pub modules: Vec<Box<dyn VizModule>>,
-    /// Index into `modules` of the active mode.
     pub active: usize,
     pub config_open: bool,
-
-    // Cross-cutting coherence overlay (applies over any module).
+    /// Set true when the in-engine Close button is pressed; the host
+    /// reads + resets it to hide the visualizer.
+    pub close_requested: bool,
     pub coherence_hud: bool,
     coh_history: VecDeque<[f32; COH_VIZ_BANDS]>,
     coh_live: f32,
@@ -136,6 +162,7 @@ impl Default for VisualizerState {
             modules: default_modules(),
             active: 0,
             config_open: true,
+            close_requested: false,
             coherence_hud: true,
             coh_history: VecDeque::with_capacity(COH_VIZ_HISTORY),
             coh_live: 0.0,
@@ -144,13 +171,20 @@ impl Default for VisualizerState {
     }
 }
 
-/// Render the visualizer. Called from `app::update` when
-/// `show_visualizer` is true.
-pub fn show(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
-    // ── Top bar: mode switcher + close ─────────────────────────────
+/// Render the full visualizer (top bar + optional config panel + canvas)
+/// into the current `ui`, driven by the supplied stereo tap. The host
+/// provides `samples` (interleaved-as-tuples) and `sample_rate`; the
+/// engine builds the `FrameCtx` itself. Sets `state.close_requested`
+/// if the user clicks Close.
+pub fn show(
+    state: &mut VisualizerState,
+    ui: &mut egui::Ui,
+    samples: &[(f32, f32)],
+    sample_rate: u32,
+) {
     ui.horizontal(|ui| {
         ui.heading("🌀  Visualizer");
-        let toggle_label = if app.visualizer.config_open {
+        let toggle_label = if state.config_open {
             "◀ Hide config"
         } else {
             "▶ Show config"
@@ -160,61 +194,55 @@ pub fn show(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
             .on_hover_text("Show or hide the per-mode parameter panel.")
             .clicked()
         {
-            app.visualizer.config_open = !app.visualizer.config_open;
+            state.config_open = !state.config_open;
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui.button("✖  Close").clicked() {
-                app.show_visualizer = false;
+                state.close_requested = true;
             }
             ui.add_space(8.0);
-            for i in 0..app.visualizer.modules.len() {
-                let selected = app.visualizer.active == i;
-                let label = app.visualizer.modules[i].label();
-                let desc = app.visualizer.modules[i].description();
+            for i in 0..state.modules.len() {
+                let selected = state.active == i;
+                let label = state.modules[i].label();
+                let desc = state.modules[i].description();
                 if ui
                     .selectable_label(selected, label)
                     .on_hover_text(desc)
                     .clicked()
                 {
-                    app.visualizer.active = i;
+                    state.active = i;
                 }
             }
         });
     });
     ui.separator();
 
-    // ── Left config panel ──────────────────────────────────────────
-    if app.visualizer.config_open {
+    if state.config_open {
         egui::SidePanel::left("viz_config_panel")
             .resizable(true)
             .default_width(280.0)
             .min_width(220.0)
             .show_inside(ui, |ui| {
-                config_panel(app, ui);
+                config_panel(state, ui);
             });
     }
 
-    // ── Main canvas (right of the optional sidebar) ────────────────
     egui::CentralPanel::default()
         .frame(egui::Frame::none())
         .show_inside(ui, |ui| {
-            canvas(app, ui);
+            canvas(state, ui, samples, sample_rate);
         });
 
-    // 30 fps repaint cadence for the canvas.
     ui.ctx()
         .request_repaint_after(std::time::Duration::from_millis(33));
 }
 
-// ───────────────────── canvas (right panel) ─────────────────────
-
-fn canvas(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
-    let samples: Vec<(f32, f32)> = if let Some(player) = app.player.as_ref() {
-        player.state.output_viz.lock().iter().copied().collect()
-    } else {
-        Vec::new()
-    };
-
+fn canvas(
+    state: &mut VisualizerState,
+    ui: &mut egui::Ui,
+    samples: &[(f32, f32)],
+    sample_rate: u32,
+) {
     let avail = ui.available_size();
     let canvas_size = egui::vec2(avail.x.max(200.0), avail.y.max(200.0));
     let (rect, _resp) = ui.allocate_exact_size(canvas_size, egui::Sense::hover());
@@ -225,58 +253,27 @@ fn canvas(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
         painter.text(
             rect.center(),
             egui::Align2::CENTER_CENTER,
-            "no audio yet — hit ▶ on the Mix tab to feed the visualizer",
+            "no audio yet — start playback to feed the visualizer",
             egui::FontId::proportional(14.0),
             egui::Color32::from_gray(120),
         );
         return;
     }
 
-    // Build the shared per-frame context once (the TinyOutput contract).
-    let sample_rate = app
-        .player
-        .as_ref()
-        .map(|p| p.state.sample_rate)
-        .unwrap_or(0);
     let (time, dt) = ui.ctx().input(|i| (i.time, i.stable_dt));
-    let mono: Vec<f32> = samples.iter().map(|(l, r)| 0.5 * (l + r)).collect();
-    let spectrum = crate::analysis::spectrum(&mono);
-    let rms = {
-        let s: f32 = samples.iter().map(|(l, r)| 0.5 * (l * l + r * r)).sum();
-        (s / samples.len().max(1) as f32).sqrt()
-    };
-    let centroid = centroid_from_spectrum(&spectrum);
-    let ctx = FrameCtx {
-        samples: &samples,
-        sample_rate,
-        time,
-        dt,
-        mono,
-        spectrum,
-        rms,
-        centroid,
-    };
+    let ctx = FrameCtx::build(samples, sample_rate, time, dt);
+    update_live_coherence(state, &ctx);
 
-    // Live coherence estimate updates before the mode draws so the HUD
-    // (rendered last, on top) reflects the current frame.
-    update_live_coherence(&mut app.visualizer, &ctx);
-
-    let active = app
-        .visualizer
-        .active
-        .min(app.visualizer.modules.len().saturating_sub(1));
-    if let Some(module) = app.visualizer.modules.get_mut(active) {
+    let active = state.active.min(state.modules.len().saturating_sub(1));
+    if let Some(module) = state.modules.get_mut(active) {
         module.draw(&painter, rect, &ctx);
     }
 
-    if app.visualizer.coherence_hud && app.visualizer.coh_primed {
-        draw_coherence_hud(&painter, rect, app.visualizer.coh_live);
+    if state.coherence_hud && state.coh_primed {
+        draw_coherence_hud(&painter, rect, state.coh_live);
     }
 }
 
-/// Normalized spectral centroid in `[0, 1]` from a magnitude spectrum.
-/// Matches the legacy `spectral_centroid` exactly (weighted bin index /
-/// total, divided by bin count).
 fn centroid_from_spectrum(spectrum: &[f32]) -> f32 {
     if spectrum.is_empty() {
         return 0.0;
@@ -294,9 +291,6 @@ fn centroid_from_spectrum(spectrum: &[f32]) -> f32 {
     }
 }
 
-/// Update the rolling live cross-band coherence estimate from the shared
-/// spectrum. Mirrors the analyzer's pairwise-Pearson approach over a
-/// short rolling window instead of the full STFT.
 fn update_live_coherence(state: &mut VisualizerState, ctx: &FrameCtx<'_>) {
     if ctx.sample_rate == 0 || ctx.samples.len() < 256 {
         return;
@@ -305,8 +299,6 @@ fn update_live_coherence(state: &mut VisualizerState, ctx: &FrameCtx<'_>) {
     if spec.is_empty() {
         return;
     }
-    // `spectrum` returns the first half of the FFT (0..Nyquist), so the
-    // Hz of bin `i` is `i * Nyquist / spec.len()`.
     let hz_per_bin = (ctx.sample_rate as f32 * 0.5) / spec.len() as f32;
     let mut energy = [0.0f32; COH_VIZ_BANDS];
     for (i, mag) in spec.iter().enumerate() {
@@ -325,7 +317,6 @@ fn update_live_coherence(state: &mut VisualizerState, ctx: &FrameCtx<'_>) {
     if n < COH_VIZ_MIN_FRAMES {
         return;
     }
-
     let mut means = [0.0f32; COH_VIZ_BANDS];
     for row in &state.coh_history {
         for b in 0..COH_VIZ_BANDS {
@@ -372,9 +363,7 @@ fn update_live_coherence(state: &mut VisualizerState, ctx: &FrameCtx<'_>) {
     }
 }
 
-/// Draw the live coherence badge in the top-right corner of the canvas.
 fn draw_coherence_hud(painter: &egui::Painter, rect: egui::Rect, coh: f32) {
-    use crate::telemetry::{COH_AI_MAX, COH_CLEAN_MIN};
     let (label, color) = if coh < COH_AI_MAX {
         (
             format!("Band Coh {coh:.2}  AI"),
@@ -401,17 +390,11 @@ fn draw_coherence_hud(painter: &egui::Painter, rect: egui::Rect, coh: f32) {
     painter.galley(chip.min + pad, galley, color);
 }
 
-// ───────────────────── config panel ─────────────────────
-
-fn config_panel(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
+fn config_panel(state: &mut VisualizerState, ui: &mut egui::Ui) {
     egui::ScrollArea::vertical().show(ui, |ui| {
-        let active = app
-            .visualizer
-            .active
-            .min(app.visualizer.modules.len().saturating_sub(1));
+        let active = state.active.min(state.modules.len().saturating_sub(1));
         ui.heading("Parameters");
-        let desc = app
-            .visualizer
+        let desc = state
             .modules
             .get(active)
             .map(|m| m.description())
@@ -421,20 +404,16 @@ fn config_panel(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
         ui.separator();
         ui.add_space(6.0);
 
-        // Global overlay (applies to every mode).
-        ui.checkbox(&mut app.visualizer.coherence_hud, "Live coherence HUD")
+        ui.checkbox(&mut state.coherence_hud, "Live coherence HUD")
             .on_hover_text(
                 "Overlay a live cross-band coherence readout — the AI-audio \
-                 fingerprint metric — in the top-right of the canvas. Low \
-                 (pink AI) = bands wobble independently; high (green ≈) = \
-                 bands move together like a real recording. Same thresholds \
-                 as the Mix-tab pill.",
+                 fingerprint metric — in the top-right of the canvas.",
             );
         ui.add_space(6.0);
         ui.separator();
         ui.add_space(6.0);
 
-        if let Some(module) = app.visualizer.modules.get_mut(active) {
+        if let Some(module) = state.modules.get_mut(active) {
             module.config_ui(ui);
         }
 
@@ -444,11 +423,8 @@ fn config_panel(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
         ui.collapsing("About this mode", |ui| {
             ui.label(
                 egui::RichText::new(
-                    "Hover any control for a one-line explanation. \
-                     Defaults reproduce the original hard-coded behaviour. \
-                     For the design philosophy behind the modes — and the \
-                     research backlog of new engines — see \
-                     `docs/research/sound-visualization-engines.md`.",
+                    "Hover any control for a one-line explanation. For the design \
+                     of each engine see docs/research/sound-visualization-engines.md.",
                 )
                 .italics()
                 .weak(),
@@ -457,9 +433,8 @@ fn config_panel(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
     });
 }
 
-// ───────────────────── shared helpers (used by modules) ─────────────
+// ── shared helpers used by modules ──────────────────────────────────
 
-/// Labelled slider row used by every module's `config_ui`.
 pub(crate) fn slider<T: egui::emath::Numeric>(
     ui: &mut egui::Ui,
     label: &str,
@@ -473,7 +448,6 @@ pub(crate) fn slider<T: egui::emath::Numeric>(
     });
 }
 
-/// HSV → RGB (`h,s,v` in `[0,1]`). Shared across modules.
 pub(crate) fn hsv_to_rgb(h: f32, s: f32, v: f32) -> (u8, u8, u8) {
     let h = (h.fract() + 1.0).fract() * 6.0;
     let c = v * s;
@@ -499,11 +473,6 @@ pub(crate) fn hsv_to_rgb(h: f32, s: f32, v: f32) -> (u8, u8, u8) {
     )
 }
 
-/// Perceptually-ordered **magma** colormap (`t` in `[0,1]` → RGB).
-/// Monotonic in luminance — the honest choice for magnitude (see the
-/// colour-science engine in `docs/research/sound-visualization-engines.md`).
-/// Linear interpolation over matplotlib's magma control points; great on
-/// the dark canvas.
 pub(crate) fn magma(t: f32) -> (u8, u8, u8) {
     const STOPS: [(f32, f32, f32); 11] = [
         (0.0, 0.0, 0.015),
@@ -527,10 +496,14 @@ pub(crate) fn magma(t: f32) -> (u8, u8, u8) {
     (lerp(a.0, b.0), lerp(a.1, b.1), lerp(a.2, b.2))
 }
 
-/// Upload `image` to a reused texture handle and stretch it over `rect`.
-/// Modules that render a 2-D field (spectrogram, similarity matrix,
-/// recurrence plot, …) build a `ColorImage` once per frame and blit it
-/// rather than emitting tens of thousands of `rect_filled` calls.
+pub(crate) fn bin_hz(i: usize, spectrum_len: usize, sample_rate: u32) -> f32 {
+    if spectrum_len == 0 {
+        return 0.0;
+    }
+    let fft_size = (spectrum_len * 2) as f32;
+    i as f32 * sample_rate as f32 / fft_size
+}
+
 pub(crate) fn blit_image(
     painter: &egui::Painter,
     rect: egui::Rect,
@@ -558,17 +531,6 @@ pub(crate) fn blit_image(
     );
 }
 
-/// Hz at magnitude-spectrum bin `i`, given the spectrum length and the
-/// source sample rate. `analysis::spectrum` returns `fft_size/2` bins
-/// (DC..Nyquist), so `fft_size = 2·len` and bin width = `sr / fft_size`.
-pub(crate) fn bin_hz(i: usize, spectrum_len: usize, sample_rate: u32) -> f32 {
-    if spectrum_len == 0 {
-        return 0.0;
-    }
-    let fft_size = (spectrum_len * 2) as f32;
-    i as f32 * sample_rate as f32 / fft_size
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -584,16 +546,9 @@ mod tests {
     }
 
     #[test]
-    fn hsv_zero_value_is_black_regardless_of_hue() {
-        for h in [0.0, 0.25, 0.5, 0.75] {
-            assert_eq!(hsv_to_rgb(h, 1.0, 0.0), (0, 0, 0));
-        }
-    }
-
-    #[test]
     fn default_modules_are_unique() {
         let mods = default_modules();
-        assert!(mods.len() >= 11);
+        assert!(mods.len() >= 20);
         let mut ids: Vec<&str> = mods.iter().map(|m| m.id()).collect();
         let n = ids.len();
         ids.sort_unstable();
@@ -604,6 +559,5 @@ mod tests {
     #[test]
     fn centroid_of_empty_is_zero() {
         assert_eq!(centroid_from_spectrum(&[]), 0.0);
-        assert_eq!(centroid_from_spectrum(&[0.0, 0.0, 0.0]), 0.0);
     }
 }

@@ -2,7 +2,7 @@
 //! running inter-channel correlation readout. The phase-problem X-ray:
 //! anti-phase content collapses to a horizontal smear, mono to vertical.
 
-use crate::ui::visualizer::{slider, FrameCtx, VizModule};
+use crate::{slider, FrameCtx, VizModule};
 use eframe::egui;
 use std::f32::consts::FRAC_1_SQRT_2;
 

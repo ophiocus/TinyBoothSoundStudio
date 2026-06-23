@@ -4,7 +4,7 @@
 //! first mode designed against the "memoryless visualisation is
 //! sterile" critique.
 
-use crate::ui::visualizer::{hsv_to_rgb, slider, FrameCtx, VizModule};
+use crate::{hsv_to_rgb, slider, FrameCtx, VizModule};
 use eframe::egui;
 use std::collections::VecDeque;
 

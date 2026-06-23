@@ -2,7 +2,7 @@
 //! `x(t+τ)` of the mono signal, drawn as a glowing orbit. A periodic
 //! tone closes into a clean loop; noise fills the plane; chaos knots.
 
-use crate::ui::visualizer::{hsv_to_rgb, slider, FrameCtx, VizModule};
+use crate::{hsv_to_rgb, slider, FrameCtx, VizModule};
 use eframe::egui;
 
 #[derive(Debug, Clone)]

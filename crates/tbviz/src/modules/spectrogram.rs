@@ -2,7 +2,7 @@
 //! perceptually-uniform magma colormap and EMA auto-ranging. The iconic
 //! baseline the app was missing; substrate the eye reads as music.
 
-use crate::ui::visualizer::{blit_image, magma, slider, FrameCtx, VizModule};
+use crate::{blit_image, magma, slider, FrameCtx, VizModule};
 use eframe::egui;
 use std::collections::VecDeque;
 
