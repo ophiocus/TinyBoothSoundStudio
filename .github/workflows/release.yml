@@ -162,7 +162,10 @@ jobs:
       - name: Build MSI installer
         # cargo-wix auto-defines -dVersion from Cargo.toml's version; we no
         # longer pass our own, which collided with candle.exe (CNDL0288).
-        run: cargo wix --nocapture
+        # `-p` is mandatory since v0.4.72 — the repo is a workspace (root
+        # binary + crates/tbviz) and cargo-wix errors "Workspace detected.
+        # Please pass a package name." without it.
+        run: cargo wix -p tinybooth-sound-studio --nocapture
 
       - name: Upload MSI
         uses: actions/upload-artifact@v5
