@@ -8,6 +8,48 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); thi
 
 (Nothing yet — known issues all resolved as of v0.4.23.)
 
+## [0.4.71] — 2026-06-22
+
+### Added — Visualizer: the last research engines (20 modes total)
+
+Completes the sound-visualization engine suite over the modular `VizModule`
+architecture. Four new modes, all on the existing 2-D painter + `FrameCtx`
+with **no new dependencies**:
+
+- **Topology** (#15) — SW1PerS periodicity barcode. A sliding-window
+  embedding of the signal is sphere-normalized into a point cloud; a
+  hand-rolled Vietoris–Rips **H₁ persistence** (Z/2 boundary-matrix
+  reduction) finds the persistent hole that periodicity creates. Renders
+  the barcode + point cloud + a normalized score with a verdict
+  (periodic / quasi-periodic / aperiodic). Recomputed every ~250 ms; the
+  PH is unit-tested (a circle yields one long bar, a collapsed line none).
+- **Optical Flow** (#16) — spectrogram tinted by instantaneous-frequency
+  *velocity* (from the same derivative-of-window phase estimate as the
+  reassigned mode). Vibrato shimmers as oscillating hue; glissando reads
+  as a hue glide. Up-glide → blue, steady → green, down-glide → red.
+- **Saliency** (#17, model-free) — Itti–Koch center-surround over the
+  spectrum + a temporal-novelty term, surfacing *what stands out* without
+  a trained model. The honest, offline-capable cousin of neural attention.
+- **Hyperbolic** (#18) — agglomerative cluster tree of the chroma history,
+  laid out on the Poincaré disk (depth → hyperbolic radius for
+  exponential room), with **Möbius pan/zoom** by drag/scroll for infinite
+  focus-plus-context navigation of song structure.
+
+### Not shipped (honest)
+**RAVE latent-walk** (the neural-vocoder half of #17) is intentionally
+omitted: it requires a pretrained model (tens of MB) and an ONNX/Torch
+runtime that aren't available offline — bundling them would balloon the
+69 MB installer and ship a tab that can't run without a user-supplied
+model. The `Saliency` mode delivers #17's "what is the model/ear
+attending to" question from first principles instead. Every other research
+engine from `docs/research/sound-visualization-engines.md` now ships.
+
+### Proof
+20 `VizModule`s registered. New `tda::tests` (circle → one long H₁ bar;
+line → none) validate the hand-rolled persistent homology. Suite
+**139 passing**. fmt + clippy `--release --all-targets -D warnings` clean
+under the CI-pinned Rust 1.95.0.
+
 ## [0.4.70] — 2026-06-22
 
 ### Added — Visualizer: modular plugin architecture + 11 new research engines
