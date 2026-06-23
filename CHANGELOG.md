@@ -8,6 +8,40 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); thi
 
 (Nothing yet — known issues all resolved as of v0.4.23.)
 
+## [0.4.70] — 2026-06-22
+
+### Added — Visualizer: modular plugin architecture + 11 new research engines
+
+The visualizer was refactored from a 1,564-line monolith into a plugin system (a `VizModule` trait + a per-frame `FrameCtx` "TinyOutput contract" + a registry), then loaded with engines from the sound-visualization research (`docs/research/sound-visualization-engines.md`). **16 modes total**, up from 5.
+
+#### Architecture
+- **`VizModule` trait** — each visualization owns its params, persistent state, `draw`, and `config_ui`. Adding a new one is: create `modules/<name>.rs`, re-export it, add one line to `default_modules()`.
+- **`FrameCtx`** — built once per frame from the master-bus tap (stereo samples, `sample_rate`, `time`, `dt`, mono, magnitude spectrum, RMS, spectral centroid) and shared with the active module. The old code recomputed the FFT 3–4× per frame; now once.
+- **Shared render helpers** — a reused-texture `blit_image` (2-D fields render as one texture upload, not 40k `rect_filled` calls), a perceptually-uniform `magma` colormap, and `bin_hz`.
+- Public surface preserved (`VisualizerState` + `show`), so `app.rs` needed no changes.
+
+#### New engines (each grounded in the research doc)
+- **Spectrogram** (#2/#4/#8/#12) — scrolling log-frequency, magma colormap, EMA auto-ranging. The baseline the app was missing.
+- **Reassigned** (#3) — phase-reassigned spectrogram; 2× FFT (window + derivative-window), channelized instantaneous frequency relocates each bin. A/B toggle vs the raw STFT.
+- **Spectrum** (#2) — log-frequency bars with EMA + falling peak-hold.
+- **Chroma** (#5) — pitch-class energy on the circle of fifths + a resultant key-vector needle.
+- **Self-Similarity** (#5) — cosine SSM of the chroma trajectory + Foote checkerboard novelty. Song form as geometry.
+- **Vectorscope** (#10) — mid/side goniometer + running inter-channel correlation meter.
+- **Phase Portrait** (#1/#6) — delay-coordinate embedding `x(t)` vs `x(t+τ)`, glowing orbit.
+- **Recurrence** (#6) — recurrence plot of the embedding with percentile-adaptive threshold.
+- **Timbre Map** (#9) — online self-organizing map of a 7-D timbre feature; U-matrix + BMU comet. The autonomous-dimensioning showpiece.
+- **Particle Flow** (#11) — curl-noise field driven by band energy + onsets (spectral flux), hue from centroid; frame-rate-correct advection.
+- **Health** (#13) — scrolling spectral entropy / flatness / centroid / crest-factor ribbons. Surfaces over-compression, noisiness, monotony.
+
+#### Ported (unchanged behaviour)
+Lissajous, Mandala, Lorenz, Chladni, Onion Skin — now each a `VizModule`.
+
+### Deferred (next ship)
+Five research engines are not in this build: **TDA persistence barcode** (#15, needs a persistent-homology crate), **optical-flow LIC** (#16) and **hyperbolic form browser** (#18) (no new deps — staged so this 11-module ship's build stays bulletproof), and **neural saliency / Grad-CAM + RAVE latent-walk** (#17, need ML runtimes + model files that aren't available offline). The color-honesty (#8), adaptive-display (#12), and rendering (#14) engines are embodied in the spectrogram's magma + auto-range + texture path rather than shipped as separate tabs.
+
+### Proof
+16 modules compile; new `default_modules_are_unique` + `centroid_of_empty_is_zero` tests; the Lorenz RK4-stability + HSV tests moved with their code. Suite **137 passing**. fmt + clippy `--release --all-targets -D warnings` clean under the CI-pinned Rust 1.95.0.
+
 ## [0.4.52] — 2026-06-16
 
 ### Added — TinyBooth Album (`.tba`) — TBSS-FR-0012 MVP
