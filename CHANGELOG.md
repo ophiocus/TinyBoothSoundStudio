@@ -8,6 +8,43 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); thi
 
 (Nothing yet — known issues all resolved as of v0.4.23.)
 
+## [0.4.73] — 2026-06-23
+
+### Added — Visualizer: live "licks & beats" event track + counter-visuals
+
+Recovered the offline telemetry drum analyzer as a **live streaming
+detector** inside `tbviz`, exposed it to every visualizer, and drew
+counter-visuals from it. Works in TinyBooth today and TinyAmp later
+(it runs off the shared `FrameCtx`, not a whole-track STFT).
+
+- **`tbviz::events::LickDetector`** — the same 5-band spectral-flux
+  onset detection + adaptive `median + k·MAD` peak-pick + dominant-band
+  drum classification (kick / snare / hat / tom / cymbal) as
+  `telemetry::classify_drum_events`, reworked to run frame-by-frame off
+  the rolling spectrum. Also estimates tempo (BPM) + beat phase from the
+  kick/snare backbeat. Warmup-gated: produces nothing until it has
+  enough history.
+- **`FrameCtx.licks: Option<LickFrame>`** — the event track. The
+  `Option` **is** the null-gate: a module physically cannot operate on a
+  missing track (the type forces `if let Some(licks) = ...`). `None` when
+  detection is disabled, warming, or the audio is silent.
+- **Across-the-board counter-visual** — the shell draws class-tinted
+  bubbles (rising, fading, per-instrument lanes) + a beat-pulse ring +
+  BPM readout over *whichever* mode is active. When the track is absent
+  it shows **"no lick tracks present — listening…"** instead of failing.
+- **Bespoke Mandala treatment** — per the design brief ("if the visual is
+  a spiral the licks show up as bubbles"): drum hits bloom as bubbles
+  orbiting the mandala, flying outward along per-band spokes as they age.
+- Two config toggles: **Detect licks & beats** and **Lick/beat
+  counter-visual**.
+
+### Proof
+3 new `events::tests` — silence → no events, low-band pulse train →
+several Kick onsets (validates the recovered classifier fires + labels),
+cold detector → `None`. `tbviz` suite **10 passing**. fmt + clippy
+`--workspace --release --all-targets -D warnings` clean under CI-pinned
+Rust 1.95.0.
+
 ## [0.4.72] — 2026-06-23
 
 ### Changed — Visualizer engine extracted to a shared `tbviz` crate (TinyAmp groundwork)

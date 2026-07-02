@@ -13,7 +13,10 @@
 //! 2. `pub mod <name>; pub use <name>::<Name>;` in `modules/mod.rs`.
 //! 3. One line in [`default_modules`].
 
+pub mod events;
 pub mod modules;
+
+pub use events::{LickClass, LickDetector, LickEvent, LickFrame};
 
 use eframe::egui;
 use rustfft::{num_complex::Complex, FftPlanner};
@@ -81,10 +84,17 @@ pub struct FrameCtx<'a> {
     pub spectrum: Vec<f32>,
     pub rms: f32,
     pub centroid: f32,
+    /// The live "licks & beats" event track, or `None` when detection
+    /// is disabled or not yet warmed. `Option` is the structural
+    /// null-gate: a module cannot operate on a missing track. See
+    /// [`events`].
+    pub licks: Option<LickFrame>,
 }
 
 impl<'a> FrameCtx<'a> {
-    /// Build the context from a raw stereo tap + the frame clock.
+    /// Build the context from a raw stereo tap + the frame clock. The
+    /// `licks` field is left `None`; the host attaches it after ticking
+    /// its persistent [`LickDetector`].
     pub fn build(samples: &'a [(f32, f32)], sample_rate: u32, time: f64, dt: f32) -> Self {
         let mono: Vec<f32> = samples.iter().map(|(l, r)| 0.5 * (l + r)).collect();
         let spectrum = spectrum(&mono);
@@ -102,6 +112,7 @@ impl<'a> FrameCtx<'a> {
             spectrum,
             rms,
             centroid,
+            licks: None,
         }
     }
 }
@@ -151,6 +162,13 @@ pub struct VisualizerState {
     /// reads + resets it to hide the visualizer.
     pub close_requested: bool,
     pub coherence_hud: bool,
+    /// Run the live lick/beat detector. When off, `ctx.licks` is `None`
+    /// and the "no lick tracks present" alert shows.
+    pub licks_enabled: bool,
+    /// Draw the shell's class-tinted bubble + beat-pulse overlay over
+    /// whichever module is active (the across-the-board counter-visual).
+    pub lick_overlay: bool,
+    lick: LickDetector,
     coh_history: VecDeque<[f32; COH_VIZ_BANDS]>,
     coh_live: f32,
     coh_primed: bool,
@@ -164,10 +182,21 @@ impl Default for VisualizerState {
             config_open: true,
             close_requested: false,
             coherence_hud: true,
+            licks_enabled: true,
+            lick_overlay: true,
+            lick: LickDetector::default(),
             coh_history: VecDeque::with_capacity(COH_VIZ_HISTORY),
             coh_live: 0.0,
             coh_primed: false,
         }
+    }
+}
+
+impl VisualizerState {
+    /// Clear per-stream detector state — call on stop / track change so
+    /// tempo + onset history don't bleed across songs.
+    pub fn reset_events(&mut self) {
+        self.lick.reset();
     }
 }
 
@@ -261,17 +290,112 @@ fn canvas(
     }
 
     let (time, dt) = ui.ctx().input(|i| (i.time, i.stable_dt));
-    let ctx = FrameCtx::build(samples, sample_rate, time, dt);
+    let mut ctx = FrameCtx::build(samples, sample_rate, time, dt);
     update_live_coherence(state, &ctx);
+
+    // Tick the live lick/beat detector and attach its snapshot. `None`
+    // until warmed → the structural null-gate for the modules.
+    if state.licks_enabled {
+        state.lick.update(&ctx.spectrum, ctx.sample_rate, ctx.time);
+        ctx.licks = state.lick.snapshot(ctx.time);
+    }
 
     let active = state.active.min(state.modules.len().saturating_sub(1));
     if let Some(module) = state.modules.get_mut(active) {
         module.draw(&painter, rect, &ctx);
     }
 
+    // Across-the-board counter-visual overlay + absence alert.
+    if state.lick_overlay {
+        match &ctx.licks {
+            Some(licks) => draw_lick_overlay(&painter, rect, licks),
+            None => draw_no_licks_chip(&painter, rect, state.licks_enabled),
+        }
+    }
+
     if state.coherence_hud && state.coh_primed {
         draw_coherence_hud(&painter, rect, state.coh_live);
     }
+}
+
+/// Counter-visual overlay drawn over any module: each recent event is a
+/// rising, fading bubble tinted by its drum class; a ring pulses on the
+/// beat. Intentionally *contrasts* with the base visual (bubbles over a
+/// spiral, etc.) so the licks read as a separate layer.
+fn draw_lick_overlay(painter: &egui::Painter, rect: egui::Rect, licks: &LickFrame) {
+    for ev in &licks.events {
+        // Bubble rises from the lower third and fades over its lifetime.
+        let life = (ev.age / 1.2).clamp(0.0, 1.0);
+        let alpha = ((1.0 - life) * 200.0) as u8;
+        if alpha < 6 {
+            continue;
+        }
+        // Deterministic x from the class+band so identical hits line up
+        // into per-instrument lanes near the bottom.
+        let lane = (ev.band as f32 + 0.5) / 5.0;
+        let x = rect.left() + lane * rect.width();
+        let y = rect.bottom() - 24.0 - life * rect.height() * 0.5;
+        let r = (4.0 + ev.velocity * 22.0) * (1.0 - 0.35 * life);
+        let (cr, cg, cb) = ev.class.color();
+        painter.circle_filled(
+            egui::pos2(x, y),
+            r,
+            egui::Color32::from_rgba_unmultiplied(cr, cg, cb, (alpha as f32 * 0.55) as u8),
+        );
+        painter.circle_stroke(
+            egui::pos2(x, y),
+            r,
+            egui::Stroke::new(
+                1.5,
+                egui::Color32::from_rgba_unmultiplied(cr, cg, cb, alpha),
+            ),
+        );
+    }
+
+    // Beat-pulse ring at the canvas centre + a small tempo readout.
+    if let Some(bpm) = licks.bpm {
+        let pulse = (1.0 - licks.beat_phase).powf(3.0); // sharp on the beat
+        let r = rect.size().min_elem() * (0.30 + 0.04 * pulse);
+        painter.circle_stroke(
+            rect.center(),
+            r,
+            egui::Stroke::new(
+                1.0 + 2.0 * pulse,
+                egui::Color32::from_rgba_unmultiplied(255, 255, 255, (40.0 + 90.0 * pulse) as u8),
+            ),
+        );
+        painter.text(
+            egui::pos2(rect.center().x, rect.bottom() - 8.0),
+            egui::Align2::CENTER_BOTTOM,
+            format!("{bpm:.0} bpm"),
+            egui::FontId::monospace(11.0),
+            egui::Color32::from_gray(160),
+        );
+    }
+}
+
+/// Shown when the lick track is absent (detector off, warming, or the
+/// audio is silent) so modules never appear "broken" for the missing layer.
+fn draw_no_licks_chip(painter: &egui::Painter, rect: egui::Rect, enabled: bool) {
+    let label = if enabled {
+        "no lick tracks present — listening…"
+    } else {
+        "lick/beat overlay off"
+    };
+    let color = egui::Color32::from_gray(150);
+    let galley = painter.layout_no_wrap(label.to_string(), egui::FontId::monospace(11.0), color);
+    let pad = egui::vec2(8.0, 4.0);
+    let size = galley.size() + pad * 2.0;
+    let chip = egui::Rect::from_min_size(
+        egui::pos2(rect.left() + 12.0, rect.bottom() - size.y - 12.0),
+        size,
+    );
+    painter.rect_filled(
+        chip,
+        4.0,
+        egui::Color32::from_rgba_unmultiplied(0, 0, 0, 150),
+    );
+    painter.galley(chip.min + pad, galley, color);
 }
 
 fn centroid_from_spectrum(spectrum: &[f32]) -> f32 {
@@ -409,6 +533,18 @@ fn config_panel(state: &mut VisualizerState, ui: &mut egui::Ui) {
                 "Overlay a live cross-band coherence readout — the AI-audio \
                  fingerprint metric — in the top-right of the canvas.",
             );
+        ui.checkbox(&mut state.licks_enabled, "Detect licks & beats")
+            .on_hover_text(
+                "Run the live 5-band onset + drum-class detector (kick / snare / \
+                 hat / tom / cymbal) + tempo. Off ⇒ the lick track is absent.",
+            );
+        ui.add_enabled_ui(state.licks_enabled, |ui| {
+            ui.checkbox(&mut state.lick_overlay, "Lick/beat counter-visual")
+                .on_hover_text(
+                    "Draw class-tinted bubbles + a beat-pulse ring over the active \
+                     mode. Shows 'no lick tracks present' while warming or silent.",
+                );
+        });
         ui.add_space(6.0);
         ui.separator();
         ui.add_space(6.0);

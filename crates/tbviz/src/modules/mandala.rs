@@ -106,6 +106,42 @@ impl VizModule for Mandala {
             inner,
             egui::Stroke::new(1.0, egui::Color32::from_gray(60)),
         );
+
+        // Counter-visual: lick events bloom as bubbles orbiting the
+        // mandala — bright hits fly outward from the rim as they age,
+        // so the spiral gets punctuated by drum-class bubbles (the
+        // classic "spiral + bubbles" contrast). Gated on the optional
+        // lick track: no track ⇒ nothing drawn here.
+        if let Some(licks) = ctx.licks.as_ref() {
+            for ev in &licks.events {
+                let life = (ev.age / 1.2).clamp(0.0, 1.0);
+                let alpha = ((1.0 - life) * 220.0) as u8;
+                if alpha < 8 {
+                    continue;
+                }
+                // Angle from the band (per-instrument spoke), radius
+                // grows as the bubble ages and flies out past the rim.
+                let ang = -TAU * 0.25 + TAU * (ev.band as f32 + 0.5) / 5.0;
+                let orbit = inner + (max_radius - inner) * (0.3 + 0.9 * life);
+                let pos = egui::pos2(centre.x + ang.cos() * orbit, centre.y + ang.sin() * orbit);
+                let r = (5.0 + ev.velocity * 20.0) * (1.0 - 0.4 * life);
+                let (cr, cg, cb) = ev.class.color();
+                painter.circle_filled(
+                    pos,
+                    r,
+                    egui::Color32::from_rgba_unmultiplied(cr, cg, cb, (alpha as f32 * 0.5) as u8),
+                );
+                painter.circle_stroke(
+                    pos,
+                    r,
+                    egui::Stroke::new(
+                        1.5,
+                        egui::Color32::from_rgba_unmultiplied(cr, cg, cb, alpha),
+                    ),
+                );
+            }
+        }
+
         painter.text(
             rect.left_top() + egui::vec2(12.0, 12.0),
             egui::Align2::LEFT_TOP,
