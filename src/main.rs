@@ -5,6 +5,7 @@ mod analysis;
 mod app;
 mod audio;
 mod automation;
+mod chordgrid;
 mod cleanup;
 mod coherence;
 mod config;

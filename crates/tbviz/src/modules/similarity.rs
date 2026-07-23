@@ -39,7 +39,7 @@ fn chroma_of(ctx: &FrameCtx<'_>) -> [f32; 12] {
         if !(27.5..=8000.0).contains(&hz) {
             continue;
         }
-        let pc = ((12.0 * (hz / 440.0).log2()).round() as i64).rem_euclid(12) as usize;
+        let pc = ((69.0 + 12.0 * (hz / 440.0).log2()).round() as i64).rem_euclid(12) as usize;
         c[pc] += mag;
     }
     let norm = c.iter().map(|v| v * v).sum::<f32>().sqrt().max(1e-6);
