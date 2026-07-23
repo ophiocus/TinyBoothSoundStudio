@@ -1,0 +1,1671 @@
+[
+  {
+    "family": "Open-position major chords (CAGED \"cowboy\" shapes) — C, A, G, E, D majors plus the open-position F barre, standard tuning EADGBE",
+    "voicings": [
+      {
+        "name": "C major (open)",
+        "root": "C",
+        "quality": "major",
+        "movable": false,
+        "base_fret": 1,
+        "strings": [
+          {
+            "fret": -1,
+            "finger": 0
+          },
+          {
+            "fret": 3,
+            "finger": 3
+          },
+          {
+            "fret": 2,
+            "finger": 2
+          },
+          {
+            "fret": 0,
+            "finger": 0
+          },
+          {
+            "fret": 1,
+            "finger": 1
+          },
+          {
+            "fret": 0,
+            "finger": 0
+          }
+        ]
+      },
+      {
+        "name": "A major (open)",
+        "root": "A",
+        "quality": "major",
+        "movable": false,
+        "base_fret": 1,
+        "strings": [
+          {
+            "fret": -1,
+            "finger": 0
+          },
+          {
+            "fret": 0,
+            "finger": 0
+          },
+          {
+            "fret": 2,
+            "finger": 1
+          },
+          {
+            "fret": 2,
+            "finger": 2
+          },
+          {
+            "fret": 2,
+            "finger": 3
+          },
+          {
+            "fret": 0,
+            "finger": 0
+          }
+        ]
+      },
+      {
+        "name": "G major (open)",
+        "root": "G",
+        "quality": "major",
+        "movable": false,
+        "base_fret": 1,
+        "strings": [
+          {
+            "fret": 3,
+            "finger": 2
+          },
+          {
+            "fret": 2,
+            "finger": 1
+          },
+          {
+            "fret": 0,
+            "finger": 0
+          },
+          {
+            "fret": 0,
+            "finger": 0
+          },
+          {
+            "fret": 0,
+            "finger": 0
+          },
+          {
+            "fret": 3,
+            "finger": 3
+          }
+        ]
+      },
+      {
+        "name": "E major (open)",
+        "root": "E",
+        "quality": "major",
+        "movable": false,
+        "base_fret": 1,
+        "strings": [
+          {
+            "fret": 0,
+            "finger": 0
+          },
+          {
+            "fret": 2,
+            "finger": 2
+          },
+          {
+            "fret": 2,
+            "finger": 3
+          },
+          {
+            "fret": 1,
+            "finger": 1
+          },
+          {
+            "fret": 0,
+            "finger": 0
+          },
+          {
+            "fret": 0,
+            "finger": 0
+          }
+        ]
+      },
+      {
+        "name": "D major (open)",
+        "root": "D",
+        "quality": "major",
+        "movable": false,
+        "base_fret": 1,
+        "strings": [
+          {
+            "fret": -1,
+            "finger": 0
+          },
+          {
+            "fret": -1,
+            "finger": 0
+          },
+          {
+            "fret": 0,
+            "finger": 0
+          },
+          {
+            "fret": 2,
+            "finger": 1
+          },
+          {
+            "fret": 3,
+            "finger": 3
+          },
+          {
+            "fret": 2,
+            "finger": 2
+          }
+        ]
+      },
+      {
+        "name": "F major (full barre, open position)",
+        "root": "F",
+        "quality": "major",
+        "movable": false,
+        "base_fret": 1,
+        "strings": [
+          {
+            "fret": 1,
+            "finger": 1
+          },
+          {
+            "fret": 3,
+            "finger": 3
+          },
+          {
+            "fret": 3,
+            "finger": 4
+          },
+          {
+            "fret": 2,
+            "finger": 2
+          },
+          {
+            "fret": 1,
+            "finger": 1
+          },
+          {
+            "fret": 1,
+            "finger": 1
+          }
+        ]
+      }
+    ],
+    "references": [
+      {
+        "title": "Open Chords For Guitar: Diagrams For All Open Position Chords — Guitar Command",
+        "url": "https://www.guitarcommand.com/open-chords-guitar/"
+      },
+      {
+        "title": "Learn The CAGED System for Guitar — D'Addario",
+        "url": "https://www.daddario.com/blogs/guitar/guitarists-guide-to-the-caged-system"
+      },
+      {
+        "title": "Guitar/Open Chords — Wikibooks",
+        "url": "https://en.wikibooks.org/wiki/Guitar/Open_Chords"
+      },
+      {
+        "title": "The G Major Chord (Open Position) — Fretello",
+        "url": "https://fretello.com/news/skill/g-major-chord-open-position/"
+      },
+      {
+        "title": "Learn 7 Ways to Play E Major — Acoustic Guitar",
+        "url": "https://acousticguitar.com/learn-7-ways-to-play-e-major-chord-by-chord/"
+      }
+    ]
+  },
+  {
+    "family": "Open-position minor chords",
+    "voicings": [
+      {
+        "name": "Am (open)",
+        "root": "A",
+        "quality": "minor",
+        "movable": false,
+        "base_fret": 1,
+        "strings": [
+          {
+            "fret": -1,
+            "finger": 0
+          },
+          {
+            "fret": 0,
+            "finger": 0
+          },
+          {
+            "fret": 2,
+            "finger": 2
+          },
+          {
+            "fret": 2,
+            "finger": 3
+          },
+          {
+            "fret": 1,
+            "finger": 1
+          },
+          {
+            "fret": 0,
+            "finger": 0
+          }
+        ]
+      },
+      {
+        "name": "Em (open)",
+        "root": "E",
+        "quality": "minor",
+        "movable": false,
+        "base_fret": 1,
+        "strings": [
+          {
+            "fret": 0,
+            "finger": 0
+          },
+          {
+            "fret": 2,
+            "finger": 2
+          },
+          {
+            "fret": 2,
+            "finger": 3
+          },
+          {
+            "fret": 0,
+            "finger": 0
+          },
+          {
+            "fret": 0,
+            "finger": 0
+          },
+          {
+            "fret": 0,
+            "finger": 0
+          }
+        ]
+      },
+      {
+        "name": "Dm (open)",
+        "root": "D",
+        "quality": "minor",
+        "movable": false,
+        "base_fret": 1,
+        "strings": [
+          {
+            "fret": -1,
+            "finger": 0
+          },
+          {
+            "fret": -1,
+            "finger": 0
+          },
+          {
+            "fret": 0,
+            "finger": 0
+          },
+          {
+            "fret": 2,
+            "finger": 2
+          },
+          {
+            "fret": 3,
+            "finger": 3
+          },
+          {
+            "fret": 1,
+            "finger": 1
+          }
+        ]
+      }
+    ],
+    "references": [
+      {
+        "title": "JustinGuitar — How to play the Am chord on guitar",
+        "url": "https://www.justinguitar.com/chords/amin"
+      },
+      {
+        "title": "Fretboard Knowledge — The Am Chord in the Open Position",
+        "url": "https://fretboardknowledge.com/guitar/kb/am-chord-open-position-v1/"
+      },
+      {
+        "title": "JamPlay — Em Guitar Chord Chart (E Minor, Standard Tuning)",
+        "url": "https://jamplay.com/tools/guitar-chords/1-standard/5-e/92-minor"
+      },
+      {
+        "title": "National Guitar Academy — How to Play Em Guitar Chord",
+        "url": "https://nationalguitaracademy.com/chords/e-chords/how-to-play-em-guitar-chord-4-easy-ways/"
+      },
+      {
+        "title": "Fender Play — D Minor Chord: How to Play Dm Guitar Chord",
+        "url": "https://www.fender.com/articles/chords/learn-how-to-play-dm-guitar-chord"
+      },
+      {
+        "title": "OnlineGuitarBooks — Open Dm Chord Guitar Shape: Chart and Fingering",
+        "url": "https://onlineguitarbooks.com/dm-chord-open/"
+      }
+    ]
+  },
+  {
+    "family": "Open-position dominant 7th chords",
+    "voicings": [
+      {
+        "name": "C7",
+        "root": "C",
+        "quality": "dom7",
+        "movable": false,
+        "base_fret": 1,
+        "strings": [
+          {
+            "fret": -1,
+            "finger": 0
+          },
+          {
+            "fret": 3,
+            "finger": 3
+          },
+          {
+            "fret": 2,
+            "finger": 2
+          },
+          {
+            "fret": 3,
+            "finger": 4
+          },
+          {
+            "fret": 1,
+            "finger": 1
+          },
+          {
+            "fret": 0,
+            "finger": 0
+          }
+        ]
+      },
+      {
+        "name": "A7",
+        "root": "A",
+        "quality": "dom7",
+        "movable": false,
+        "base_fret": 1,
+        "strings": [
+          {
+            "fret": -1,
+            "finger": 0
+          },
+          {
+            "fret": 0,
+            "finger": 0
+          },
+          {
+            "fret": 2,
+            "finger": 2
+          },
+          {
+            "fret": 0,
+            "finger": 0
+          },
+          {
+            "fret": 2,
+            "finger": 3
+          },
+          {
+            "fret": 0,
+            "finger": 0
+          }
+        ]
+      },
+      {
+        "name": "G7",
+        "root": "G",
+        "quality": "dom7",
+        "movable": false,
+        "base_fret": 1,
+        "strings": [
+          {
+            "fret": 3,
+            "finger": 3
+          },
+          {
+            "fret": 2,
+            "finger": 2
+          },
+          {
+            "fret": 0,
+            "finger": 0
+          },
+          {
+            "fret": 0,
+            "finger": 0
+          },
+          {
+            "fret": 0,
+            "finger": 0
+          },
+          {
+            "fret": 1,
+            "finger": 1
+          }
+        ]
+      },
+      {
+        "name": "E7",
+        "root": "E",
+        "quality": "dom7",
+        "movable": false,
+        "base_fret": 1,
+        "strings": [
+          {
+            "fret": 0,
+            "finger": 0
+          },
+          {
+            "fret": 2,
+            "finger": 2
+          },
+          {
+            "fret": 0,
+            "finger": 0
+          },
+          {
+            "fret": 1,
+            "finger": 1
+          },
+          {
+            "fret": 0,
+            "finger": 0
+          },
+          {
+            "fret": 0,
+            "finger": 0
+          }
+        ]
+      },
+      {
+        "name": "D7",
+        "root": "D",
+        "quality": "dom7",
+        "movable": false,
+        "base_fret": 1,
+        "strings": [
+          {
+            "fret": -1,
+            "finger": 0
+          },
+          {
+            "fret": -1,
+            "finger": 0
+          },
+          {
+            "fret": 0,
+            "finger": 0
+          },
+          {
+            "fret": 2,
+            "finger": 2
+          },
+          {
+            "fret": 1,
+            "finger": 1
+          },
+          {
+            "fret": 2,
+            "finger": 3
+          }
+        ]
+      },
+      {
+        "name": "B7",
+        "root": "B",
+        "quality": "dom7",
+        "movable": false,
+        "base_fret": 1,
+        "strings": [
+          {
+            "fret": -1,
+            "finger": 0
+          },
+          {
+            "fret": 2,
+            "finger": 2
+          },
+          {
+            "fret": 1,
+            "finger": 1
+          },
+          {
+            "fret": 2,
+            "finger": 3
+          },
+          {
+            "fret": 0,
+            "finger": 0
+          },
+          {
+            "fret": 2,
+            "finger": 4
+          }
+        ]
+      }
+    ],
+    "references": [
+      {
+        "title": "Fender Play — How to Play a G7 Chord on Guitar",
+        "url": "https://www.fender.com/articles/chords/how-to-play-a-g7-chord-on-guitar"
+      },
+      {
+        "title": "Fender Play — How to Play a C7 Guitar Chord",
+        "url": "https://www.fender.com/articles/chords/learn-how-to-play-c7-guitar-chord"
+      },
+      {
+        "title": "Fender Play — How to Play an E7 Guitar Chord",
+        "url": "https://www.fender.com/articles/chords/learn-how-to-play-e7-guitar-chord"
+      },
+      {
+        "title": "Fender Play — How to Play a D7 Guitar Chord",
+        "url": "https://www.fender.com/articles/chords/learn-how-to-play-d7-guitar-chord"
+      },
+      {
+        "title": "Fender Play — How to Play a B7 Chord on Guitar",
+        "url": "https://www.fender.com/articles/chords/learn-how-to-play-b7-guitar-chord"
+      },
+      {
+        "title": "OnlineGuitarBooks — Open A7 Chord Guitar Shape: Chart and Fingering",
+        "url": "https://onlineguitarbooks.com/a7-chord-open/"
+      },
+      {
+        "title": "Guitar Chords Library — A7 Chord Diagram & Finger Positions",
+        "url": "https://guitarchordslibrary.org/chords/a7"
+      },
+      {
+        "title": "National Guitar Academy — C7 Guitar Chord",
+        "url": "https://nationalguitaracademy.com/chords/c-chords/c7-guitar-chord/"
+      }
+    ]
+  },
+  {
+    "family": "Open-position minor-7th (m7) and major-7th (maj7) chords — standard tuning EADGBE",
+    "voicings": [
+      {
+        "name": "Am7",
+        "root": "A",
+        "quality": "min7",
+        "movable": false,
+        "base_fret": 1,
+        "strings": [
+          {
+            "fret": -1,
+            "finger": 0
+          },
+          {
+            "fret": 0,
+            "finger": 0
+          },
+          {
+            "fret": 2,
+            "finger": 2
+          },
+          {
+            "fret": 0,
+            "finger": 0
+          },
+          {
+            "fret": 1,
+            "finger": 1
+          },
+          {
+            "fret": 0,
+            "finger": 0
+          }
+        ]
+      },
+      {
+        "name": "Em7",
+        "root": "E",
+        "quality": "min7",
+        "movable": false,
+        "base_fret": 1,
+        "strings": [
+          {
+            "fret": 0,
+            "finger": 0
+          },
+          {
+            "fret": 2,
+            "finger": 2
+          },
+          {
+            "fret": 0,
+            "finger": 0
+          },
+          {
+            "fret": 0,
+            "finger": 0
+          },
+          {
+            "fret": 0,
+            "finger": 0
+          },
+          {
+            "fret": 0,
+            "finger": 0
+          }
+        ]
+      },
+      {
+        "name": "Dm7",
+        "root": "D",
+        "quality": "min7",
+        "movable": false,
+        "base_fret": 1,
+        "strings": [
+          {
+            "fret": -1,
+            "finger": 0
+          },
+          {
+            "fret": -1,
+            "finger": 0
+          },
+          {
+            "fret": 0,
+            "finger": 0
+          },
+          {
+            "fret": 2,
+            "finger": 2
+          },
+          {
+            "fret": 1,
+            "finger": 1
+          },
+          {
+            "fret": 1,
+            "finger": 1
+          }
+        ]
+      },
+      {
+        "name": "Cmaj7",
+        "root": "C",
+        "quality": "maj7",
+        "movable": false,
+        "base_fret": 1,
+        "strings": [
+          {
+            "fret": -1,
+            "finger": 0
+          },
+          {
+            "fret": 3,
+            "finger": 3
+          },
+          {
+            "fret": 2,
+            "finger": 2
+          },
+          {
+            "fret": 0,
+            "finger": 0
+          },
+          {
+            "fret": 0,
+            "finger": 0
+          },
+          {
+            "fret": 0,
+            "finger": 0
+          }
+        ]
+      },
+      {
+        "name": "Amaj7",
+        "root": "A",
+        "quality": "maj7",
+        "movable": false,
+        "base_fret": 1,
+        "strings": [
+          {
+            "fret": -1,
+            "finger": 0
+          },
+          {
+            "fret": 0,
+            "finger": 0
+          },
+          {
+            "fret": 2,
+            "finger": 2
+          },
+          {
+            "fret": 1,
+            "finger": 1
+          },
+          {
+            "fret": 2,
+            "finger": 3
+          },
+          {
+            "fret": 0,
+            "finger": 0
+          }
+        ]
+      },
+      {
+        "name": "Gmaj7",
+        "root": "G",
+        "quality": "maj7",
+        "movable": false,
+        "base_fret": 1,
+        "strings": [
+          {
+            "fret": 3,
+            "finger": 2
+          },
+          {
+            "fret": 2,
+            "finger": 1
+          },
+          {
+            "fret": 0,
+            "finger": 0
+          },
+          {
+            "fret": 0,
+            "finger": 0
+          },
+          {
+            "fret": 0,
+            "finger": 0
+          },
+          {
+            "fret": 2,
+            "finger": 3
+          }
+        ]
+      },
+      {
+        "name": "Emaj7",
+        "root": "E",
+        "quality": "maj7",
+        "movable": false,
+        "base_fret": 1,
+        "strings": [
+          {
+            "fret": 0,
+            "finger": 0
+          },
+          {
+            "fret": 2,
+            "finger": 2
+          },
+          {
+            "fret": 1,
+            "finger": 1
+          },
+          {
+            "fret": 1,
+            "finger": 1
+          },
+          {
+            "fret": 0,
+            "finger": 0
+          },
+          {
+            "fret": 0,
+            "finger": 0
+          }
+        ]
+      },
+      {
+        "name": "Dmaj7",
+        "root": "D",
+        "quality": "maj7",
+        "movable": false,
+        "base_fret": 1,
+        "strings": [
+          {
+            "fret": -1,
+            "finger": 0
+          },
+          {
+            "fret": -1,
+            "finger": 0
+          },
+          {
+            "fret": 0,
+            "finger": 0
+          },
+          {
+            "fret": 2,
+            "finger": 1
+          },
+          {
+            "fret": 2,
+            "finger": 2
+          },
+          {
+            "fret": 2,
+            "finger": 3
+          }
+        ]
+      },
+      {
+        "name": "Fmaj7",
+        "root": "F",
+        "quality": "maj7",
+        "movable": false,
+        "base_fret": 1,
+        "strings": [
+          {
+            "fret": -1,
+            "finger": 0
+          },
+          {
+            "fret": -1,
+            "finger": 0
+          },
+          {
+            "fret": 3,
+            "finger": 3
+          },
+          {
+            "fret": 2,
+            "finger": 2
+          },
+          {
+            "fret": 1,
+            "finger": 1
+          },
+          {
+            "fret": 0,
+            "finger": 0
+          }
+        ]
+      }
+    ],
+    "references": [
+      {
+        "title": "How to Play Am7, Em7, and Dm7 — Acoustic Guitar",
+        "url": "https://acousticguitar.com/how-to-play-am7-em7-and-dm7-chord-by-chord/"
+      },
+      {
+        "title": "Em7 Guitar Chord: An Essential Guide — National Guitar Academy",
+        "url": "https://nationalguitaracademy.com/chords/e-chords/em7-guitar-chord/"
+      },
+      {
+        "title": "CMaj7 chord — JustinGuitar",
+        "url": "https://www.justinguitar.com/chords/cmaj7"
+      },
+      {
+        "title": "Amaj7 guitar chord — guitar-chord.org",
+        "url": "https://www.guitar-chord.org/amaj7.html"
+      },
+      {
+        "title": "Emaj7 guitar chord — guitar-chord.org",
+        "url": "https://www.guitar-chord.org/emaj7.html"
+      },
+      {
+        "title": "Dmaj7 guitar chord — guitar-chord.org",
+        "url": "https://www.guitar-chord.org/dmaj7.html"
+      },
+      {
+        "title": "Cmaj7 guitar chord — guitar-chord.org",
+        "url": "https://www.guitar-chord.org/cmaj7.html"
+      }
+    ]
+  },
+  {
+    "family": "Moveable E-shape barre templates (root on 6th/low-E string)",
+    "voicings": [
+      {
+        "name": "E-shape major barre",
+        "root": "movable",
+        "quality": "major",
+        "movable": true,
+        "base_fret": 1,
+        "strings": [
+          {
+            "fret": 1,
+            "finger": 1
+          },
+          {
+            "fret": 3,
+            "finger": 3
+          },
+          {
+            "fret": 3,
+            "finger": 4
+          },
+          {
+            "fret": 2,
+            "finger": 2
+          },
+          {
+            "fret": 1,
+            "finger": 1
+          },
+          {
+            "fret": 1,
+            "finger": 1
+          }
+        ]
+      },
+      {
+        "name": "E-shape minor barre",
+        "root": "movable",
+        "quality": "minor",
+        "movable": true,
+        "base_fret": 1,
+        "strings": [
+          {
+            "fret": 1,
+            "finger": 1
+          },
+          {
+            "fret": 3,
+            "finger": 3
+          },
+          {
+            "fret": 3,
+            "finger": 4
+          },
+          {
+            "fret": 1,
+            "finger": 1
+          },
+          {
+            "fret": 1,
+            "finger": 1
+          },
+          {
+            "fret": 1,
+            "finger": 1
+          }
+        ]
+      },
+      {
+        "name": "E-shape dominant-7 barre",
+        "root": "movable",
+        "quality": "dom7",
+        "movable": true,
+        "base_fret": 1,
+        "strings": [
+          {
+            "fret": 1,
+            "finger": 1
+          },
+          {
+            "fret": 3,
+            "finger": 3
+          },
+          {
+            "fret": 1,
+            "finger": 1
+          },
+          {
+            "fret": 2,
+            "finger": 2
+          },
+          {
+            "fret": 1,
+            "finger": 1
+          },
+          {
+            "fret": 1,
+            "finger": 1
+          }
+        ]
+      },
+      {
+        "name": "E-shape minor-7 barre",
+        "root": "movable",
+        "quality": "min7",
+        "movable": true,
+        "base_fret": 1,
+        "strings": [
+          {
+            "fret": 1,
+            "finger": 1
+          },
+          {
+            "fret": 3,
+            "finger": 3
+          },
+          {
+            "fret": 1,
+            "finger": 1
+          },
+          {
+            "fret": 1,
+            "finger": 1
+          },
+          {
+            "fret": 1,
+            "finger": 1
+          },
+          {
+            "fret": 1,
+            "finger": 1
+          }
+        ]
+      },
+      {
+        "name": "E-shape major-7 barre",
+        "root": "movable",
+        "quality": "maj7",
+        "movable": true,
+        "base_fret": 1,
+        "strings": [
+          {
+            "fret": 1,
+            "finger": 1
+          },
+          {
+            "fret": 3,
+            "finger": 3
+          },
+          {
+            "fret": 2,
+            "finger": 4
+          },
+          {
+            "fret": 2,
+            "finger": 2
+          },
+          {
+            "fret": 1,
+            "finger": 1
+          },
+          {
+            "fret": 1,
+            "finger": 1
+          }
+        ]
+      }
+    ],
+    "references": [
+      {
+        "title": "Applied Guitar Theory — Essential Barre Chords (E-shape major/minor/dom7/min7/maj7 patterns)",
+        "url": "https://appliedguitartheory.com/lessons/barre-chords/"
+      },
+      {
+        "title": "JustinGuitar — E-Shape Chords: Dominant 7th",
+        "url": "https://www.justinguitar.com/guitar-lessons/e-shape-chords-dominant-7th-4b-003"
+      },
+      {
+        "title": "Harmony & Guitar — Barre Chords in E Shape (Root on 6th String)",
+        "url": "https://harpnguitar.com/course-list/guitar-chords/barre-chords-in-e-shape/"
+      },
+      {
+        "title": "Guitaring — E-Shape Barre Chords: One Shape, All 12 Major Chords",
+        "url": "https://www.guitaring.net/learn/e-shape-barre-chords"
+      },
+      {
+        "title": "Dave Jones Guitar — E Shape Barre Chords (PDF)",
+        "url": "http://www.davejonesguitar.co.uk/pdf/EShapeBarreChords.pdf"
+      }
+    ]
+  },
+  {
+    "family": "Moveable A-shape barre templates (rooted on the A / 5th string)",
+    "voicings": [
+      {
+        "name": "A-shape major barre",
+        "root": "movable",
+        "quality": "major",
+        "movable": true,
+        "base_fret": 1,
+        "strings": [
+          {
+            "fret": -1,
+            "finger": 0
+          },
+          {
+            "fret": 1,
+            "finger": 1
+          },
+          {
+            "fret": 3,
+            "finger": 2
+          },
+          {
+            "fret": 3,
+            "finger": 3
+          },
+          {
+            "fret": 3,
+            "finger": 4
+          },
+          {
+            "fret": 1,
+            "finger": 1
+          }
+        ]
+      },
+      {
+        "name": "A-shape minor barre",
+        "root": "movable",
+        "quality": "minor",
+        "movable": true,
+        "base_fret": 1,
+        "strings": [
+          {
+            "fret": -1,
+            "finger": 0
+          },
+          {
+            "fret": 1,
+            "finger": 1
+          },
+          {
+            "fret": 3,
+            "finger": 3
+          },
+          {
+            "fret": 3,
+            "finger": 4
+          },
+          {
+            "fret": 2,
+            "finger": 2
+          },
+          {
+            "fret": 1,
+            "finger": 1
+          }
+        ]
+      },
+      {
+        "name": "A-shape dominant-7 barre",
+        "root": "movable",
+        "quality": "dom7",
+        "movable": true,
+        "base_fret": 1,
+        "strings": [
+          {
+            "fret": -1,
+            "finger": 0
+          },
+          {
+            "fret": 1,
+            "finger": 1
+          },
+          {
+            "fret": 3,
+            "finger": 2
+          },
+          {
+            "fret": 1,
+            "finger": 1
+          },
+          {
+            "fret": 3,
+            "finger": 3
+          },
+          {
+            "fret": 1,
+            "finger": 1
+          }
+        ]
+      },
+      {
+        "name": "A-shape minor-7 barre",
+        "root": "movable",
+        "quality": "min7",
+        "movable": true,
+        "base_fret": 1,
+        "strings": [
+          {
+            "fret": -1,
+            "finger": 0
+          },
+          {
+            "fret": 1,
+            "finger": 1
+          },
+          {
+            "fret": 3,
+            "finger": 3
+          },
+          {
+            "fret": 1,
+            "finger": 1
+          },
+          {
+            "fret": 2,
+            "finger": 2
+          },
+          {
+            "fret": 1,
+            "finger": 1
+          }
+        ]
+      },
+      {
+        "name": "A-shape major-7 barre",
+        "root": "movable",
+        "quality": "maj7",
+        "movable": true,
+        "base_fret": 1,
+        "strings": [
+          {
+            "fret": -1,
+            "finger": 0
+          },
+          {
+            "fret": 1,
+            "finger": 1
+          },
+          {
+            "fret": 3,
+            "finger": 3
+          },
+          {
+            "fret": 2,
+            "finger": 2
+          },
+          {
+            "fret": 3,
+            "finger": 4
+          },
+          {
+            "fret": 1,
+            "finger": 1
+          }
+        ]
+      }
+    ],
+    "references": [
+      {
+        "title": "A Shape Barre Chords — JustinGuitar",
+        "url": "https://www.justinguitar.com/modules/a-shape-barre-chords"
+      },
+      {
+        "title": "A Form Barre Chords — Guitar a Lorange",
+        "url": "https://www.guitaralorange.com/aform"
+      },
+      {
+        "title": "Essential Barre Chords (5th-string root) — Applied Guitar Theory",
+        "url": "https://appliedguitartheory.com/lessons/barre-chords/"
+      },
+      {
+        "title": "Seventh Barre Chords (A-shape 7/m7/maj7) — Ren Himself",
+        "url": "https://www.renhimself.com/technique/seventh-barre-chords/"
+      },
+      {
+        "title": "Bb7 Guitar Chord (A7-shape barre, x13131) — JamPlay",
+        "url": "https://jamplay.com/tools/guitar-chords/1-standard/2-b/55-b7"
+      }
+    ]
+  },
+  {
+    "family": "Common Extras (diminished, sus2, sus4, add9)",
+    "voicings": [
+      {
+        "name": "Adim (open)",
+        "root": "A",
+        "quality": "dim",
+        "movable": false,
+        "base_fret": 1,
+        "strings": [
+          {
+            "fret": -1,
+            "finger": 0
+          },
+          {
+            "fret": 0,
+            "finger": 0
+          },
+          {
+            "fret": 1,
+            "finger": 1
+          },
+          {
+            "fret": 2,
+            "finger": 3
+          },
+          {
+            "fret": 1,
+            "finger": 2
+          },
+          {
+            "fret": -1,
+            "finger": 0
+          }
+        ]
+      },
+      {
+        "name": "Diminished 7th (A-string root, movable)",
+        "root": "movable",
+        "quality": "dim",
+        "movable": true,
+        "base_fret": 1,
+        "strings": [
+          {
+            "fret": -1,
+            "finger": 0
+          },
+          {
+            "fret": 2,
+            "finger": 2
+          },
+          {
+            "fret": 3,
+            "finger": 3
+          },
+          {
+            "fret": 1,
+            "finger": 1
+          },
+          {
+            "fret": 3,
+            "finger": 4
+          },
+          {
+            "fret": -1,
+            "finger": 0
+          }
+        ]
+      },
+      {
+        "name": "Dsus2",
+        "root": "D",
+        "quality": "sus2",
+        "movable": false,
+        "base_fret": 1,
+        "strings": [
+          {
+            "fret": -1,
+            "finger": 0
+          },
+          {
+            "fret": -1,
+            "finger": 0
+          },
+          {
+            "fret": 0,
+            "finger": 0
+          },
+          {
+            "fret": 2,
+            "finger": 1
+          },
+          {
+            "fret": 3,
+            "finger": 3
+          },
+          {
+            "fret": 0,
+            "finger": 0
+          }
+        ]
+      },
+      {
+        "name": "Dsus4",
+        "root": "D",
+        "quality": "sus4",
+        "movable": false,
+        "base_fret": 1,
+        "strings": [
+          {
+            "fret": -1,
+            "finger": 0
+          },
+          {
+            "fret": -1,
+            "finger": 0
+          },
+          {
+            "fret": 0,
+            "finger": 0
+          },
+          {
+            "fret": 2,
+            "finger": 1
+          },
+          {
+            "fret": 3,
+            "finger": 3
+          },
+          {
+            "fret": 3,
+            "finger": 4
+          }
+        ]
+      },
+      {
+        "name": "Asus2",
+        "root": "A",
+        "quality": "sus2",
+        "movable": false,
+        "base_fret": 1,
+        "strings": [
+          {
+            "fret": -1,
+            "finger": 0
+          },
+          {
+            "fret": 0,
+            "finger": 0
+          },
+          {
+            "fret": 2,
+            "finger": 1
+          },
+          {
+            "fret": 2,
+            "finger": 2
+          },
+          {
+            "fret": 0,
+            "finger": 0
+          },
+          {
+            "fret": 0,
+            "finger": 0
+          }
+        ]
+      },
+      {
+        "name": "Asus4",
+        "root": "A",
+        "quality": "sus4",
+        "movable": false,
+        "base_fret": 1,
+        "strings": [
+          {
+            "fret": -1,
+            "finger": 0
+          },
+          {
+            "fret": 0,
+            "finger": 0
+          },
+          {
+            "fret": 2,
+            "finger": 1
+          },
+          {
+            "fret": 2,
+            "finger": 2
+          },
+          {
+            "fret": 3,
+            "finger": 3
+          },
+          {
+            "fret": 0,
+            "finger": 0
+          }
+        ]
+      },
+      {
+        "name": "Esus4",
+        "root": "E",
+        "quality": "sus4",
+        "movable": false,
+        "base_fret": 1,
+        "strings": [
+          {
+            "fret": 0,
+            "finger": 0
+          },
+          {
+            "fret": 2,
+            "finger": 1
+          },
+          {
+            "fret": 2,
+            "finger": 2
+          },
+          {
+            "fret": 2,
+            "finger": 3
+          },
+          {
+            "fret": 0,
+            "finger": 0
+          },
+          {
+            "fret": 0,
+            "finger": 0
+          }
+        ]
+      },
+      {
+        "name": "Cadd9",
+        "root": "C",
+        "quality": "add9",
+        "movable": false,
+        "base_fret": 1,
+        "strings": [
+          {
+            "fret": -1,
+            "finger": 0
+          },
+          {
+            "fret": 3,
+            "finger": 2
+          },
+          {
+            "fret": 2,
+            "finger": 1
+          },
+          {
+            "fret": 0,
+            "finger": 0
+          },
+          {
+            "fret": 3,
+            "finger": 3
+          },
+          {
+            "fret": 3,
+            "finger": 4
+          }
+        ]
+      },
+      {
+        "name": "Gadd9",
+        "root": "G",
+        "quality": "add9",
+        "movable": false,
+        "base_fret": 1,
+        "strings": [
+          {
+            "fret": 3,
+            "finger": 2
+          },
+          {
+            "fret": 2,
+            "finger": 1
+          },
+          {
+            "fret": 0,
+            "finger": 0
+          },
+          {
+            "fret": 2,
+            "finger": 3
+          },
+          {
+            "fret": 0,
+            "finger": 0
+          },
+          {
+            "fret": 3,
+            "finger": 4
+          }
+        ]
+      },
+      {
+        "name": "Eadd9",
+        "root": "E",
+        "quality": "add9",
+        "movable": false,
+        "base_fret": 1,
+        "strings": [
+          {
+            "fret": 0,
+            "finger": 0
+          },
+          {
+            "fret": 2,
+            "finger": 2
+          },
+          {
+            "fret": 2,
+            "finger": 3
+          },
+          {
+            "fret": 1,
+            "finger": 1
+          },
+          {
+            "fret": 0,
+            "finger": 0
+          },
+          {
+            "fret": 2,
+            "finger": 4
+          }
+        ]
+      }
+    ],
+    "references": [
+      {
+        "title": "Diminished (dim) chords on guitar — Guitar-Chord.org",
+        "url": "https://www.guitar-chord.org/dim.html"
+      },
+      {
+        "title": "Diminished Guitar Chords: Triads, Half-Diminished and Dim 7th — FaChords",
+        "url": "https://www.fachords.com/diminished-guitar-chords/"
+      },
+      {
+        "title": "Sus4 chords on guitar — Guitar-Chord.org",
+        "url": "https://www.guitar-chord.org/sus4-chords.html"
+      },
+      {
+        "title": "How To Play The Dsus Guitar Chord (Dsus2 & Dsus4) — StayTunedGuitar",
+        "url": "https://staytunedguitar.com/dsus-guitar-chord"
+      },
+      {
+        "title": "Dsus2/4, Asus2/4 Chords — Andy Guitar",
+        "url": "https://www.andyguitar.co.uk/videos/dsus24-asus24-chords"
+      },
+      {
+        "title": "Add9 chords on guitar — Guitar-Chord.org",
+        "url": "https://www.guitar-chord.org/add9.html"
+      }
+    ]
+  }
+]
