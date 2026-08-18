@@ -242,7 +242,12 @@ pub fn render_chord_video(
             .arg("yuv420p")
             .arg("-r")
             .arg(opts.fps.to_string())
-            .arg("-vsync")
+            // `-fps_mode`, NOT the older `-vsync`: ffmpeg *removed* `-vsync`
+            // (present in 2026-06 builds, gone by 2026-08), so a bundled or
+            // system ffmpeg that happens to be current would fail the whole
+            // render with "Unrecognized option 'vsync'". `-fps_mode` exists
+            // since ffmpeg 5.1 and works on both sides of that removal.
+            .arg("-fps_mode")
             .arg("cfr");
         if encoder == "libx264" {
             cmd.arg("-crf").arg("20");
@@ -548,6 +553,128 @@ mod tests {
         eprintln!("OK: mp3 source → audio stream-copied as {acodec}");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Run the whole pipeline over a **real song** and dump what it found.
+    ///
+    /// Synthesised triads are a soft target; a dense produced mix (distorted
+    /// guitars, cymbals, vocals) is where full-mix chord recognition actually
+    /// gets stressed. Point this at a file and inspect the result:
+    ///
+    /// ```text
+    /// TBSS_CHORD_FIXTURE="C:\path\to\song.mp3" \
+    ///   cargo test --bin tinybooth-sound-studio real_song -- --ignored --nocapture
+    /// ```
+    ///
+    /// Set `TBSS_CHORD_RENDER=1` to also mux the video (slower). Skips
+    /// cleanly when the env var isn't set, so it never fails a normal run.
+    #[test]
+    #[ignore = "needs TBSS_CHORD_FIXTURE=<audio file>; run with --ignored"]
+    fn real_song_pipeline() {
+        let Ok(fixture) = std::env::var("TBSS_CHORD_FIXTURE") else {
+            eprintln!("TBSS_CHORD_FIXTURE not set — nothing to analyse");
+            return;
+        };
+        let path = std::path::PathBuf::from(&fixture);
+        assert!(path.is_file(), "no such file: {}", path.display());
+
+        let (mono, sr) = crate::audiodecode::decode_audio_mono(&path).expect("decode");
+        let secs = mono.len() as f32 / sr as f32;
+        eprintln!(
+            "source: {}\n  {:.1}s @ {} Hz",
+            path.file_name().unwrap_or_default().to_string_lossy(),
+            secs,
+            sr
+        );
+
+        let grid = crate::chordgrid::analyze(&mono, sr);
+        let db = ChordDb::build();
+        let spans = crate::chordvoice::resolve_spans(&grid, &db);
+        assert!(!spans.is_empty(), "no spans detected");
+
+        let weak = spans.iter().filter(|s| s.low_confidence).count();
+        let nc = spans.iter().filter(|s| s.chord.is_none()).count();
+        let mean: f32 = spans.iter().map(|s| s.confidence).sum::<f32>() / spans.len().max(1) as f32;
+        eprintln!(
+            "  {:.1} BPM · {} beats · {} spans ({} weak, {} N.C.) · mean confidence {:.2}",
+            grid.bpm,
+            grid.beat_times.len(),
+            spans.len(),
+            weak,
+            nc,
+            mean
+        );
+
+        // Which chords dominate, and does every one resolve to a diagram?
+        let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for s in &spans {
+            *counts.entry(s.name.clone()).or_default() += 1;
+        }
+        let mut ranked: Vec<_> = counts.into_iter().collect();
+        ranked.sort_by_key(|r| std::cmp::Reverse(r.1));
+        eprintln!(
+            "  chord histogram: {}",
+            ranked
+                .iter()
+                .take(12)
+                .map(|(n, c)| format!("{n}×{c}"))
+                .collect::<Vec<_>>()
+                .join("  ")
+        );
+        eprintln!(
+            "  first 24 spans: {}",
+            spans
+                .iter()
+                .take(24)
+                .map(|s| s.name.clone())
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+        if let Some((a, b)) = grid.verb_span {
+            eprintln!(
+                "  verb: {a:.2}s–{b:.2}s · core progression: {}",
+                grid.core_progression
+                    .iter()
+                    .map(|c| c.name())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            );
+        } else {
+            eprintln!("  verb: none detected");
+        }
+
+        // Every non-N.C. span must have produced a renderable voicing — this is
+        // the "a chord is only usable if it's in the DB" contract meeting real
+        // material rather than a synthetic fixture.
+        let unresolved: Vec<&str> = spans
+            .iter()
+            .filter(|s| s.chord.is_some() && s.voicing.is_none())
+            .map(|s| s.name.as_str())
+            .collect();
+        assert!(
+            unresolved.is_empty(),
+            "chords with no voicing in the DB: {unresolved:?}"
+        );
+        eprintln!(
+            "  all {} chorded spans resolved to a voicing",
+            spans.len() - nc
+        );
+
+        if std::env::var("TBSS_CHORD_RENDER").is_ok() {
+            let out = path.with_extension("chords.mp4");
+            let opts = VideoOpts {
+                width: 960,
+                height: 540,
+                ..Default::default()
+            };
+            let made = render_chord_video(&spans, &db, &path, &out, &opts).expect("render");
+            let size = std::fs::metadata(&made).unwrap().len();
+            eprintln!(
+                "  rendered {} ({:.1} MB)",
+                made.display(),
+                size as f64 / 1e6
+            );
+        }
     }
 
     #[test]
