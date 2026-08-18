@@ -495,6 +495,58 @@ mod tests {
             "muxed duration {dur:.2}s drifted from source {expected:.2}s"
         );
         eprintln!("OK: {size} bytes, {dur:.2}s, encoder-probed H.264");
+
+        // ── the real-world case: an MP3 source ──────────────────────────
+        // Encode the same audio to mp3, re-run the whole chain from it, and
+        // assert the audio was *stream-copied* (codec still mp3, never
+        // re-encoded) — that's the epic's "untouched audio" promise holding
+        // for a compressed source.
+        let ffmpeg = crate::export::find_ffmpeg().expect("ffmpeg");
+        let mp3 = dir.join("slice.mp3");
+        let st = Command::new(&ffmpeg)
+            .args(["-y", "-v", "error", "-i"])
+            .arg(&wav)
+            .args(["-codec:a", "libmp3lame", "-b:a", "192k"])
+            .arg(&mp3)
+            .status()
+            .unwrap();
+        assert!(st.success(), "encoding the test mp3 failed");
+
+        let (mono_mp3, sr_mp3) = crate::audiodecode::decode_audio_mono(&mp3).unwrap();
+        let grid_mp3 = chordgrid::analyze(&mono_mp3, sr_mp3);
+        let spans_mp3 = crate::chordvoice::resolve_spans(&grid_mp3, &db);
+        let names: Vec<String> = spans_mp3.iter().map(|s| s.name.clone()).collect();
+        eprintln!(
+            "mp3: bpm={:.1} spans={} [{}]",
+            grid_mp3.bpm,
+            spans_mp3.len(),
+            names.join(" ")
+        );
+        assert!(!spans_mp3.is_empty(), "no spans from the mp3 source");
+
+        let out_mp3 = dir.join("slice-from-mp3.mp4");
+        render_chord_video(&spans_mp3, &db, &mp3, &out_mp3, &opts).expect("render from mp3");
+        let probe2 = Command::new("ffprobe")
+            .args([
+                "-v",
+                "error",
+                "-select_streams",
+                "a:0",
+                "-show_entries",
+                "stream=codec_name",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+            ])
+            .arg(&out_mp3)
+            .output()
+            .expect("ffprobe");
+        let acodec = String::from_utf8_lossy(&probe2.stdout).trim().to_string();
+        assert_eq!(
+            acodec, "mp3",
+            "mp3 audio should be stream-copied, not re-encoded (got {acodec})"
+        );
+        eprintln!("OK: mp3 source → audio stream-copied as {acodec}");
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 

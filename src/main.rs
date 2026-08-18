@@ -4,6 +4,7 @@ mod album;
 mod analysis;
 mod app;
 mod audio;
+mod audiodecode;
 mod automation;
 mod chorddb;
 mod chordgrid;

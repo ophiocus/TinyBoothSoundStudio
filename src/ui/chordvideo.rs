@@ -20,7 +20,7 @@
 use crate::app::{ChordJobMsg, ChordVideoUiState, TinyBoothApp};
 use crate::chordgrid::{ChordLabel, ChordQuality};
 use eframe::egui;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 pub fn show(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
     poll_job(app, ui.ctx());
@@ -298,7 +298,8 @@ fn diagram_preview(st: &mut ChordVideoUiState, ui: &mut egui::Ui) {
 
 fn do_load(st: &mut ChordVideoUiState) {
     let Some(p) = rfd::FileDialog::new()
-        .add_filter("Audio (.wav)", &["wav"])
+        .add_filter("Audio", &crate::audiodecode::SUPPORTED_EXTS)
+        .add_filter("All files", &["*"])
         .pick_file()
     else {
         return;
@@ -317,7 +318,7 @@ fn do_analyze(st: &mut ChordVideoUiState) {
     };
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let msg = match decode_wav_mono(&path) {
+        let msg = match crate::audiodecode::decode_audio_mono(&path) {
             Ok((mono, sr)) => {
                 let grid = crate::chordgrid::analyze(&mono, sr);
                 ChordJobMsg::Analyzed(Box::new(grid))
@@ -413,33 +414,4 @@ fn poll_job(app: &mut TinyBoothApp, ctx: &egui::Context) {
             app.chordvideo_state.job = None;
         }
     }
-}
-
-/// Decode a WAV to mono `f32` for the analyser. Handles int and float sample
-/// formats and downmixes any channel count.
-fn decode_wav_mono(path: &Path) -> anyhow::Result<(Vec<f32>, u32)> {
-    use anyhow::Context as _;
-    let mut reader =
-        hound::WavReader::open(path).with_context(|| format!("opening {}", path.display()))?;
-    let spec = reader.spec();
-    let ch = spec.channels.max(1) as usize;
-    let interleaved: Vec<f32> = match spec.sample_format {
-        hound::SampleFormat::Float => reader.samples::<f32>().filter_map(Result::ok).collect(),
-        hound::SampleFormat::Int => {
-            let scale = 1.0 / (1i64 << (spec.bits_per_sample - 1)) as f32;
-            reader
-                .samples::<i32>()
-                .filter_map(Result::ok)
-                .map(|s| s as f32 * scale)
-                .collect()
-        }
-    };
-    let mono: Vec<f32> = interleaved
-        .chunks(ch)
-        .map(|f| f.iter().sum::<f32>() / ch as f32)
-        .collect();
-    if mono.is_empty() {
-        anyhow::bail!("no audio samples decoded");
-    }
-    Ok((mono, spec.sample_rate))
 }
