@@ -14,6 +14,7 @@ mod crossfade;
 mod crossfade_player;
 mod dsp;
 mod export;
+mod fretboard;
 mod generator;
 mod git_update;
 mod lufs;
