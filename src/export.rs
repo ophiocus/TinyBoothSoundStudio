@@ -464,7 +464,9 @@ fn encode_via_ffmpeg(
     Ok(())
 }
 
-fn find_ffmpeg() -> Option<PathBuf> {
+/// Locate an ffmpeg binary. Shared with the FR-0013 chord-video muxer so both
+/// paths honour the same bundled-then-PATH search order.
+pub(crate) fn find_ffmpeg() -> Option<PathBuf> {
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             let direct = dir.join("ffmpeg.exe");
