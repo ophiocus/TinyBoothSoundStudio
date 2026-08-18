@@ -8,6 +8,87 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); thi
 
 (Nothing yet — known issues all resolved as of v0.4.23.)
 
+## [0.4.76] — 2026-08-18
+
+### Changed — chord recognition: tempo, smoothing, and chord-quality accuracy
+
+v0.4.75 shipped with a known limitation: on dense, real-world mixes the
+analyser over-segmented badly and labelled almost everything a seventh. On a
+four-minute rock track it produced **494 chord spans** — one every half
+second — with a histogram of `Dm7×61  Dmaj7×59  D7×59`: major, minor and
+dominant on the same root in near-equal numbers, which cannot all be right.
+
+Three separate defects were behind that. Each was found by running real audio
+through the pipeline, and each fix is measured against it rather than assumed.
+
+**Tempo estimation — two bugs.**
+
+- The integer frame-lag was rounded to nearest, so the fast edge of the
+  60–180 BPM search band became lag 14 at 43.07 fps — **184.6 BPM, a tempo
+  outside the range being searched**. Lag bounds now round *outward* (ceiling
+  at the fast end, floor at the slow end) and the result is clamped.
+- The candidate score divided the autocorrelation by the lag, described as a
+  preference for slower tempi. It did the opposite: the overlap window
+  already shrinks as lag grows, so dividing by lag *compounded* a bias toward
+  short lags rather than countering it — which is why real music pinned
+  itself to the fastest available bucket. The score is now normalised by the
+  overlap count, with a **log-Gaussian tempo prior** that is symmetric in
+  octaves, so half-time and double-time are penalised equally.
+- Added parabolic sub-frame refinement of the winning lag. Integer lags
+  quantise about 12 BPM apart at the fast end (lag 14/15/16 land on
+  184.6/172.3/161.5), which is far coarser than the tempo itself.
+
+On the test track: **184.6 → 126.8 BPM**, inside the band.
+
+**Chords are now decoded as a sequence, not beat by beat.**
+
+Each beat used to be labelled independently, so ordinary chroma wobble on a
+dense mix flipped the winning template constantly. A chord is a *held*
+object, so the whole track is now **Viterbi-decoded** across the 72 chords
+plus a "no chord" state, with a self-transition prior: holding the current
+chord is free, changing costs a fixed penalty, and a candidate must clearly
+beat the incumbent to displace it.
+
+The penalty was swept against the real track rather than guessed (the table
+lives in the source next to the constant). It is set toward the
+*over*-segmenting end on purpose: the editable grid can merge neighbouring
+spans trivially, whereas a chord change the decoder never emitted cannot be
+recovered by editing at all.
+
+**Sevenths no longer win on arithmetic alone.**
+
+L2-normalised binary chord templates are not scale-fair across qualities: a
+four-note seventh spreads its unit norm across four bins (0.5 each) while a
+triad spreads it across three (0.577 each). On a dense chroma — where every
+pitch class carries some energy — the seventh simply captures more of it and
+wins the cosine match regardless of what is actually being played. Confirmed
+by neutralising the new prior and re-running: smoothing alone yielded a
+histogram of *nothing but* sevenths. Chord qualities now carry a prior, so an
+extension has to earn its extra note.
+
+**Net effect** on the same four-minute track: **494 spans of
+self-contradictory sevenths → 82 spans** reading
+`D×16  A×9  G×7  Bm×7  F#×6` — a key-coherent I–V–vi–IV set in D with F# as
+the dominant of B minor.
+
+### Added — real-song analysis harness
+
+`TBSS_CHORD_FIXTURE=<audio file>` runs any track through the full pipeline
+and reports tempo, span count, mean confidence, a chord histogram, the
+detected verb, and a check that every chord resolved to a voicing in the
+database; add `TBSS_CHORD_RENDER=1` to mux the video too. It is `#[ignore]`d
+and skips cleanly when unset, so ordinary test runs are unaffected. This is
+what surfaced every defect above, and the v0.4.75 ffmpeg regression before
+them — synthesised fixtures had hidden all of it.
+
+### Still imperfect
+
+Chord recognition on full-band material is much better but not solved.
+Verb (repeating-progression) detection still finds nothing on real songs, and
+while the tempo is now stable and in-band, its octave choice is unverified —
+a detected 126.8 BPM may be double the musical tempo. The editable grid
+remains the mitigation, and remains first-class.
+
 ## [0.4.75] — 2026-08-18
 
 ### Fixed — chord-video render failed on current ffmpeg builds
@@ -40,6 +121,8 @@ Chord *recognition accuracy* on dense, real-world mixes is still weak —
 expect over-segmentation and unstable seventh/triad labelling on full-band
 material. The editable grid is the mitigation for now; an accuracy pass
 (tempo-band fix, temporal smoothing, template rebalancing) is in progress.
+
+*(Addressed in 0.4.76.)*
 
 ## [0.4.74] — 2026-08-17
 
