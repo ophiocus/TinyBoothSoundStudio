@@ -7,6 +7,7 @@ mod audio;
 mod automation;
 mod chorddb;
 mod chordgrid;
+mod chordvoice;
 mod cleanup;
 mod coherence;
 mod config;
