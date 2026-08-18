@@ -98,9 +98,24 @@ The fret-travel test was **mutation-checked**: replacing the threaded position w
 
 **The FR's headline risk is now retired.** The `#[ignore]`d `e2e_ten_second_slice` test proves the whole chain for real: synthesised C-G-Am-F in → E1 detects 117.5 BPM / 18 cells → E3 coalesces to exactly **4 spans "C G Am F"** → 10.00 s H.264 out, ffprobe-verified for both streams and duration drift.
 
-## Remaining
+## E2 — editable chord-grid panel (LANDED)
 
-**E2 — the editable chord-grid panel** is the only epic left: a new tab showing the grid, flagging low-confidence cells, letting the operator correct them (and hear the correction via the FR-0009 tone synth) before hitting render. Everything it orchestrates — analyse, resolve, preview a diagram, build the video — already exists and is tested.
+`src/ui/chordvideo.rs` + a `Tab::ChordVideo` ("Chords"). Load a song → Analyze → review and correct the progression → preview diagrams → Render video.
+
+The editable grid is the point, not a nicety:
+
+- every span carries a **mean confidence** over the beats it merged, and spans under `LOW_CONFIDENCE` (0.6) are flagged with ⚠;
+- any span's root/quality is editable via pickers, or can be set to **N.C.**;
+- an edit **re-resolves the voicing through the same `chordvoice` path** the analyser uses, so a corrected chart and a detected one render identically;
+- editing **clears** the low-confidence flag — an operator edit is a decision, not a guess.
+
+Both long jobs (analysis DSP, ffmpeg render) run on a background thread and report through a channel polled at the top of `show()`, with `request_repaint_after` while in flight — neither may block the UI thread. The E5 audio caveat is surfaced here as a **"Re-encode audio (AAC)"** checkbox, defaulting **off** so audio stays bit-exact unless the user opts in.
+
+**Deferred:** audible chord preview through the FR-0009 Generator tone synth (the "hear it" half of "hear it, correct it") — the visual edit loop is complete without it, and wiring a second cpal transport is its own change.
+
+## Status
+
+**All five epics have landed.** E1 (grid) → E2 (editor) → E3 (voicing) → E4 (pictograph) → E5 (mux), plus the generative `chorddb` engine underneath. The end-to-end slice is proven and lives on as a test.
 
 ## Non-goals / risk
 
