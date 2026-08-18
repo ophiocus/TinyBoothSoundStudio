@@ -26,6 +26,14 @@ use serde::{Deserialize, Serialize};
 const FFT_SIZE: usize = 4096;
 const HOP: usize = 1024;
 
+/// Tempo search band, in BPM.
+const MIN_BPM: f32 = 60.0;
+const MAX_BPM: f32 = 180.0;
+/// Centre and width (in octaves) of the log-Gaussian tempo prior that guards
+/// against half-/double-time octave errors.
+const TEMPO_PREF: f32 = 120.0;
+const TEMPO_SPREAD: f32 = 0.9;
+
 /// Pitch class 0..11 (C=0). The 12 chromatic degrees.
 pub type PitchClass = u8;
 
@@ -131,6 +139,157 @@ pub struct ChordCell {
     pub confidence: f32,
 }
 
+/// Log-domain cost of switching chords between adjacent beats.
+///
+/// Labelling each beat independently makes the grid jitter: on a dense mix the
+/// per-beat chroma wobbles enough that the argmax flips constantly, producing
+/// hundreds of one-beat "chords" in a song that really has a handful. A chord
+/// is a *held* object, so decoding needs a memory of the previous beat. This is
+/// the price a candidate must beat to displace the incumbent — higher means
+/// longer, steadier chords.
+///
+/// Swept against a real 4-minute rock track (239.5 s, 514 beats at 126.8 BPM):
+///
+/// | penalty | spans | mean per chord |
+/// |--------:|------:|---------------:|
+/// | 0.00    |   375 |          0.6 s |
+/// | 0.15    |   101 |          2.4 s |
+/// | 0.30    |    44 |          5.4 s |
+/// | 0.60    |    29 |          8.3 s |
+/// | 1.10    |    12 |         20.0 s |
+///
+/// One bar at that tempo is ~1.9 s, so a chord held for one-to-two bars lands
+/// around 2–4 s — the 0.15–0.3 region. The value below sits at the fast end of
+/// that on purpose: **slight over-segmentation is the safe error**, because the
+/// E2 editor can merge neighbouring spans trivially, whereas a chord change the
+/// decoder never emitted cannot be recovered by editing.
+const CHORD_CHANGE_PENALTY: f32 = 0.18;
+
+/// Per-quality prior, applied multiplicatively to the template match.
+///
+/// L2-normalised binary templates are **not** scale-fair across qualities: a
+/// four-note seventh spreads its unit norm over four bins (0.5 each) while a
+/// triad spreads it over three (0.577 each), so on a dense chroma — where every
+/// pitch class carries some energy — the seventh captures more of it and wins
+/// on cosine alone. Left uncorrected the analyser labels almost everything a
+/// seventh (on real material it produced Dmaj7 / D7 / Dm7 in near-equal
+/// numbers, which cannot all be right). Triads are also simply more common, so
+/// an extension has to genuinely earn its extra note.
+fn quality_prior(q: ChordQuality) -> f32 {
+    match q {
+        ChordQuality::Major | ChordQuality::Minor => 1.0,
+        ChordQuality::Dom7 | ChordQuality::Min7 => 0.90,
+        ChordQuality::Maj7 => 0.88,
+        ChordQuality::Dim => 0.85,
+    }
+}
+
+/// Viterbi-decode a whole track's beat chromas into a stable chord sequence.
+///
+/// States are the 72 chords plus a "no chord" state. Emission is the
+/// prior-weighted cosine against each template; transitions are free when the
+/// chord holds and cost [`CHORD_CHANGE_PENALTY`] when it changes. Returns the
+/// chosen label per beat together with its *raw* cosine, so the confidence the
+/// editor displays still reflects real match quality rather than the decoder's
+/// internal score.
+pub fn smooth_chords(chromas: &[[f32; 12]], min_conf: f32) -> Vec<(Option<ChordLabel>, f32)> {
+    smooth_chords_with(chromas, min_conf, CHORD_CHANGE_PENALTY)
+}
+
+/// [`smooth_chords`] with an explicit change penalty — lets the penalty be
+/// swept against real material instead of guessed.
+pub fn smooth_chords_with(
+    chromas: &[[f32; 12]],
+    min_conf: f32,
+    change_penalty: f32,
+) -> Vec<(Option<ChordLabel>, f32)> {
+    if chromas.is_empty() {
+        return Vec::new();
+    }
+    // State 0 = N.C.; states 1..=72 are (root, quality) pairs.
+    let mut states: Vec<Option<ChordLabel>> = Vec::with_capacity(73);
+    states.push(None);
+    for root in 0..12u8 {
+        for quality in ChordQuality::all() {
+            states.push(Some(ChordLabel { root, quality }));
+        }
+    }
+    let templates: Vec<Option<[f32; 12]>> =
+        states.iter().map(|s| s.map(|l| l.template())).collect();
+    let n_states = states.len();
+
+    // Raw cosine per (beat, state) — kept for reporting confidence.
+    let mut raw = vec![0.0_f32; chromas.len() * n_states];
+    let mut logem = vec![0.0_f32; chromas.len() * n_states];
+    for (t, chroma) in chromas.iter().enumerate() {
+        let energy: f32 = chroma.iter().sum();
+        let norm = chroma.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-9);
+        for s in 0..n_states {
+            let (r, weighted) = match (&templates[s], states[s]) {
+                (Some(t_vec), Some(label)) if energy >= 1e-6 => {
+                    let dot: f32 = chroma
+                        .iter()
+                        .zip(t_vec.iter())
+                        .map(|(a, b)| (a / norm) * b)
+                        .sum();
+                    (dot, dot * quality_prior(label.quality))
+                }
+                // N.C., or a silent beat: sits at the confidence floor, so it
+                // wins only when nothing matches convincingly.
+                _ => (0.0, min_conf),
+            };
+            raw[t * n_states + s] = r;
+            logem[t * n_states + s] = weighted.max(1e-6).ln();
+        }
+    }
+
+    // Forward pass. The transition matrix is uniform apart from the self-loop,
+    // so each step only needs the running best previous state — O(T·S).
+    let mut dp = vec![f32::NEG_INFINITY; chromas.len() * n_states];
+    let mut back = vec![0_u16; chromas.len() * n_states];
+    dp[..n_states].copy_from_slice(&logem[..n_states]);
+    for t in 1..chromas.len() {
+        let (prev_off, cur_off) = ((t - 1) * n_states, t * n_states);
+        let mut best_prev = 0usize;
+        for s in 1..n_states {
+            if dp[prev_off + s] > dp[prev_off + best_prev] {
+                best_prev = s;
+            }
+        }
+        let switch_score = dp[prev_off + best_prev] - change_penalty;
+        for s in 0..n_states {
+            let stay = dp[prev_off + s];
+            let (score, from) = if stay >= switch_score {
+                (stay, s)
+            } else {
+                (switch_score, best_prev)
+            };
+            dp[cur_off + s] = score + logem[cur_off + s];
+            back[cur_off + s] = from as u16;
+        }
+    }
+
+    // Backtrace.
+    let last = chromas.len() - 1;
+    let mut s = (0..n_states)
+        .max_by(|&a, &b| {
+            dp[last * n_states + a]
+                .partial_cmp(&dp[last * n_states + b])
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .unwrap_or(0);
+    let mut path = vec![0usize; chromas.len()];
+    for t in (0..chromas.len()).rev() {
+        path[t] = s;
+        s = back[t * n_states + s] as usize;
+    }
+
+    path.iter()
+        .enumerate()
+        .map(|(t, &s)| (states[s], raw[t * n_states + s]))
+        .collect()
+}
+
 /// The E1 output data contract.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChordGrid {
@@ -203,25 +362,68 @@ pub fn estimate_tempo(onset: &[f32], frames_per_sec: f32) -> f32 {
     if onset.len() < 8 || frames_per_sec <= 0.0 {
         return 120.0;
     }
-    // Search 60..180 BPM → lag (in frames).
-    let lag_for = |bpm: f32| -> usize { ((frames_per_sec * 60.0) / bpm).round() as usize };
-    let min_lag = lag_for(180.0).max(1);
-    let max_lag = lag_for(60.0).min(onset.len() / 2);
-    let mut best_lag = min_lag;
-    let mut best = f32::MIN;
-    for lag in min_lag..=max_lag {
+    // Search MIN_BPM..MAX_BPM → lag (in frames). Round *outward* (ceil for the
+    // fast end, floor for the slow end) so the integer lag can never represent
+    // a tempo outside the band: plain `.round()` turned the 180 BPM edge into
+    // lag 14, i.e. 184.6 BPM at 43.07 fps — outside the very range being
+    // searched, and the bucket the estimator then pinned itself to.
+    let lag_f = |bpm: f32| (frames_per_sec * 60.0) / bpm;
+    let min_lag = (lag_f(MAX_BPM).ceil() as usize).max(1);
+    let max_lag = (lag_f(MIN_BPM).floor() as usize).min(onset.len() / 2);
+    if max_lag <= min_lag {
+        return 120.0;
+    }
+
+    // Score each candidate lag.
+    let mut scores = vec![0.0_f32; max_lag + 1];
+    for (lag, slot) in scores
+        .iter_mut()
+        .enumerate()
+        .take(max_lag + 1)
+        .skip(min_lag)
+    {
         let mut acc = 0.0_f32;
         for i in lag..onset.len() {
             acc += onset[i] * onset[i - lag];
         }
-        // Slight preference for slower tempi (bias against octave errors).
-        let score = acc / lag as f32;
-        if score > best {
-            best = score;
+        // Normalise by the number of overlapping terms, not by the lag. The
+        // overlap shrinks as lag grows, so an un-normalised sum already favours
+        // fast tempi; the previous `acc / lag` divided by lag on top of that,
+        // compounding the bias toward short lags rather than countering it (the
+        // comment claimed the opposite of what the arithmetic did).
+        let overlap = (onset.len() - lag) as f32;
+        let mean = acc / overlap.max(1.0);
+        // Octave-error guard done properly: a log-Gaussian prior over tempo,
+        // centred on TEMPO_PREF. Symmetric in octaves, so it penalises
+        // half-time and double-time equally instead of favouring one end.
+        let bpm = (frames_per_sec * 60.0) / lag as f32;
+        let z = (bpm / TEMPO_PREF).log2() / TEMPO_SPREAD;
+        *slot = mean * (-0.5 * z * z).exp();
+    }
+
+    let mut best_lag = min_lag;
+    for lag in min_lag..=max_lag {
+        if scores[lag] > scores[best_lag] {
             best_lag = lag;
         }
     }
-    (frames_per_sec * 60.0) / best_lag as f32
+
+    // Sub-frame refinement. Integer lags quantise coarsely at speed (at 43 fps,
+    // lag 14/15/16 land on 184.6/172.3/161.5 BPM — ~12 BPM apart), so fit a
+    // parabola through the peak and its neighbours.
+    let mut lag = best_lag as f32;
+    if best_lag > min_lag && best_lag < max_lag {
+        let (a, b, c) = (scores[best_lag - 1], scores[best_lag], scores[best_lag + 1]);
+        let denom = a - 2.0 * b + c;
+        if denom.abs() > f32::EPSILON {
+            let delta = 0.5 * (a - c) / denom;
+            if delta.abs() <= 1.0 {
+                lag += delta;
+            }
+        }
+    }
+
+    ((frames_per_sec * 60.0) / lag).clamp(MIN_BPM, MAX_BPM)
 }
 
 /// Build a phase-locked beat grid (beat *frame* indices) from the onset
@@ -393,11 +595,12 @@ pub fn analyze(mono: &[f32], sr: u32) -> ChordGrid {
     let beat_frames = beat_grid(&onset, bpm, frames_per_sec);
     let frame_secs = |f: usize| f as f32 * HOP as f32 / sr as f32;
 
-    let mut cells = Vec::new();
-    let mut labels = Vec::new();
-    for (bi, w) in beat_frames.windows(2).enumerate() {
+    // Beat-synchronous chroma for the whole track first: the chord sequence is
+    // decoded jointly (below) rather than per beat, so a beat's label depends
+    // on its neighbours.
+    let mut chromas: Vec<[f32; 12]> = Vec::new();
+    for w in beat_frames.windows(2) {
         let (f0, f1) = (w[0], w[1]);
-        // Mean chroma over the beat interval.
         let mut chroma = [0.0_f32; 12];
         for frame in &stft[f0..f1.min(stft.len())] {
             let c = chroma_of_mag(frame, sr);
@@ -405,11 +608,18 @@ pub fn analyze(mono: &[f32], sr: u32) -> ChordGrid {
                 chroma[k] += c[k];
             }
         }
-        let (chord, confidence) = match_chord(&chroma, 0.5);
+        chromas.push(chroma);
+    }
+
+    let decoded = smooth_chords(&chromas, 0.5);
+    let mut cells = Vec::new();
+    let mut labels = Vec::new();
+    for (bi, w) in beat_frames.windows(2).enumerate() {
+        let (chord, confidence) = decoded.get(bi).copied().unwrap_or((None, 0.0));
         labels.push(chord);
         cells.push(ChordCell {
-            start_secs: frame_secs(f0),
-            end_secs: frame_secs(f1),
+            start_secs: frame_secs(w[0]),
+            end_secs: frame_secs(w[1]),
             beat_index: bi as u32,
             chord,
             confidence,
@@ -498,6 +708,51 @@ mod tests {
         assert!(chord.is_none());
     }
 
+    /// The estimator must never report a tempo outside the band it searches.
+    /// Regression: integer-lag rounding let the 180 BPM edge become lag 14 at
+    /// 43.07 fps → 184.6 BPM, and the fast-biased scoring then pinned real
+    /// music to exactly that bucket.
+    #[test]
+    fn tempo_never_escapes_the_search_band() {
+        let fps = 44_100.0 / HOP as f32;
+        // Dense noise-ish onsets, a steady fast pulse, and a very slow pulse —
+        // each an invitation to run off one end of the band or the other.
+        let mut cases: Vec<Vec<f32>> = Vec::new();
+        cases.push((0..1500).map(|i| ((i * 37) % 11) as f32 / 11.0).collect());
+        for period in [7usize, 11, 14, 15, 60, 90] {
+            let mut v = vec![0.0_f32; 1500];
+            for i in (0..v.len()).step_by(period) {
+                v[i] = 1.0;
+            }
+            cases.push(v);
+        }
+        for (n, onset) in cases.iter().enumerate() {
+            let bpm = estimate_tempo(onset, fps);
+            assert!(
+                (MIN_BPM..=MAX_BPM).contains(&bpm),
+                "case {n}: {bpm:.1} BPM is outside the {MIN_BPM}–{MAX_BPM} band"
+            );
+        }
+    }
+
+    /// The prior must not systematically prefer double-time. A pulse whose
+    /// period is unambiguous should come back at that period, not its octave.
+    #[test]
+    fn tempo_prior_does_not_favour_double_time() {
+        let fps = 44_100.0 / HOP as f32;
+        // 30-frame period ≈ 86 BPM. Double-time would read ≈172.
+        let mut onset = vec![0.0_f32; 2000];
+        for i in (0..onset.len()).step_by(30) {
+            onset[i] = 1.0;
+        }
+        let bpm = estimate_tempo(&onset, fps);
+        let expected = fps / 30.0 * 60.0;
+        assert!(
+            (bpm - expected).abs() < 5.0,
+            "expected ~{expected:.0} BPM, got {bpm:.1} (octave error?)"
+        );
+    }
+
     #[test]
     fn tempo_from_periodic_onset() {
         // Onset spike every 25 frames. At 43.07 fps (44100/1024) that is
@@ -560,5 +815,96 @@ mod tests {
         let grid = analyze(&sig, sr);
         assert!(grid.bpm > 40.0 && grid.bpm < 220.0);
         assert!(!grid.cells.is_empty(), "should produce beat cells");
+    }
+
+    /// Build a beat chroma for `label` with a little broadband leakage, so it
+    /// resembles a real full-mix beat rather than a clean template.
+    fn noisy_chroma(label: ChordLabel, leak: f32) -> [f32; 12] {
+        let mut c = [leak; 12];
+        for &iv in label.quality.intervals() {
+            c[((label.root as u16 + iv as u16) % 12) as usize] += 1.0;
+        }
+        c
+    }
+
+    /// A single wobbly beat inside a held chord must not become its own chord.
+    /// Regression for the over-segmentation that produced hundreds of one-beat
+    /// "chords" on real material.
+    #[test]
+    fn smoothing_absorbs_a_single_wobbly_beat() {
+        let c = ChordLabel {
+            root: 0,
+            quality: ChordQuality::Major,
+        };
+        let g = ChordLabel {
+            root: 7,
+            quality: ChordQuality::Major,
+        };
+        let mut chromas: Vec<[f32; 12]> = (0..12).map(|_| noisy_chroma(c, 0.25)).collect();
+        // A *marginal* wobble, not a substitution: still a C chroma, but with
+        // enough B/D leakage (a passing tone, a bass run, a cymbal) to tip the
+        // per-beat argmax toward G. Real jitter looks like this — a clean
+        // foreign triad for exactly one beat would be a real chord change, and
+        // following that one is correct.
+        chromas[6][11] += 0.9;
+        chromas[6][2] += 0.9;
+
+        // Guard: the perturbation must actually be enough to flip an
+        // *unsmoothed* decision, or this test proves nothing.
+        let (solo, _) = match_chord(&chromas[6], 0.5);
+        assert_ne!(solo, Some(c), "perturbation too weak to exercise smoothing");
+
+        let smoothed = smooth_chords(&chromas, 0.5);
+        let changes = smoothed.windows(2).filter(|w| w[0].0 != w[1].0).count();
+        assert_eq!(
+            changes, 0,
+            "one wobbly beat should not spawn a chord change"
+        );
+        assert!(smoothed.iter().all(|(l, _)| *l == Some(c)));
+        let _ = g;
+    }
+
+    /// A genuine, sustained change must still come through — smoothing should
+    /// resist jitter, not freeze the output.
+    #[test]
+    fn smoothing_still_follows_a_real_change() {
+        let c = ChordLabel {
+            root: 0,
+            quality: ChordQuality::Major,
+        };
+        let g = ChordLabel {
+            root: 7,
+            quality: ChordQuality::Major,
+        };
+        let mut chromas: Vec<[f32; 12]> = (0..8).map(|_| noisy_chroma(c, 0.25)).collect();
+        chromas.extend((0..8).map(|_| noisy_chroma(g, 0.25)));
+
+        let smoothed = smooth_chords(&chromas, 0.5);
+        assert_eq!(smoothed.first().unwrap().0, Some(c));
+        assert_eq!(smoothed.last().unwrap().0, Some(g));
+        let changes = smoothed.windows(2).filter(|w| w[0].0 != w[1].0).count();
+        assert_eq!(changes, 1, "expected exactly one chord change");
+    }
+
+    /// On a dense chroma a four-note seventh out-scores the triad purely on
+    /// template norm. The quality prior must stop that: a plain triad plus
+    /// broadband leakage should read as the triad, not as a seventh.
+    #[test]
+    fn quality_prior_keeps_triads_from_becoming_sevenths() {
+        let c = ChordLabel {
+            root: 0,
+            quality: ChordQuality::Major,
+        };
+        let chromas: Vec<[f32; 12]> = (0..8).map(|_| noisy_chroma(c, 0.35)).collect();
+        let smoothed = smooth_chords(&chromas, 0.5);
+        for (label, _) in &smoothed {
+            let q = label.expect("should detect a chord").quality;
+            assert_eq!(
+                q,
+                ChordQuality::Major,
+                "dense triad chroma read as {} — the seventh templates are winning on norm",
+                label.unwrap().name()
+            );
+        }
     }
 }
