@@ -8,6 +8,39 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); thi
 
 (Nothing yet — known issues all resolved as of v0.4.23.)
 
+## [0.4.75] — 2026-08-18
+
+### Fixed — chord-video render failed on current ffmpeg builds
+
+**Chord-video rendering was broken in v0.4.74 for anyone on a recent
+ffmpeg**, including the build bundled with the installer itself. ffmpeg
+removed the `-vsync` option between its 2026-06-15 and 2026-08-17 builds,
+so the render aborted immediately with:
+
+```
+Unrecognized option 'vsync'.
+Error splitting the argument list: Option not found
+```
+
+Replaced with `-fps_mode cfr`, which has existed since ffmpeg 5.1 and works
+on both sides of the removal — verified against three builds (N-126188
+rejected `-vsync`; N-125049 and 6.0 accepted both).
+
+This slipped through v0.4.74's end-to-end test because the test resolved an
+older ffmpeg on the build machine than the one shipped in the installer. It
+was caught by running a real song through the pipeline, and that harness is
+now part of the suite: set `TBSS_CHORD_FIXTURE` to any audio file to get
+tempo, span count, confidence, a chord histogram and a database-resolution
+check (plus `TBSS_CHORD_RENDER=1` to mux the video). It is `#[ignore]`d and
+skips cleanly when unset.
+
+### Known limitation
+
+Chord *recognition accuracy* on dense, real-world mixes is still weak —
+expect over-segmentation and unstable seventh/triad labelling on full-band
+material. The editable grid is the mitigation for now; an accuracy pass
+(tempo-band fix, temporal smoothing, template rebalancing) is in progress.
+
 ## [0.4.74] — 2026-08-17
 
 ### Added — Chords tab: chord-chart video generator (TBSS-FR-0013)
