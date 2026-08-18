@@ -27,7 +27,16 @@ pub struct VoicedSpan {
     pub voicing: Option<Voicing>,
     /// Display label — the chord name, or `"N.C."`.
     pub name: String,
+    /// Mean detection confidence over the beats this span merged.
+    pub confidence: f32,
+    /// Flagged for the E2 editor: the detection is weak enough to be worth a
+    /// human check. Cleared once an operator edits the span — an edit is a
+    /// decision, not a guess.
+    pub low_confidence: bool,
 }
+
+/// Mean confidence below which a span is flagged for review in the editor.
+pub const LOW_CONFIDENCE: f32 = 0.6;
 
 impl VoicedSpan {
     pub fn duration(&self) -> f32 {
@@ -62,20 +71,29 @@ pub fn resolve_spans(grid: &ChordGrid, db: &ChordDb) -> Vec<VoicedSpan> {
         return spans;
     }
 
-    // Coalesce equal-chord runs into (chord, start, end).
-    let mut runs: Vec<(Option<ChordLabel>, f32, f32)> = Vec::new();
+    // Coalesce equal-chord runs into (chord, start, end, conf_sum, n_cells).
+    let mut runs: Vec<(Option<ChordLabel>, f32, f32, f32, u32)> = Vec::new();
     for cell in &grid.cells {
         match runs.last_mut() {
-            Some((chord, _, end)) if *chord == cell.chord => {
+            Some((chord, _, end, sum, n)) if *chord == cell.chord => {
                 *end = cell.end_secs;
+                *sum += cell.confidence;
+                *n += 1;
             }
-            _ => runs.push((cell.chord, cell.start_secs, cell.end_secs)),
+            _ => runs.push((
+                cell.chord,
+                cell.start_secs,
+                cell.end_secs,
+                cell.confidence,
+                1,
+            )),
         }
     }
 
     // Assign voicings, threading the previous fret position.
     let mut prev_base: Option<i8> = None;
-    for (chord, start, end) in runs {
+    for (chord, start, end, conf_sum, n) in runs {
+        let confidence = if n > 0 { conf_sum / n as f32 } else { 0.0 };
         let (voicing, name) = match chord {
             Some(label) => {
                 let v = voice_label(db, &label, prev_base);
@@ -92,6 +110,9 @@ pub fn resolve_spans(grid: &ChordGrid, db: &ChordDb) -> Vec<VoicedSpan> {
             chord,
             voicing,
             name,
+            confidence,
+            // N.C. is a definite "no chord", not a shaky guess — don't flag it.
+            low_confidence: chord.is_some() && confidence < LOW_CONFIDENCE,
         });
     }
     spans

@@ -64,6 +64,10 @@ pub struct VideoOpts {
     pub mirror: bool,
     /// Target video bitrate, used by encoders without a CRF mode.
     pub bitrate_kbps: u32,
+    /// Re-encode the audio to AAC instead of stream-copying it. Off by
+    /// default — the epic promises the original audio untouched. This is the
+    /// documented opt-in for players that won't open PCM-in-MP4.
+    pub reencode_audio: bool,
 }
 
 impl Default for VideoOpts {
@@ -75,6 +79,7 @@ impl Default for VideoOpts {
             height: 720,
             mirror: false,
             bitrate_kbps: 2500,
+            reencode_audio: false,
         }
     }
 }
@@ -206,7 +211,13 @@ pub fn render_chord_video(
     // Try stream-copying the audio first; fall back to AAC when the container
     // rejects the source codec (e.g. PCM from a WAV into MP4).
     let mut last_err = String::new();
-    for audio_args in [vec!["-c:a", "copy"], vec!["-c:a", "aac", "-b:a", "192k"]] {
+    let aac = vec!["-c:a", "aac", "-b:a", "192k"];
+    let attempts: Vec<Vec<&str>> = if opts.reencode_audio {
+        vec![aac]
+    } else {
+        vec![vec!["-c:a", "copy"], aac]
+    };
+    for audio_args in attempts {
         let mut cmd = Command::new(&ffmpeg);
         cmd.current_dir(&dir) // bare filenames → no Windows path escaping
             .arg("-y")
@@ -276,6 +287,8 @@ mod tests {
             chord,
             voicing,
             name: chord.map(|c| c.name()).unwrap_or_else(|| "N.C.".into()),
+            confidence: 0.9,
+            low_confidence: false,
         }
     }
 

@@ -43,6 +43,63 @@ pub struct PendingGeneratorParams {
     pub mode: crate::project::GeneratorMode,
 }
 
+/// Messages a background chord-video job sends back to the UI thread.
+/// TBSS-FR-0013 E2.
+pub enum ChordJobMsg {
+    /// Analysis finished: the grid plus the mono audio's duration.
+    Analyzed(Box<crate::chordgrid::ChordGrid>),
+    /// Video render finished.
+    Rendered(PathBuf),
+    /// Either job failed; the string is an already-formatted `{e:#}` chain.
+    Failed(String),
+}
+
+/// Chord-video tab state (TBSS-FR-0013 E2). Holds the loaded audio, the
+/// analysed grid, the operator's corrected spans, and the handle to whichever
+/// background job is in flight.
+pub struct ChordVideoUiState {
+    /// Source audio the video will be muxed over.
+    pub audio_path: Option<PathBuf>,
+    /// Analyser output. `None` until the first analysis completes.
+    pub grid: Option<crate::chordgrid::ChordGrid>,
+    /// Resolved + operator-edited spans — what actually gets rendered.
+    pub spans: Vec<crate::chordvoice::VoicedSpan>,
+    /// Index into `spans` whose diagram is previewed.
+    pub selected: usize,
+    /// Cached preview texture + the span index it was built for, so the
+    /// diagram is only re-rasterised when the selection or shape changes.
+    pub preview_tex: Option<egui::TextureHandle>,
+    pub preview_key: Option<(usize, bool)>,
+    /// Left-handed diagrams.
+    pub mirror: bool,
+    /// Re-encode audio to AAC on render. Off by default: the epic promises the
+    /// original audio untouched, and PCM-in-MP4 stays bit-exact — this is the
+    /// documented opt-in for players that won't take PCM.
+    pub reencode_audio: bool,
+    pub fps: u32,
+    /// In-flight background job, if any (label + receiver).
+    pub job: Option<(&'static str, std::sync::mpsc::Receiver<ChordJobMsg>)>,
+    pub status: Option<String>,
+}
+
+impl Default for ChordVideoUiState {
+    fn default() -> Self {
+        Self {
+            audio_path: None,
+            grid: None,
+            spans: Vec::new(),
+            selected: 0,
+            preview_tex: None,
+            preview_key: None,
+            mirror: false,
+            reencode_audio: false,
+            fps: 30,
+            job: None,
+            status: None,
+        }
+    }
+}
+
 /// Album-tab UI state. The currently-open `.tba` (if any), the live
 /// in-memory `Album` being edited, and a shared transport for preview.
 /// TBSS-FR-0012.
@@ -251,6 +308,8 @@ pub enum Tab {
     Crossfade,
     /// N-stem composition editor — TinyBooth Album. TBSS-FR-0012.
     Album,
+    /// Chord-chart video generator — TBSS-FR-0013.
+    ChordVideo,
 }
 
 pub struct TinyBoothApp {
@@ -367,6 +426,8 @@ pub struct TinyBoothApp {
     /// shared preview session. `None` when no album is loaded yet.
     /// TBSS-FR-0012.
     pub album_state: AlbumUiState,
+    /// Chord-video tab state. TBSS-FR-0013.
+    pub chordvideo_state: ChordVideoUiState,
 
     /// Mixer/automation recorder. Captures fader gestures while a strip's
     /// arm toggle is on and the player is in Playing state. Flushed into
@@ -582,6 +643,7 @@ impl TinyBoothApp {
             crossfade_state: CrossfadeUiState::default(),
             crossfade_bounce_flow: None,
             album_state: AlbumUiState::default(),
+            chordvideo_state: ChordVideoUiState::default(),
             recorder: crate::automation::Recorder::default(),
             mix_console_fraction: 0.42,
             recordings_page: 0,
@@ -2774,6 +2836,7 @@ impl eframe::App for TinyBoothApp {
                 ui.selectable_value(&mut self.tab, Tab::Export, "Export");
                 ui.selectable_value(&mut self.tab, Tab::Crossfade, "Crossfade");
                 ui.selectable_value(&mut self.tab, Tab::Album, "Album");
+                ui.selectable_value(&mut self.tab, Tab::ChordVideo, "Chords");
 
                 ui.separator();
                 // 🌀 Visualizer toggle (v0.4.11). Selectable so it
@@ -2953,6 +3016,7 @@ impl eframe::App for TinyBoothApp {
                 Tab::Export => ui::export::show(self, ui),
                 Tab::Crossfade => ui::crossfade::show(self, ui),
                 Tab::Album => ui::album::show(self, ui),
+                Tab::ChordVideo => ui::chordvideo::show(self, ui),
             }
         });
 

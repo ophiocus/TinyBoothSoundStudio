@@ -52,7 +52,9 @@ impl ChordQuality {
             ChordQuality::Dim => &[0, 3, 6],
         }
     }
-    fn suffix(self) -> &'static str {
+    /// Display suffix, e.g. `""`, `"m"`, `"maj7"`. Public so the E2 editor can
+    /// label its quality picker.
+    pub fn suffix(self) -> &'static str {
         match self {
             ChordQuality::Major => "",
             ChordQuality::Minor => "m",
@@ -62,7 +64,9 @@ impl ChordQuality {
             ChordQuality::Dim => "dim",
         }
     }
-    fn all() -> [ChordQuality; 6] {
+    /// Every recognised quality — drives both the template bank and the E2
+    /// editor's picker.
+    pub fn all() -> [ChordQuality; 6] {
         [
             ChordQuality::Major,
             ChordQuality::Minor,
@@ -77,6 +81,12 @@ impl ChordQuality {
 const NOTE_NAMES: [&str; 12] = [
     "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
 ];
+
+/// Name of a pitch class (`0` = C). Sharps only — the E2 editor's root picker
+/// and any label that needs a note name without building a whole [`ChordLabel`].
+pub fn note_name(pc: u8) -> &'static str {
+    NOTE_NAMES[(pc % 12) as usize]
+}
 
 /// A concrete chord: root pitch-class + quality.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

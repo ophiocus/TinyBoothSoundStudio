@@ -1,6 +1,7 @@
 pub mod admin;
 pub mod album;
 pub mod audio_devices;
+pub mod chordvideo;
 pub mod correction;
 pub mod crossfade;
 pub mod export;
