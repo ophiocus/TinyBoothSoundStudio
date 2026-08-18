@@ -62,9 +62,23 @@ audio/video in
 
 Tests: C-major chord → `C`, A-minor → `Am`, silence → N.C., periodic onset → correct BPM, repeating C-G-Am-F → verb of 4 bars with that core progression, synth audio → non-empty grid. (Caught + fixed a pitch-class offset bug that also affected the shipped tbviz chroma/circle-of-fifths labels.)
 
-## Open decision — E4 convention (gate before rasterising)
+## E4 convention — LOCKED
 
-The fretboard-diagram visual language must be pinned before E4's renderer is built (the spec parks these for the operator): **neck orientation** (horizontal vs vertical), **finger colour** (colour-per-finger vs monochrome), **handedness** (right vs left). Confirmed once, written into E4's issue, and rendered consistently thereafter.
+The fretboard-diagram visual language, pinned before E4's renderer is built:
+
+- **Neck orientation:** horizontal (fretboard lying left→right).
+- **Fingers:** numbers **1–4** (not colours), sourced from a **chord-shape database** — a chord is only renderable if it exists in the DB.
+- **Handedness:** a display-time boolean + mirror function; stored data is canonical right-handed, the renderer mirrors on demand.
+
+## E3-groundwork — chord-voicing engine (LANDED)
+
+`src/chorddb.rs`, pure + unit-tested. The locked E4 decision "a chord is only renderable if in the DB" made the database first-class, so rather than hand-enter shapes it is **generated**: a voicing's left hand is a matrix (fret + finger per string); enumerate playable fret combinations in a moving neck window, keep only those whose sounding pitch-classes spell the target chord (root in bass, no foreign notes), assign an ergonomic fingering (lowest-fret barre + greedy 1→4), score and rank. **Every voicing is pitch-class-correct by construction.**
+
+- **16 qualities** (maj / min / dom7 / min7 / maj7 / dim / dim7 / aug / sus2 / sus4 / 6 / m6 / m7b5 / add9 / 9 / 5) × 12 roots → **2,287 ranked voicings** (top 12 per chord) — a 50× jump over the 44 hand-entered rows, erasing the research file's own 11-item `gaps` list.
+- The **5th is modelled as optional**, so the idiomatic open C7 (`x32310`, no 5th) is a first-class voicing, not a special case.
+- The **44 verified voicings** (`docs/research/…verified.json`) become the *golden set*: concrete open/named shapes are overlaid at rank 0 (recognisable grips + canonical fingering), and every one is a correctness anchor (a test asserts each spells its chord).
+- `ChordDb::best_near(root, q, prev_base_fret)` is E3's fret-travel-minimising selector; `for_label()` bridges straight from an E1 `ChordLabel`.
+- v1 playability model (documented, relaxable): contiguous sounding strings, root-position only, ≤4 fingers with one barre, frets 0–12, span ≤4.
 
 ## Non-goals / risk
 
