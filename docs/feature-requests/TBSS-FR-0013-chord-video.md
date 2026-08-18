@@ -80,8 +80,30 @@ The fretboard-diagram visual language, pinned before E4's renderer is built:
 - `ChordDb::best_near(root, q, prev_base_fret)` is E3's fret-travel-minimising selector; `for_label()` bridges straight from an E1 `ChordLabel`.
 - v1 playability model (documented, relaxable): contiguous sounding strings, root-position only, ≤4 fingers with one barre, frets 0–12, span ≤4.
 
+## E3 — voicing resolver (LANDED)
+
+`src/chordvoice.rs`, pure + tested. Collapses E1's per-beat cells into `VoicedSpan`s (consecutive beats holding the same chord merge into one span), then picks one voicing per span via `ChordDb::best_near`, **threading the previous `base_fret` forward** so diagrams don't leap up and down the neck between chords. N.C. spans carry no voicing and don't reset hand position.
+
+The fret-travel test was **mutation-checked**: replacing the threaded position with `None` makes it fail (Am picks `base_fret` 1 when 0 was reachable), so it genuinely constrains the resolver rather than passing vacuously.
+
+## E5 — video build + mux (LANDED, end-to-end slice proven)
+
+`src/chordvideo.rs`. One E4 diagram per span → H.264 video muxed over the original untouched audio. Decisions, each driven by something measured:
+
+- **concat demuxer, not `image2`.** A chord holds for seconds, so one PNG per *frame* would write ~5,400 files for a 3-minute song at 30 fps. The concat demuxer takes one image per span plus an explicit `duration` — it encodes E1's beat timings directly instead of approximating them by frame duplication.
+- **The final entry is repeated** — the concat demuxer ignores the last entry's `duration`; without the repeat the closing chord flashes by in a single frame.
+- **ffmpeg runs with the frame directory as its cwd**, with bare filenames in the concat list — this sidesteps Windows drive-letter/backslash escaping in concat paths entirely.
+- **The encoder is probed, not hardcoded.** Not every ffmpeg ships `libx264` (this workstation's build is `--disable-libx264`, offering `libopenh264` + hardware encoders). `pick_h264_encoder()` scans `ffmpeg -encoders` in preference order, software first for reproducibility.
+- **Audio is stream-copied** (`-c:a copy`), AAC only as a fallback. Measured caveat: MP4 *does* accept `pcm_s16le`, so a WAV source copies bit-exact but plays in fewer players — the compatibility re-encode belongs in the E2 UI as an explicit opt-in, never a silent downgrade at this layer.
+
+**The FR's headline risk is now retired.** The `#[ignore]`d `e2e_ten_second_slice` test proves the whole chain for real: synthesised C-G-Am-F in → E1 detects 117.5 BPM / 18 cells → E3 coalesces to exactly **4 spans "C G Am F"** → 10.00 s H.264 out, ffprobe-verified for both streams and duration drift.
+
+## Remaining
+
+**E2 — the editable chord-grid panel** is the only epic left: a new tab showing the grid, flagging low-confidence cells, letting the operator correct them (and hear the correction via the FR-0009 tone synth) before hitting render. Everything it orchestrates — analyse, resolve, preview a diagram, build the video — already exists and is tested.
+
 ## Non-goals / risk
 
 - Not a stem separator, transcriber, or tab generator — one chord at a time, EADGBE only.
 - Chord recognition is imperfect; E2 is the mitigation, not a nice-to-have.
-- E5 mux alignment (ffmpeg frame-rate ↔ beat grid) is the integration risk — prove a 10-second end-to-end slice early.
+- ~~E5 mux alignment (ffmpeg frame-rate ↔ beat grid) is the integration risk — prove a 10-second end-to-end slice early.~~ **Retired** — the slice is proven and lives on as a test (see E5 above).
