@@ -8,6 +8,69 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); thi
 
 (Nothing yet — known issues all resolved as of v0.4.23.)
 
+## [0.4.74] — 2026-08-17
+
+### Added — Chords tab: chord-chart video generator (TBSS-FR-0013)
+
+A new **Chords** tab turns a song into that same song with a synced
+**guitar fretboard-diagram video track** over the **original, untouched
+audio** — one chord at a time, standard EADGBE tuning.
+
+Load a song → **Analyze** → review and correct the detected progression
+→ **Render video…**. Accepts wav, mp3, flac, m4a, aac, ogg, opus, wma.
+
+- **Chord analyser (`chordgrid.rs`)** — STFT (4096 / hop 1024, Hann) →
+  spectral-flux onset envelope → autocorrelation tempo (60–180 BPM) →
+  phase-locked beat grid → beat-synchronous chroma → cosine match against
+  6 qualities × 12 roots, plus **verb** (repeating-progression) detection.
+  Every beat carries a confidence.
+- **Generative chord database (`chorddb.rs`)** — rather than hand-entering
+  shapes, voicings are **generated**: enumerate playable fret combinations
+  in a moving neck window, keep only those whose sounding pitch-classes
+  spell the target chord (root in bass, no foreign notes), assign an
+  ergonomic fingering, then score and rank. **2,287 ranked voicings** across
+  **16 qualities × 12 roots**, every one pitch-class-correct *by
+  construction*. The 5th is modelled as *optional*, so the idiomatic open
+  C7 (`x32310`, no 5th) is a first-class voicing rather than a special case.
+  44 hand-verified shapes act as the golden set — pinned to rank 0 so common
+  chords render their recognisable open/barre grips, and each doubling as a
+  correctness anchor in the tests.
+- **Editable chord grid** — the point, not a nicety. Full-mix recognition
+  *will* miss borrowed and extended chords, so weak detections are flagged
+  ⚠, any span's root/quality is editable (or settable to **N.C.**), and an
+  edit re-resolves its voicing through the same path the analyser uses —
+  a corrected chart and a detected one render identically.
+- **Voicing resolver (`chordvoice.rs`)** — collapses per-beat cells into
+  spans and threads the previous fret position forward, so the diagrams
+  don't leap up and down the neck between chords.
+- **Fretboard renderer (`fretboard.rs`)** — pure software rasteriser, no
+  GPU or font dependency, so output is deterministic. Horizontal neck,
+  numbered fingers 1–4, open/muted markers, barre bars, and a
+  **left-handed** toggle that mirrors at draw time (stored shapes stay
+  canonical right-handed). One renderer feeds both the on-screen preview
+  and the video frames.
+- **Video build + mux (`chordvideo.rs`)** — one diagram per chord span via
+  ffmpeg's concat demuxer (which encodes the beat timings directly instead
+  of duplicating thousands of identical frames), H.264 video, and the audio
+  **stream-copied** so it is never silently re-encoded. The H.264 encoder is
+  **probed** rather than hardcoded, so builds without `libx264` (which use
+  `libopenh264` or a hardware encoder) still work.
+- Options: frame rate, left-handed diagrams, and an opt-in
+  **"Re-encode audio (AAC)"** for players that won't open PCM-in-MP4.
+  It defaults **off** — your audio stays bit-exact unless you ask.
+
+Analysis and rendering both run on a background thread, so neither blocks
+the UI.
+
+### Fixed
+
+- **Visualizer chroma note labels were 9 semitones off.** The pitch-class
+  mapping used an A-relative formula (`12·log2(f/440)`, putting A at
+  class 0) while the labels were C-relative, so the chromagram and
+  circle-of-fifths displays named the wrong notes. Corrected to the MIDI
+  convention `round(69 + 12·log2(f/440)) mod 12` in the shipped `tbviz`
+  chroma, similarity, and hyperbolic modules.
+
 ## [0.4.73] — 2026-06-23
 
 ### Added — Visualizer: live "licks & beats" event track + counter-visuals
