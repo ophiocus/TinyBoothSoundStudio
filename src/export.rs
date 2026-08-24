@@ -423,22 +423,16 @@ fn read_track_pcm(project: &Project, t: &Track, db: Option<&TibDb>) -> Result<(W
     }
 }
 
-/// Decode a WAV stream to unity f32. Mirrors the historical export
-/// scaling (int samples read as i32, divided by `i16::MAX`).
+/// Decode a WAV stream to unity f32, scaled by the file's actual bit
+/// depth. The historical version divided raw i32 samples by `i16::MAX`
+/// regardless of depth — a 24-bit source decoded ~256× hot, the peak
+/// limiter then crushed the whole mix to fit, and balance against
+/// 16-bit tracks was destroyed (audit finding). Now routed through the
+/// canonical `audiodecode` scaling.
 fn decode_pcm<R: Read>(reader: WavReader<R>) -> Result<(WavSpec, Vec<f32>)> {
-    let spec = reader.spec();
-    let raw: Vec<f32> = match spec.sample_format {
-        SampleFormat::Int => reader
-            .into_samples::<i32>()
-            .filter_map(|r| r.ok())
-            .map(|s| s as f32 / i16::MAX as f32)
-            .collect(),
-        SampleFormat::Float => reader
-            .into_samples::<f32>()
-            .filter_map(|r| r.ok())
-            .collect(),
-    };
-    Ok((spec, raw))
+    let (spec, i16s, _frames) = crate::audiodecode::decode_wav_i16(reader)?;
+    let denom = i16::MAX as f32;
+    Ok((spec, i16s.iter().map(|s| *s as f32 / denom).collect()))
 }
 
 fn db_to_lin(db: f32) -> f32 {

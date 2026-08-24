@@ -562,7 +562,23 @@ impl Project {
         std::fs::create_dir_all(&self.root).context("creating project dir")?;
         std::fs::create_dir_all(self.tracks_dir()).context("creating tracks dir")?;
         let json = serde_json::to_string_pretty(self)?;
-        std::fs::write(self.manifest_path(), json).context("writing manifest")?;
+        // Atomic write (temp + fsync + rename), with a `.bak` of the
+        // previous manifest. This file is the only copy of all mix state
+        // for a folder project — the old direct `fs::write` truncated it
+        // first, so a crash or full disk mid-save destroyed it (audit
+        // finding; config.rs and wav_meta.rs already did this right).
+        let path = self.manifest_path();
+        if path.exists() {
+            let _ = std::fs::copy(&path, path.with_extension("tinybooth.bak"));
+        }
+        let tmp = path.with_extension("tinybooth.tmp");
+        {
+            use std::io::Write as _;
+            let mut f = std::fs::File::create(&tmp).context("creating manifest temp")?;
+            f.write_all(json.as_bytes()).context("writing manifest")?;
+            f.sync_all().context("syncing manifest")?;
+        }
+        std::fs::rename(&tmp, &path).context("committing manifest")?;
         Ok(())
     }
 

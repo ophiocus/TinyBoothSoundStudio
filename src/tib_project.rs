@@ -378,9 +378,41 @@ fn build_track(raw: RawTrack) -> Result<Track> {
 /// track (not loaded in the mix) with `meta.suno_mixdown_track_id`
 /// pointed at it. Lossless — nothing on disk is needed afterwards.
 pub fn migrate_folder_to_tib(folder: &Project, tib_path: &Path) -> Result<()> {
+    // Refuse to clobber an existing container. `TibDb::create` deletes
+    // its target unconditionally, so before this guard, re-answering
+    // "Migrate" on an already-migrated folder silently destroyed the
+    // existing `.tib` and its entire revision history (audit finding,
+    // severity: data loss).
+    if tib_path.exists() {
+        return Err(anyhow::anyhow!(
+            "{} already exists — open it instead of re-migrating, or move it              aside first. Re-migrating would destroy its revision history.",
+            tib_path.display()
+        ));
+    }
     let db = TibDb::create(tib_path)
         .with_context(|| format!("creating .tib at {}", tib_path.display()))?;
 
+    // One transaction for the whole migration: a crash mid-way used to
+    // leave a structurally valid but half-populated `.tib` that opened
+    // without complaint. Now it's all-or-nothing; on error the partial
+    // file is removed so the folder project stays the source of truth.
+    db.conn().execute_batch("BEGIN IMMEDIATE")?;
+    let result = migrate_folder_into(folder, &db);
+    match result {
+        Ok(()) => {
+            db.conn().execute_batch("COMMIT")?;
+            Ok(())
+        }
+        Err(e) => {
+            let _ = db.conn().execute_batch("ROLLBACK");
+            drop(db);
+            let _ = std::fs::remove_file(tib_path);
+            Err(e)
+        }
+    }
+}
+
+fn migrate_folder_into(folder: &Project, db: &TibDb) -> Result<()> {
     // 1. meta + stem/track rows (current_rev_id NULL until audio lands).
     save_metadata(folder, db.conn())?;
 
@@ -405,7 +437,7 @@ pub fn migrate_folder_to_tib(folder: &Project, tib_path: &Path) -> Result<()> {
     if let Some(rel) = &folder.suno_mixdown_path {
         let mix_path = folder.root.join(rel);
         if mix_path.is_file() {
-            migrate_mixdown(&db, &mix_path)?;
+            migrate_mixdown(db, &mix_path)?;
         }
     }
     Ok(())
@@ -715,6 +747,38 @@ mod tests {
         let mix = db.read_current_audio(MIXDOWN_TRACK_ID).unwrap();
         assert_eq!(mix, std::fs::read(dir.join("tracks/mixdown.wav")).unwrap());
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Regression: re-migrating onto an existing `.tib` must refuse and
+    /// leave the original untouched (it used to silently recreate the
+    /// file, destroying all revision history).
+    #[test]
+    fn migrate_refuses_to_overwrite_existing_tib() {
+        let dir = std::env::temp_dir().join(format!("tbss-remigrate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("tracks")).unwrap();
+        write_wav(&dir.join("tracks/track-001.wav"), 48_000, true);
+        let mut proj = Project::new("Twice", dir.clone());
+        proj.tracks
+            .push(folder_track("track-001", "tracks/track-001.wav", "Vox"));
+        let tib = dir.join("twice.tib");
+        migrate_folder_to_tib(&proj, &tib).unwrap();
+        let before = std::fs::metadata(&tib).unwrap().len();
+
+        let err = migrate_folder_to_tib(&proj, &tib).unwrap_err();
+        assert!(
+            err.to_string().contains("already exists"),
+            "clear refusal message, got: {err:#}"
+        );
+        assert_eq!(
+            std::fs::metadata(&tib).unwrap().len(),
+            before,
+            "original .tib untouched"
+        );
+        // And it still opens + reads.
+        let db = TibDb::open(&tib).unwrap();
+        assert!(db.read_current_audio("track-001").is_ok());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -551,16 +551,20 @@ pub fn analyze_wav(
     profile: ResolvedProfile,
     settings: &TelemetrySettings,
 ) -> Result<TrackTelemetry> {
-    let mut reader =
+    // Canonical decode (audit fix): the old direct `samples::<i16>()`
+    // read silently produced an EMPTY buffer for float or 24-bit WAVs
+    // (hound's per-sample errors were filter_map'd away), so telemetry
+    // for those files was all-zero instead of an error.
+    let reader =
         hound::WavReader::open(path).with_context(|| format!("opening {}", path.display()))?;
-    let spec = reader.spec();
+    let (spec, raw, _frames) = crate::audiodecode::decode_wav_i16(reader)
+        .with_context(|| format!("decoding {}", path.display()))?;
     let sr = spec.sample_rate;
     let channels = spec.channels.max(1) as usize;
     let denom = i16::MAX as f32;
 
     // Mono-mix (mean of channels) into a single Vec<f32>. Telemetry
     // doesn't need stereo information — features are L+R averages.
-    let raw: Vec<i16> = reader.samples::<i16>().filter_map(|s| s.ok()).collect();
     let frame_count = raw.len() / channels;
     let mut mono = Vec::with_capacity(frame_count);
     for f in 0..frame_count {

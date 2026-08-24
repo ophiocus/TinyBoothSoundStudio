@@ -167,16 +167,35 @@ jobs:
         # Please pass a package name." without it.
         run: cargo wix -p tinybooth-sound-studio --nocapture
 
+      # Integrity sidecars (v0.4.85): the in-app updater downloads the
+      # .msi.sha256 next to the MSI and refuses a mismatching installer
+      # before anything runs elevated. Keep the "<hash>  <name>" format —
+      # the updater takes the first whitespace-separated token.
+      - name: Write SHA-256 sidecars
+        shell: pwsh
+        run: |
+          Get-ChildItem target/wix/*.msi | ForEach-Object {
+            $h = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
+            Set-Content -Path "$($_.FullName).sha256" -Value "$h  $($_.Name)" -NoNewline
+          }
+          $exe = "target/release/tinybooth-sound-studio.exe"
+          $h = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLower()
+          Set-Content -Path "$exe.sha256" -Value "$h  tinybooth-sound-studio.exe" -NoNewline
+
       - name: Upload MSI
         uses: actions/upload-artifact@v5
         with:
           name: tinybooth-sound-studio-windows-msi
-          path: target/wix/*.msi
+          path: |
+            target/wix/*.msi
+            target/wix/*.msi.sha256
 
       - uses: actions/upload-artifact@v5
         with:
           name: tinybooth-sound-studio-windows
-          path: target/release/tinybooth-sound-studio.exe
+          path: |
+            target/release/tinybooth-sound-studio.exe
+            target/release/tinybooth-sound-studio.exe.sha256
 
   release:
     needs: [build-windows]
@@ -191,5 +210,7 @@ jobs:
         with:
           files: |
             artifacts/tinybooth-sound-studio-windows/tinybooth-sound-studio.exe
+            artifacts/tinybooth-sound-studio-windows/tinybooth-sound-studio.exe.sha256
             artifacts/tinybooth-sound-studio-windows-msi/*.msi
+            artifacts/tinybooth-sound-studio-windows-msi/*.msi.sha256
           generate_release_notes: true

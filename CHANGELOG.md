@@ -8,6 +8,38 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); thi
 
 (Nothing yet — known issues all resolved as of v0.4.23.)
 
+## [0.4.85] — 2026-08-24
+
+### Fixed — audit tranche 2: data-safety and integrity
+
+Six findings from the full-codebase audit, ordered by severity:
+
+- **Self-update is no longer blind trust.** Releases now publish a
+  SHA-256 sidecar next to the installer, and the in-app updater
+  verifies the download against it before anything runs elevated —
+  a mismatch or an implausibly small download is refused outright.
+  The release version string is also sanitized before it touches a
+  filename or command line.
+- **Re-migrating a folder can no longer destroy an existing `.tib`.**
+  Migration now refuses if the target exists (with a clear message),
+  runs as a single transaction, and removes the partial file on
+  failure — a crash mid-migration used to leave a half-populated
+  container that opened without complaint.
+- **The folder-project manifest is saved atomically** (temp + fsync +
+  rename) with a `.bak` of the previous version — a crash or full disk
+  mid-save used to truncate the only copy of all mix state.
+- **Analysis no longer silently zeroes on hi-res files.** Telemetry and
+  the import coherence check read samples as 16-bit unconditionally, so
+  a float or 24-bit WAV produced empty/garbage analysis with no error.
+  Both now decode through the canonical path; coherence also handles
+  any channel count instead of refusing >2.
+- **Exporting projects with 24/32-bit sources no longer wrecks the
+  balance.** The export decoder scaled all int samples as 16-bit, so a
+  24-bit stem entered the mix ~256× hot and the limiter crushed
+  everything else to compensate.
+- **A corrupt settings file is preserved** as `config.json.corrupt`
+  for recovery instead of being silently replaced with defaults.
+
 ## [0.4.84] — 2026-08-24
 
 ### Added — Tracker tab, v1 core (TBSS-FR-0014)

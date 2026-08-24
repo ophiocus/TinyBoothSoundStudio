@@ -141,23 +141,20 @@ pub fn report(stems: &[(String, &Path)], mixdown_path: &Path) -> Result<Coherenc
 /// roughly [`ANALYSIS_HZ`]. Stems whose source rate isn't an integer
 /// multiple of the analysis rate get the closest integer factor.
 fn load_decimated(path: &Path) -> Result<Vec<f32>> {
-    let mut reader =
+    // Canonical decode (audit fix): the old direct i16 read turned a
+    // float/24-bit WAV into zeros or garbage *silently*, producing a
+    // bogus "large residual" coherence verdict. Any channel count now
+    // downmixes instead of bailing on >2ch.
+    let reader =
         hound::WavReader::open(path).with_context(|| format!("opening {}", path.display()))?;
-    let spec = reader.spec();
+    let (spec, raw, _frames) = crate::audiodecode::decode_wav_i16(reader)
+        .with_context(|| format!("decoding {}", path.display()))?;
+    let ch = spec.channels.max(1) as usize;
     let denom = i16::MAX as f32;
-    let mono: Vec<f32> = match spec.channels {
-        1 => reader
-            .samples::<i16>()
-            .map(|s| s.unwrap_or(0) as f32 / denom)
-            .collect(),
-        2 => {
-            let raw: Vec<i16> = reader.samples::<i16>().filter_map(|s| s.ok()).collect();
-            raw.chunks_exact(2)
-                .map(|c| (c[0] as f32 + c[1] as f32) / (2.0 * denom))
-                .collect()
-        }
-        n => anyhow::bail!("unsupported channel count: {n}"),
-    };
+    let mono: Vec<f32> = raw
+        .chunks_exact(ch)
+        .map(|c| c.iter().map(|s| *s as f32).sum::<f32>() / (ch as f32 * denom))
+        .collect();
     let factor = (spec.sample_rate / ANALYSIS_HZ).max(1) as usize;
     if factor == 1 {
         return Ok(mono);

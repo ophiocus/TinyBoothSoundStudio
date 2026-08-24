@@ -102,10 +102,19 @@ impl Config {
         let Some(p) = Self::path() else {
             return Self::default();
         };
-        std::fs::read_to_string(&p)
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default()
+        match std::fs::read_to_string(&p) {
+            Err(_) => Self::default(), // absent on first run
+            Ok(text) => match serde_json::from_str(&text) {
+                Ok(cfg) => cfg,
+                Err(_) => {
+                    // A corrupt config used to silently become defaults —
+                    // and the next save destroyed the evidence (audit
+                    // finding). Park it for inspection/recovery instead.
+                    let _ = std::fs::rename(&p, p.with_extension("json.corrupt"));
+                    Self::default()
+                }
+            },
+        }
     }
 
     /// Persist the config atomically: write to a sibling `.tmp` first,
