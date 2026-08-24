@@ -8,6 +8,29 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); thi
 
 (Nothing yet — known issues all resolved as of v0.4.23.)
 
+## [0.4.82] — 2026-08-24
+
+### Added — standardized keyboard interface (TBSS-FR-0016)
+
+The app now has one keyboard-ownership model instead of ad-hoc key
+checks: text fields > open modals > editor widgets > global shortcuts,
+resolved each frame from a single declarative binding table (which a
+future shortcut-help overlay and rebinding UI will read too). First
+bindings:
+
+- **Space** — play/pause the current audible thing (a playing
+  recording preview stops; otherwise the mixer toggles).
+- **Ctrl+S** — save the project.
+- **F1** — toggle the manual (migrated from the old one-off check).
+- **Esc** — close the topmost open dialog. The folder→`.tib` migration
+  prompt deliberately requires an explicit click.
+
+The "editor scope" tier exists for widgets that own the keyboard while
+focused — designed for the upcoming tracker's FastTracker-style pattern
+entry, which claims keys without stealing Ctrl+S/F1. Precedence rules
+are pure and unit-tested, including that shortcut consumption can never
+eat a text field's or an editor's keys.
+
 ## [0.4.81] — 2026-08-24
 
 ### Changed — recordings audition in place; the Mix-tab detour is gone

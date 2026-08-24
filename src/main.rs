@@ -20,6 +20,7 @@ mod export;
 mod fretboard;
 mod generator;
 mod git_update;
+mod keymap;
 mod lufs;
 mod manual;
 mod player;

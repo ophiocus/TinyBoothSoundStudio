@@ -377,6 +377,14 @@ pub struct TinyBoothApp {
     pub tab: Tab,
     pub status: Option<String>,
     pub show_manual: bool,
+    /// The declarative shortcut registry (TBSS-FR-0016). One table
+    /// drives dispatch today and the help/rebinding UI later.
+    pub keymap: crate::keymap::Keymap,
+    /// True while an editor widget (FR-0014 tracker grid, …) owns the
+    /// keyboard. Editors re-assert this every frame they hold egui
+    /// focus; the dispatcher clears it after reading, so a widget that
+    /// stops claiming releases the scope implicitly.
+    pub keyboard_editor_active: bool,
     pub manual_slug: String,
     pub md_cache: egui_commonmark::CommonMarkCache,
 
@@ -672,6 +680,8 @@ impl TinyBoothApp {
             trim_state: crate::ui::trim::TrimState::default(),
             show_visualizer: false,
             visualizer: crate::ui::visualizer::VisualizerState::default(),
+            keymap: crate::keymap::Keymap::default(),
+            keyboard_editor_active: false,
             import_dialog: None,
             import_conflict: None,
             pending_migration: None,
@@ -1021,6 +1031,82 @@ impl TinyBoothApp {
     /// the index in the recordings project's `tracks` list (loaded
     /// fresh by the caller — we re-load here to guard against stale
     /// indices if the file changed between frames).
+    /// True while any modal window/dialog is open — the keymap's Modal
+    /// scope. The manual is deliberately NOT counted: it's a non-modal
+    /// reference window (reading it while working is the point), and
+    /// counting it would kill its own F1 toggle.
+    fn any_modal_open(&self) -> bool {
+        self.show_admin
+            || self.show_trim
+            || self.show_health
+            || self.show_telemetry_settings
+            || self.show_audio_devices
+            || self.import_dialog.is_some()
+            || self.pending_generator_modal.is_some()
+            || self.editing_correction_for.is_some()
+            || self.crossfade_bounce_flow.is_some()
+            || self.pending_migration.is_some()
+    }
+
+    /// Esc: close the topmost modal — most transient first. The
+    /// migration prompt is deliberately NOT Esc-closable: its choices
+    /// differ materially, so it requires an explicit click.
+    fn close_top_modal(&mut self) {
+        if self.import_dialog.take().is_some() {
+            return;
+        }
+        if self.pending_generator_modal.take().is_some() {
+            return;
+        }
+        if self.crossfade_bounce_flow.take().is_some() {
+            return;
+        }
+        if self.editing_correction_for.take().is_some() {
+            return;
+        }
+        if self.show_audio_devices {
+            self.show_audio_devices = false;
+            return;
+        }
+        if self.show_telemetry_settings {
+            self.show_telemetry_settings = false;
+            return;
+        }
+        if self.show_health {
+            self.show_health = false;
+            return;
+        }
+        if self.show_trim {
+            self.show_trim = false;
+            return;
+        }
+        if self.show_admin {
+            self.show_admin = false;
+        }
+    }
+
+    /// Execute one resolved keymap action.
+    fn perform_action(&mut self, action: crate::keymap::Action) {
+        use crate::keymap::Action;
+        match action {
+            Action::TogglePlayback => {
+                // Space toggles the current audible thing: an in-listing
+                // recording preview if one is playing, else the mixer.
+                if self.recording_preview.is_some() {
+                    self.recording_preview = None;
+                } else if let Some(p) = self.player.as_ref() {
+                    match p.state.play_state() {
+                        crate::player::PlayState::Playing => p.pause(),
+                        _ => p.play(),
+                    }
+                }
+            }
+            Action::SaveProject => self.save_project(),
+            Action::ToggleManual => self.show_manual = !self.show_manual,
+            Action::CloseTopModal => self.close_top_modal(),
+        }
+    }
+
     /// Silence every audio activity in the app — the Mix player, the
     /// Crossfade and Album preview sessions, and any in-listing recording
     /// preview. The recordings list calls this before starting a take so
@@ -2712,10 +2798,23 @@ impl eframe::App for TinyBoothApp {
             ctx.request_repaint_after(std::time::Duration::from_millis(16));
         }
 
-        // F1 toggles the manual. Skipped when a text field has focus so it
-        // doesn't fight typing in the Admin window or track-name input.
-        if !ctx.wants_keyboard_input() && ctx.input(|i| i.key_pressed(egui::Key::F1)) {
-            self.show_manual = !self.show_manual;
+        // ── Keyboard dispatch (TBSS-FR-0016) ────────────────────────
+        // One standardized pass decides who owns the keyboard this
+        // frame: text fields > modals > editor widgets > global
+        // bindings. Replaces the old ad-hoc F1 check; every future
+        // shortcut and the FR-0014 tracker grid plug into this.
+        let focus = crate::keymap::FocusState {
+            text_editing: ctx.wants_keyboard_input(),
+            modal_open: self.any_modal_open(),
+            editor_active: self.keyboard_editor_active,
+        };
+        // The claim is per-frame: editors re-assert it while focused.
+        self.keyboard_editor_active = false;
+        let actions = self.keymap.resolve(&focus, |shortcut| {
+            ctx.input_mut(|i| i.consume_shortcut(shortcut))
+        });
+        for action in actions {
+            self.perform_action(action);
         }
 
         // v0.4.32 — egui requires panels to be declared in a strict

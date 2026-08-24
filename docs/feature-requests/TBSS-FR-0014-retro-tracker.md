@@ -109,9 +109,12 @@ apply: decode + render off the UI thread.
 
 ## Risks
 
-- **Keyboard entry vs egui focus** — FT2-style entry means the grid owns
-  most keys while focused; needs a real focus model (first tab to want
-  one). Prototype early in E3.
+- **Keyboard entry vs egui focus** — ~~needs a real focus model (first
+  tab to want one)~~ **resolved by TBSS-FR-0016** (v0.4.82): the grid
+  implements the standardized Editor-scope contract — claim via
+  `keyboard_editor_active` while focused, consume keys directly, leave
+  `override_editor` chords (Ctrl+S, F1) alone. Prototype the grid's key
+  handling against that contract early in E3.
 - **Effect semantics** are folklore-precise; implement against the
   OpenMPT wiki's documented command behaviors and test each with
   frame-exact fixtures.
