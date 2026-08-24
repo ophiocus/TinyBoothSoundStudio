@@ -534,6 +534,9 @@ fn show_recordings_list(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
 /// not referenced by a manifest track. `.swap-tmp` debris from
 /// interrupted writes is filtered out.
 fn show_loose_wavs(app: &mut TinyBoothApp, rec: &Project, ui: &mut egui::Ui) {
+    let mut loose_play: Option<PathBuf> = None;
+    let mut loose_stop = false;
+    let mut loose_integrate: Option<PathBuf> = None;
     let manifested: HashSet<String> = rec
         .tracks
         .iter()
@@ -609,14 +612,66 @@ fn show_loose_wavs(app: &mut TinyBoothApp, rec: &Project, ui: &mut egui::Ui) {
                     .file_name()
                     .and_then(|n| n.to_str())
                     .unwrap_or("(unnamed)");
+                // ▶/■ parity with manifest rows (FR-0008's last item):
+                // the preview engine is path-based, so loose WAVs play
+                // and scrub exactly like takes.
+                let playing_this = app
+                    .recording_preview
+                    .as_ref()
+                    .is_some_and(|p| p.path == **path);
+                let pending_this = app
+                    .recording_preview_pending
+                    .as_ref()
+                    .is_some_and(|(p, _)| p == path);
+                if pending_this {
+                    ui.add_enabled(false, egui::Button::new("…"));
+                } else if playing_this {
+                    if ui.small_button("⏹").clicked() {
+                        loose_stop = true;
+                    }
+                } else if ui
+                    .small_button("▶")
+                    .on_hover_text("Play (silences everything else)")
+                    .clicked()
+                {
+                    loose_play = Some((*path).clone());
+                }
                 ui.monospace(name);
                 let thumb = cached_or_compute_thumb(app, path);
                 let selection = app.recordings_selection.get(path).copied();
-                let response = draw_thumbnail(ui, thumb.as_ref(), selection, None);
-                if let Some(t) = thumb.as_ref() {
+                let playhead = if playing_this {
+                    app.recording_preview
+                        .as_ref()
+                        .map(|p| p.session.position_frac())
+                } else {
+                    None
+                };
+                let response = draw_thumbnail(ui, thumb.as_ref(), selection, playhead);
+                if playing_this {
+                    if response.clicked() || response.dragged() {
+                        if let (Some(pos), Some(p)) = (
+                            response.interact_pointer_pos(),
+                            app.recording_preview.as_ref(),
+                        ) {
+                            let frac =
+                                (pos.x - response.rect.left()) / response.rect.width().max(1.0);
+                            p.session.seek_frac(frac);
+                        }
+                    }
+                } else if let Some(t) = thumb.as_ref() {
                     update_selection_from_response(app, path, &response, t.duration_secs);
                 }
                 export_selection_button(app, path, ui);
+                let can_integrate =
+                    !matches!(app.project.kind, crate::project::ProjectKind::Recordings);
+                if ui
+                    .add_enabled(can_integrate, egui::Button::new("⇪").small())
+                    .on_hover_text(format!("Integrate into '{}' as a track", app.project.name))
+                    .on_disabled_hover_text("Open or create a project first")
+                    .clicked()
+                {
+                    loose_integrate = Some((*path).clone());
+                }
                 ui.label(human_bytes(*size));
                 ui.label(human_mtime(*mtime));
                 if ui
@@ -633,6 +688,16 @@ fn show_loose_wavs(app: &mut TinyBoothApp, rec: &Project, ui: &mut egui::Ui) {
                 ui.end_row();
             }
         });
+
+    if loose_stop {
+        app.recording_preview = None;
+    }
+    if let Some(p) = loose_play {
+        start_recording_preview(app, p);
+    }
+    if let Some(p) = loose_integrate {
+        app.integrate_wav_into_project(&p);
+    }
 }
 
 /// Cached thumbnail data per recording — peaks for rendering + the

@@ -1155,6 +1155,45 @@ impl TinyBoothApp {
         }
     }
 
+    /// Integrate ANY WAV on disk into the current project as a track —
+    /// the loose-WAV ⇪ (FR-0008's last item). Reads format facts from
+    /// the header; refuses rate mismatches like the take-based path.
+    pub fn integrate_wav_into_project(&mut self, path: &std::path::Path) {
+        if matches!(self.project.kind, crate::project::ProjectKind::Recordings) {
+            self.status =
+                Some("open or create a project first — files integrate into a project.".into());
+            return;
+        }
+        let header = match hound::WavReader::open(path) {
+            Ok(r) => r.spec(),
+            Err(e) => {
+                self.status = Some(format!("could not read WAV header: {e:#}"));
+                return;
+            }
+        };
+        if let Some(existing) = self.project.tracks.first() {
+            if existing.sample_rate != header.sample_rate {
+                self.status = Some(format!(
+                    "file is {} Hz but this project is {} Hz — no resampler yet.",
+                    header.sample_rate, existing.sample_rate
+                ));
+                return;
+            }
+        }
+        let bytes = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(e) => {
+                self.status = Some(format!("could not read file: {e:#}"));
+                return;
+            }
+        };
+        let name = path
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "import".into());
+        self.add_rendered_track(bytes, header.sample_rate, header.channels, &name);
+    }
+
     /// Land a rendered ✂ clip (TBSS-FR-0017) in the current project as a
     /// new track. Same storage arms as integrate-from-recordings: folder
     /// writes `tracks/<id>.wav`; `.tib` inserts stem+track rows and the
