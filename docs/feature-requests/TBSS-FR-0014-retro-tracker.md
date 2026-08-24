@@ -1,154 +1,139 @@
-# TBSS-FR-0014 — Retro tracker / loop sampler tab
+# TBSS-FR-0014 — Retro tracker (MadTracker-referenced) with sample-configured instruments
 
 | | |
 |---|---|
 | **ID** | TBSS-FR-0014 |
-| **Title** | Retro tracker: pattern-based loop sampler with sample-configurable instrument lanes |
-| **Status** | 📝 Proposed |
-| **Filed** | 2026-08-24 |
-| **Requested by** | Carlos (verbatim: "a new tab for a retro tracker/loop/sampler with instrument lanes that can be sample configured") |
-| **Depends on** | `audiodecode` (canonical WAV/i16 decode), `crossfade_player` (one-shot preview transport precedent), FR-0009 (bake-as-stem precedent), FR-0013 E2 (tab-wiring + background-job idiom) |
+| **Title** | Tracker tab in the MadTracker 2 lineage: vertical pattern editor, sample-configured instruments, drum patterns |
+| **Status** | 📝 Proposed (rev 2 — reshaped around MadTracker per user direction) |
+| **Filed** | 2026-08-24 · rev 2 same day |
+| **Requested by** | Carlos ("a new tab for a retro tracker/loop/sampler with instrument lanes that can be sample configured"; rev 2: "use references from madtracker") |
+| **Reference** | **MadTracker 2** (Yannick Delwiche) — feature set per [madtracker.org/features](https://www.madtracker.org/features.php) and [KVR's product page](https://www.kvraudio.com/product/madtracker_by_yannick_delwiche) |
+| **Depends on** | `audiodecode` (canonical decode), `crossfade_player` (session precedent), `dsp` biquads (instrument filter), FR-0009 (bake-as-stem), FR-0015 (exclusive-audio contract) |
 
 ## Executive summary
 
-A new **Tracker** tab in the ProTracker/FastTracker lineage: a step grid
-where rows are time steps and columns are **instrument lanes**, each lane
-bound to a **user-configured sample** (a recording take, a `.tib` stem's
-current revision, or any WAV/MP3 off disk). Patterns loop at a set BPM;
-steps trigger their lane's sample, optionally pitched in semitones and
-scaled in volume. The result can be auditioned live, looped, and **baked
-into the project as a stem** (the FR-0009 Generator precedent) or exported
-as a WAV — so a beat sketched in the tracker becomes first-class material
-for the Mix, Crossfade, Album, and Chords features.
+A **Tracker** tab modeled on MadTracker 2's editor conventions rather than
+a generic step sequencer: a **vertical pattern editor** (time flows down,
+tracks as columns) whose cells carry **note · instrument · volume ·
+panning · effect command**, driven by FastTracker-style QWERTY piano
+input; an **instrument list** where each instrument is a user-configured
+sample (recording take, `.tib` stem, or file) with loop points, base
+note, gain, and a **resonant filter** (MT2's signature per-instrument
+touch — we already own the biquads); plus MT2's **drum patterns** idea as
+a first-class alternate view — a horizontal step grid over the same data
+for percussion lanes. Output flows back into TinyBooth: loop audition
+under the app-wide one-audible-thing contract (FR-0015), **⤓ bake as a
+project stem** (FR-0009 path), and WAV export.
 
 ## Problem
 
-TinyBooth can record, correct, mix, and compose *existing* audio, and can
-synthesize entrainment tones — but it has no way to **make rhythmic
-material**. The user's takes (Record tab) and stems are dead ends as
-percussion/loop sources: there is no way to chop a take into an
-instrument and sequence it. Every sibling feature would benefit from a
-loop source: albums need interstitials, mixes need scratch beats, and the
-recordings browser is already a natural sample bin.
+TinyBooth records, cleans, mixes, and composes existing audio but cannot
+*originate* rhythmic/melodic material. Takes and stems are dead ends as
+instruments. A tracker closes the loop — and the user has a specific
+dialect in mind: MadTracker, not an abstract grid.
 
 ## Proposal
 
-### Data model (E1 — pure, serde, no UI)
+### What we take from MadTracker 2 (and what we consciously shrink)
+
+| MadTracker 2 | TinyBooth Tracker v1 |
+|---|---|
+| Vertical pattern editor; note/instr/**volume col**/**panning col**/effect, 4-digit hex params | Same five columns. v1 implements a small effect subset (below); unknown commands are preserved, displayed, and ignored by playback |
+| 64 tracks × 4 polyphony channels per track (NNA) | 8 tracks × 2 voices per track — enough for NNA "continue" so releases ring out; cut is the default |
+| Instruments: sample + **resonant filter per instrument** + envelopes + NNA | Sample (any source, trimmed) + base note + gain + loop (off/forward/ping-pong) + resonant low-pass (cutoff/Q via `dsp` biquads) + NNA cut/continue. Envelopes deferred |
+| **Drum patterns** as a dedicated feature | The same pattern data rendered as a horizontal step grid for lanes flagged "drum" — toggleable per track, one underlying model |
+| Patterns + order list (song) | v1: patterns + a minimal order list (play one pattern looped, or the order chain) |
+| ProTracker/FastTracker keyboard shortcuts | FT2-style QWERTY piano (two octave rows), octave +/-, edit step, insert/delete row, Del clears cell |
+| Speed/BPM tempo model | Classic ticks-per-row (`speed`) + BPM; effects operate per tick |
+| VST 2.3 effects/instruments, ReWire, track FX/EQ, automation envelopes | **Out of scope.** TinyBooth's correction chain applies later, on the baked stem — that's the house's separation of concerns |
+| Synchronized / keep-on-disk samples | Out of scope (all samples decode to RAM via `audiodecode`, like the player) |
+
+### v1 effect-command subset (per-tick, classic semantics)
+
+`0xy` arpeggio · `1xx`/`2xx` pitch slide up/down · `4xy` vibrato ·
+`9xx` sample offset · `Axy` volume slide · `Cxx` set volume ·
+`Dxx` pattern break · `Fxx` set speed/BPM · `ECx` note cut ·
+`EDx` note delay. Everything else parses, round-trips, and no-ops.
+
+### Data model (E1 — pure, serde)
 
 ```rust
-struct TrackerInstrument {
-    name: String,
-    /// Where the sample comes from. Decoded once at load; cached.
-    source: SampleSource,          // File(PathBuf) | TibStem { path, track_id } | RecordingTake { track_id }
-    /// Trim window into the source (samples), so a take can be chopped.
-    start: u64, len: Option<u64>,
-    gain_db: f32,
-    /// Base pitch reference: steps play at 2^(semitones/12) speed.
-    root_semitone_offset: i8,
-}
-
-struct TrackerStep { on: bool, semitone: i8, velocity: u8 /* 0-127 */ }
-
-struct TrackerPattern {
-    steps_per_bar: u8,             // 16 default (4/4 sixteenths)
-    bars: u8,                      // 1-4 → 16..64 steps
-    lanes: Vec<Vec<TrackerStep>>,  // lanes[i].len() == step count
-}
-
-struct TrackerSong {
-    bpm: f32, swing: f32,
-    instruments: Vec<TrackerInstrument>,   // parallel to pattern.lanes
-    pattern: TrackerPattern,               // v1: ONE pattern (loop); song-arrangement deferred
-}
+struct TrackerCell { note: Option<Note>, instr: Option<u8>, vol: Option<u8>,
+                     pan: Option<u8>, fx: Option<(u8, u16)> } // 4-digit hex param, MT2-style
+struct TrackerPattern { rows: u16 /* 1..=256, 64 default */, tracks: Vec<Vec<TrackerCell>> }
+struct TrackerInstrument { name, source: SampleSource, trim: (u64, Option<u64>),
+                           base_note: Note, gain_db: f32,
+                           loop_mode: Off|Forward|PingPong, loop_pts: (u64, u64),
+                           filter: Option<{ cutoff_hz: f32, q: f32 }>,
+                           nna: Cut|Continue }
+struct TrackerSong { bpm: f32, speed: u8 /* ticks/row */,
+                     instruments: Vec<TrackerInstrument>,
+                     patterns: Vec<TrackerPattern>, order: Vec<u8>,
+                     drum_view_tracks: Vec<bool> }
 ```
 
-Persisted as a JSON column on the project (folder manifest field /
-`.tib` `config_revs` entry) so a tracker sketch travels with its project.
+Persisted with the project (manifest field / `.tib` `config_revs`).
 
-### Playback (E2)
+### Engine (E2)
 
-Pitch is done the authentic retro way: **variable-rate sample playback**
-(nearest/linear interpolation, `rate = 2^(semi/12)`) — no resampler
-dependency, and the aliasing *is* the aesthetic. Rendering a pattern is
-pure math over decoded i16 buffers (via `audiodecode::decode_wav_i16`),
-so the loop is **pre-rendered to a stereo f32 buffer whenever the
-pattern/instruments change** (a 2-bar 16-step pattern renders in
-milliseconds) and played through a dedicated looping transport modeled on
-`CrossfadePreviewSession` — with the loop flag added, and reusing the
-user's configured output device (fixing that session's known default-
-device gap while we're in there). No per-step realtime scheduling in v1;
-edit-during-playback re-renders and hot-swaps the buffer at the loop
-boundary.
+Tick-based renderer: `speed` ticks per row at `BPM` → tick length in
+frames; notes trigger voices (variable-rate playback for pitch —
+authentic aliasing, no resampler); per-tick effect processing; voice
+pool per track honoring NNA. Pure function `render_song(song, from_row,
+rows) -> Vec<f32>` → unit-testable against hand-computed frame counts.
+Playback = pre-rendered buffer through the `CrossfadePreviewSession`
+loop transport (seek/position already exist since v0.4.81), re-rendered
+on edit and swapped at a loop boundary. Obeys `App::stop_all_playback`
+exclusivity in both directions.
 
-### UI (E3 — the Tracker tab)
+### UI (E3/E4)
 
-- Standard tab wiring (`Tab::Tracker`, `TrackerUiState` per the
-  FR-0013 recipe; state struct lives in `ui/tracker.rs` per the audit's
-  TrimState convention).
-- **Instrument rail** (left): lane list; each lane = name, sample picker
-  (Recordings takes / project stems / file dialog), trim range, gain,
-  root pitch. "▶" auditions the lane's sample once.
-- **Step grid** (right): rows = lanes, columns = steps, bar-grouped
-  shading; click toggles, drag paints; per-step semitone/velocity via
-  scroll or a small popover. Playhead column highlights while looping.
-- **Transport strip**: BPM drag, swing, bars/steps-per-bar, ▶ loop /
-  ■ stop, and the two sinks: **⤓ Bake as stem** (FR-0009 path: lands as
-  a locked `TrackSource::Tracker` track / `.tib` revision) and
-  **Export WAV…**.
-
-### Non-goals (v1)
-
-Multiple patterns + order list (the "song" editor), per-step effects
-(retrigger, slide, vibrato), MIDI in/out, sample recording directly into
-an instrument (use the Record tab), time-stretching (pitch is speed,
-period).
+- **Pattern editor**: monospace grid, row numbers hex (MT2 style),
+  current-row highlight, track headers with mute/solo; FT2 keyboard
+  entry; the panning/volume columns render compactly (`--`/value).
+- **Drum view**: tracks flagged drum render as step-grid rows above the
+  note editor (one model, two projections).
+- **Instrument rail**: list + editor (sample picker via recordings /
+  stems / file — reusing FR-0015's decode plumbing; trim, loop, base
+  note, gain, filter, NNA); ▶ auditions the instrument.
+- **Transport**: BPM, speed, pattern/order selector, loop ▶/■,
+  **⤓ Bake as stem**, **Export WAV…**.
 
 ## Implementation notes
 
-- Epics: **E1** model + pure pattern-render (tests: step placement
-  sample-accurate at BPM; pitch = rate math; velocity scaling; swing
-  offsets) → **E2** looping transport (reuse/extend `crossfade_player`;
-  honor configured output device) → **E3** tab UI → **E4** bake/export
-  sinks. E1/E2 are pure and testable before any UI exists — same wave
-  discipline as FR-0013.
-- Decode through `audiodecode` only (the audit's canonical path — no new
-  decode ladders). `.tib` sources read the current revision BLOB via
-  `Cursor`, same as the player.
-- Background rules from the audit apply from day one: sample decode and
-  bake run off the UI thread (`ChordJobMsg`-style mpsc poll; or the
-  `JobHandle` helper if the cohesion tranche lands first).
-- The step grid is the first UI with hold-and-paint interaction —
-  pointer-capture semantics need the same care the crossfade fade
-  handles got.
+Epics: **E1** model + serde + render math → **E2** engine + loop
+transport → **E3** pattern editor + keyboard entry → **E4** instrument
+rail + drum view → **E5** bake/export + order list. E1/E2 fully
+testable headless (same wave discipline as FR-0013). Background rules
+apply: decode + render off the UI thread.
 
 ## Risks
 
-- **Loop-boundary hot-swap** must be click-free: swap on the boundary
-  sample with a 2–5 ms crossfade if needed. Prove with a unit test on
-  the rendered buffers, not by ear.
-- **Sample-rate mixing**: instruments at 44.1k vs a 48k project — v1
-  renders at the project rate and variable-rate playback absorbs the
-  ratio (a 44.1k sample at "0 semitones" plays at 44.1/48 rate). Must be
-  explicit in the render math or everything is subtly flat.
-- Scope creep toward a DAW: the non-goals list is the fence; v1 is one
-  looping pattern done well.
+- **Keyboard entry vs egui focus** — FT2-style entry means the grid owns
+  most keys while focused; needs a real focus model (first tab to want
+  one). Prototype early in E3.
+- **Effect semantics** are folklore-precise; implement against the
+  OpenMPT wiki's documented command behaviors and test each with
+  frame-exact fixtures.
+- Tick renderer complexity creep — the v1 command subset is the fence.
 
 ## Open questions
 
-1. Should ⤓ Bake write a *loop* long enough to fill the project's
-   longest stem (FR-0009 anchors generator bakes that way), or exactly
-   one pattern length? (Lean: fill-to-longest, matching Generator.)
-2. Per-lane choke groups (closed hat chokes open hat) — v1 or defer?
-   (Lean: defer; it's the first "per-step effect".)
-3. Does the Recordings browser grow a "send to Tracker as instrument"
-   affordance (FR-0008 adjacency), or does the Tracker's picker pull
-   from recordings only? (Lean: picker-only in v1.)
+1. Order-list in v1 or ship pattern-loop first? (Lean: pattern-loop
+   first, order list in the same FR's final epic.)
+2. Panning column in v1 playback (stereo voice pan) or display-only
+   until the mixer story matures? (Lean: implement — it's cheap.)
+3. `.mt2`/`.xm`/`.mod` import? (Lean: defer; note-for-note import is a
+   separate FR if wanted.)
 
 ## Success criteria
 
-- A 2-bar, 4-lane beat built from two recording takes and two WAVs
-  loops gapless at 90–180 BPM, survives app restart with the project,
-  bakes into a stem that plays in the Mix tab, and exports a WAV whose
-  duration is exactly `bars × steps × step_secs` at the project rate.
-- All pattern-render math covered by pure tests; zero new WAV decode
-  implementations; no UI-thread blocking on decode or bake.
+- A 2-pattern song (order A A B) with 4 instruments — two from
+  recording takes — plays gapless, edits mid-loop swap cleanly, NNA
+  continue audibly rings a release, `9xx`/`Cxx`/`Fxx`/`ECx` behave per
+  reference, bake lands a stem the Mix tab plays, export duration is
+  frame-exact.
+- All engine math covered by pure tests; zero new decode paths; no
+  UI-thread blocking.
+
+Sources: [MadTracker — About/Features](https://www.madtracker.org/features.php) · [MadTracker on KVR Audio](https://www.kvraudio.com/product/madtracker_by_yannick_delwiche)
