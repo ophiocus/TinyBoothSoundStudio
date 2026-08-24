@@ -8,6 +8,48 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); thi
 
 (Nothing yet — known issues all resolved as of v0.4.23.)
 
+## [0.4.77] — 2026-08-24
+
+### Fixed — four bugs surfaced by a full-codebase audit
+
+A five-agent fresh-eyes audit of the entire workspace (~35,400 lines)
+confirmed and fixed four defects, three of them data-loss:
+
+- **A migrated `.tib` project lost its Suno mixdown on the first save.**
+  Migration stores the mixdown under a reserved track that is never part
+  of the in-memory project, and the save-time prune treated "absent from
+  the project" as "deleted by the user" — the SQL cascade then removed
+  the mixdown's audio for good. Pruning now only considers real mix
+  lanes, and a new regression test (which failed before the fix) pins
+  the behaviour: migrate → load → save → mixdown still readable.
+- **File → Quit skipped shutdown entirely.** It terminated the process
+  outright, bypassing the exit hook — so a recording in progress never
+  had its WAV header finalised (an unreadable take), and settings went
+  unsaved. Quit now closes through the same clean path as the window ✕.
+- **Mix-tab track faders were never saved.** Fader moves reached the
+  live player but were never written back to the project, so they
+  vanished on any player rebuild and were ignored by Save and Export —
+  silently discarding balance work unless automation was armed. The
+  fader now writes through and marks the project dirty, exactly as the
+  master fader and polarity button always did.
+- **24-bit WAVs played back as a square wave.** Four separate decode
+  paths (playback, recording thumbnails, crossfade, album) all clamped
+  raw 24/32-bit samples into 16-bit range instead of scaling them —
+  anything louder than about −48 dBFS pinned to full scale. All four now
+  share one canonical decoder with correct bit-depth scaling, verified
+  by a test that a −20 dBFS 24-bit sine decodes to −20 dBFS, not to
+  full scale.
+
+### Internal
+
+- First tranche of the audit's cohesion plan: the four copy-pasted WAV
+  decode ladders and two stereo-expansion loops collapsed into
+  `audiodecode::decode_wav_i16` / `wav_i16_to_stereo_f32` (~130
+  duplicated lines removed).
+- The audit's full findings — per-feature fit-for-purpose verdicts, the
+  ranked consolidation plan, and production-completeness definitions —
+  are recorded outside the repo; open items land in future releases.
+
 ## [0.4.76] — 2026-08-18
 
 ### Changed — chord recognition: tempo, smoothing, and chord-quality accuracy
