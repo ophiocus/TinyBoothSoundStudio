@@ -8,6 +8,32 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); thi
 
 (Nothing yet — known issues all resolved as of v0.4.23.)
 
+## [0.4.79] — 2026-08-24
+
+### Fixed — recordings list: ▶ played the wrong take; fresh takes showed no waveform
+
+Both reported minutes after v0.4.78 restored recording. Two independent
+defects:
+
+- **▶ could play a different take than the one clicked.** The mixer
+  refuses to load tracks whose *length* differs from the first one it
+  loads — a safety rule for stem projects (where every stem must line
+  up) that is exactly wrong for the recordings list, where takes are
+  naturally all different lengths. With three takes only the first
+  actually loaded, and the play button's track lookup was positional,
+  so clicking ▶ on one take solo'd — and played — another. Recording
+  projects now load all takes regardless of length (shorter ones simply
+  end early), every lane carries a durable link back to its project
+  row, and all fader / polarity / automation / correction write-backs
+  go through that link. Clicking ▶ on a take that genuinely couldn't
+  load now says so instead of silently playing something else.
+- **Waveform thumbnails were permanently blank for new takes.** The
+  list renders while a take is still recording, and a thumbnail
+  computed from the not-yet-finished WAV (which reads as zero-length
+  until the recorder closes it) was cached forever. Thumbnails now
+  refresh automatically when the file changes, and the take currently
+  being recorded is never thumbnailed mid-write.
+
 ## [0.4.78] — 2026-08-24
 
 ### Fixed — Record button did nothing on existing projects
