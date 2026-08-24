@@ -469,6 +469,13 @@ pub struct TinyBoothApp {
     /// Optional track index to solo on autoplay — the entry the user
     /// actually clicked. `None` = autoplay without changing solos.
     pub mix_autoplay_solo_idx: Option<usize>,
+    /// Detail-view filter for the Mix tab: `(project_root, project_idx)`.
+    /// Set by the Record tab's ▶ so the mixer shows ONLY the clicked take
+    /// (lane + strip) instead of every take in the recordings project —
+    /// "▶ on one take" reads as "open this take", not "open the whole
+    /// mixer". The root guard makes a stale focus inert after the user
+    /// switches projects; the "Show all takes" banner button clears it.
+    pub mix_take_focus: Option<(std::path::PathBuf, usize)>,
 
     // Self-update plumbing.
     pub update_state: UpdateState,
@@ -659,6 +666,7 @@ impl TinyBoothApp {
             recordings_selection: std::collections::HashMap::new(),
             mix_autoplay_pending: false,
             mix_autoplay_solo_idx: None,
+            mix_take_focus: None,
             update_state: UpdateState::Checking,
             update_error: None,
             update_rx: Some(rx),
@@ -1009,6 +1017,7 @@ impl TinyBoothApp {
         self.tab = Tab::Mix;
         self.mix_autoplay_pending = true;
         self.mix_autoplay_solo_idx = Some(idx);
+        self.mix_take_focus = Some((self.project.root.clone(), idx));
     }
 
     /// Delete a recording by index in the recordings project's
