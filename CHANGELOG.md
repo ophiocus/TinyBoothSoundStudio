@@ -8,6 +8,38 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); thi
 
 (Nothing yet — known issues all resolved as of v0.4.23.)
 
+## [0.4.84] — 2026-08-24
+
+### Added — Tracker tab, v1 core (TBSS-FR-0014)
+
+A MadTracker-lineage tracker lands as a new **Tracker** tab:
+
+- **Pattern editor** — vertical grid (rows down, tracks across), hex row
+  numbers, bar shading, cursor; click to focus, then play notes on the
+  keyboard (FastTracker layout: ZXCV… lower octave, QWER… upper;
+  F9/F10 octave, arrows/PgUp/PgDn/Home/End navigation, Delete clears,
+  edit-step auto-advance). The grid is the first tenant of the v0.4.82
+  keyboard interface's editor scope — it owns the keys while focused,
+  and Ctrl+S / F1 still work.
+- **Instruments** — add any audio file as a sample (decoded in the
+  background); per-instrument base note, gain, loop off/forward/
+  ping-pong, cut/ring (NNA), and a resonant low-pass filter.
+- **Engine** — classic tick timing (speed + BPM), variable-rate pitch
+  with authentic aliasing, and the classic effect set (arpeggio,
+  slides, vibrato, sample offset, volume slide, pattern break,
+  speed/BPM, note cut, note delay) — all pinned by 13 frame-exact
+  tests.
+- **Transport** — ▶ loops the pattern (edits re-render at the loop
+  boundary); **⤓ Bake as stem** adds the loop to the project as a
+  track; **Export WAV…** writes it out. Tracker playback participates
+  in the app-wide one-audible-thing rule.
+- Songs persist automatically per project.
+
+v1 fences (follow-ups tracked in the FR): volume/pan/effect columns are
+engine-supported but not yet keyboard-editable (notes only), one
+pattern (order chains play but no order editor), no drum-grid view yet,
+instrument picker is file-based (recordings-take picker to come).
+
 ## [0.4.83] — 2026-08-24
 
 ### Added — Mix window: scrubbing, region highlight, ✂ clip (TBSS-FR-0017)

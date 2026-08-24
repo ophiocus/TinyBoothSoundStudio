@@ -348,6 +348,8 @@ pub enum Tab {
     Album,
     /// Chord-chart video generator — TBSS-FR-0013.
     ChordVideo,
+    /// MadTracker-lineage tracker — TBSS-FR-0014.
+    Tracker,
 }
 
 pub struct TinyBoothApp {
@@ -487,6 +489,9 @@ pub struct TinyBoothApp {
     pub album_state: AlbumUiState,
     /// Chord-video tab state. TBSS-FR-0013.
     pub chordvideo_state: ChordVideoUiState,
+    /// Tracker tab state. TBSS-FR-0014 (state lives in ui/tracker.rs
+    /// per the TrimState convention the audit endorsed).
+    pub tracker_state: crate::ui::tracker::TrackerUiState,
 
     /// Mixer/automation recorder. Captures fader gestures while a strip's
     /// arm toggle is on and the player is in Playing state. Flushed into
@@ -729,6 +734,7 @@ impl TinyBoothApp {
             crossfade_bounce_flow: None,
             album_state: AlbumUiState::default(),
             chordvideo_state: ChordVideoUiState::default(),
+            tracker_state: crate::ui::tracker::TrackerUiState::default(),
             recorder: crate::automation::Recorder::default(),
             mix_console_fraction: 0.42,
             recordings_page: 0,
@@ -1154,18 +1160,30 @@ impl TinyBoothApp {
     /// writes `tracks/<id>.wav`; `.tib` inserts stem+track rows and the
     /// audio as the `orig` revision.
     pub fn add_clip_track(&mut self, wav_bytes: Vec<u8>, sample_rate: u32, channels: u16) {
+        self.add_rendered_track(wav_bytes, sample_rate, channels, "clip");
+    }
+
+    /// Land any rendered audio (mix clip, tracker bake, …) as a new
+    /// project track named `<prefix>-NNN`.
+    pub fn add_rendered_track(
+        &mut self,
+        wav_bytes: Vec<u8>,
+        sample_rate: u32,
+        channels: u16,
+        prefix: &str,
+    ) {
         let (new_id, _) = self.project.new_track_slot();
         let frames = ((wav_bytes.len().saturating_sub(44)) / 2 / channels.max(1) as usize) as f32;
         let duration_secs = frames / sample_rate.max(1) as f32;
-        let n_clips = self
+        let n_prior = self
             .project
             .tracks
             .iter()
-            .filter(|t| t.name.starts_with("clip-"))
+            .filter(|t| t.name.starts_with(&format!("{prefix}-")))
             .count();
         let mut track = crate::project::Track {
             id: new_id.clone(),
-            name: format!("clip-{:03}", n_clips + 1),
+            name: format!("{prefix}-{:03}", n_prior + 1),
             file: String::new(),
             mute: false,
             gain_db: 0.0,
@@ -1189,7 +1207,7 @@ impl TinyBoothApp {
                     let rid = db.insert_revision(
                         &new_id,
                         crate::tib::RevKind::Orig,
-                        "mix clip",
+                        prefix,
                         sample_rate,
                         channels >= 2,
                         duration_secs,
@@ -1214,11 +1232,11 @@ impl TinyBoothApp {
         match result {
             Ok(()) => {
                 self.player = None; // rebuild with the new lane
-                self.status = Some("clip added as a new track.".into());
+                self.status = Some(format!("{prefix} added as a new track."));
             }
             Err(e) => {
                 self.project.tracks.retain(|t| t.id != new_id);
-                self.status = Some(format!("clip-to-track failed: {e:#}"));
+                self.status = Some(format!("{prefix}-to-track failed: {e:#}"));
             }
         }
     }
@@ -1236,6 +1254,7 @@ impl TinyBoothApp {
         self.album_state.preview = None;
         self.recording_preview = None;
         self.recording_preview_pending = None;
+        self.tracker_state.playing = None;
     }
 
     /// Copy a recordings-list take into the currently open project as a
@@ -3187,6 +3206,7 @@ impl eframe::App for TinyBoothApp {
                 ui.selectable_value(&mut self.tab, Tab::Crossfade, "Crossfade");
                 ui.selectable_value(&mut self.tab, Tab::Album, "Album");
                 ui.selectable_value(&mut self.tab, Tab::ChordVideo, "Chords");
+                ui.selectable_value(&mut self.tab, Tab::Tracker, "Tracker");
 
                 ui.separator();
                 // 🌀 Visualizer toggle (v0.4.11). Selectable so it
@@ -3367,6 +3387,7 @@ impl eframe::App for TinyBoothApp {
                 Tab::Crossfade => ui::crossfade::show(self, ui),
                 Tab::Album => ui::album::show(self, ui),
                 Tab::ChordVideo => ui::chordvideo::show(self, ui),
+                Tab::Tracker => ui::tracker::show(self, ui),
             }
         });
 

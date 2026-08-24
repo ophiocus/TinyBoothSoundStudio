@@ -17,6 +17,7 @@ pub mod project;
 pub mod record;
 pub mod spectrum_panel;
 pub mod telemetry_settings;
+pub mod tracker;
 pub mod trim;
 pub mod update_dialog;
 pub mod visualizer;
