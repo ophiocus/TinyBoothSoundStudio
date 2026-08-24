@@ -8,6 +8,34 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); thi
 
 (Nothing yet — known issues all resolved as of v0.4.23.)
 
+## [0.4.78] — 2026-08-24
+
+### Fixed — Record button did nothing on existing projects
+
+Pressing **⏺ Record** silently failed on any recordings project that
+already had at least one take (user-reported with a Yeti Stereo
+Microphone: "nothing happens when I play record"). Two defects stacked:
+
+- **Format-blind device configuration.** Once a project has a take, the
+  recorder pins new takes to that sample rate — and the rate-matching
+  path picked the *first* device configuration covering the rate,
+  whatever its sample format. On Windows the Yeti advertises an 8-bit
+  configuration first, which the recorder can't stream, so every take
+  after the first failed with "unsupported sample format U8". (This was
+  also the long-suspected FR-0008 "repeat-take race" — no race:
+  first-take-works/next-take-fails was the rate pin kicking in.)
+  Configuration selection now considers only streamable formats,
+  preferring float, then 16-bit, with channel count as the tiebreaker
+  so Stereo mode keeps working.
+- **The failure was invisible.** The error went only to the status bar
+  at the very bottom of the window, so the click looked like a no-op.
+  Record failures now also appear in red directly under the Record
+  button.
+
+Verified on the reporting hardware via a new (ignored, opt-in) probe
+test that runs three consecutive takes through both configuration paths
+against the real device: 3/3 takes start in ~30 ms at 48 kHz.
+
 ## [0.4.77] — 2026-08-24
 
 ### Fixed — four bugs surfaced by a full-codebase audit
