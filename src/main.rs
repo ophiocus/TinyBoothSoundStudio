@@ -32,6 +32,7 @@ mod tba_album;
 mod telemetry;
 mod tib;
 mod tib_project;
+mod tracker;
 mod trim;
 mod ui;
 mod wav_meta;
