@@ -356,12 +356,15 @@ pub fn show(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
     }
 
     if play_a {
+        app.recording_preview = None; // one audible thing at a time
         start_preview_track(&mut app.crossfade_state, true);
     }
     if play_b {
+        app.recording_preview = None;
         start_preview_track(&mut app.crossfade_state, false);
     }
     if play_mix {
+        app.recording_preview = None;
         start_preview_mix(&mut app.crossfade_state);
     }
     if stop {

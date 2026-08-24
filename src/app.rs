@@ -100,6 +100,16 @@ impl Default for ChordVideoUiState {
     }
 }
 
+/// One recording take playing directly from the Record tab's listing —
+/// its own lightweight session (same type as the Crossfade/Album
+/// previews), fully decoupled from the Mix player. v0.4.81.
+pub struct RecordingPreview {
+    /// Absolute path of the take being played, so the row can show ■ and
+    /// draw its playhead.
+    pub path: PathBuf,
+    pub session: crate::crossfade_player::CrossfadePreviewSession,
+}
+
 /// Album-tab UI state. The currently-open `.tba` (if any), the live
 /// in-memory `Album` being edited, and a shared transport for preview.
 /// TBSS-FR-0012.
@@ -337,6 +347,12 @@ pub struct TinyBoothApp {
     pub selected_mode: SourceMode,
     pub viz: Arc<VizState>,
     pub session: Option<RecordingSession>,
+    /// Live input monitor (TBSS-FR-0015): the same capture stream + DSP
+    /// chain + viz as a recording, with no WAV writer — lets the user
+    /// watch base levels through the exact take signal path before
+    /// committing one. Mutually exclusive with `session` (starting a
+    /// take drops the monitor to release the device first).
+    pub monitor: Option<RecordingSession>,
     /// Metadata for the currently-recording take (target filespace,
     /// minted id, etc.). Set in lockstep with `session`; both `Some`
     /// during recording, both `None` between takes. See [`PendingTake`].
@@ -465,17 +481,21 @@ pub struct TinyBoothApp {
     /// to the recordings project and queue this flag so the Mix-tab
     /// view starts playback automatically on its next render. Cleared
     /// once acted on. v0.4.0.
-    pub mix_autoplay_pending: bool,
     /// Optional track index to solo on autoplay — the entry the user
     /// actually clicked. `None` = autoplay without changing solos.
-    pub mix_autoplay_solo_idx: Option<usize>,
-    /// Detail-view filter for the Mix tab: `(project_root, project_idx)`.
-    /// Set by the Record tab's ▶ so the mixer shows ONLY the clicked take
-    /// (lane + strip) instead of every take in the recordings project —
-    /// "▶ on one take" reads as "open this take", not "open the whole
-    /// mixer". The root guard makes a stale focus inert after the user
-    /// switches projects; the "Show all takes" banner button clears it.
-    pub mix_take_focus: Option<(std::path::PathBuf, usize)>,
+    /// In-listing playback of a recording take (Record tab). The take
+    /// plays through its own lightweight session — the Mix tab is no
+    /// longer involved in auditioning recordings at all (the ▶-to-mixer
+    /// detour kept breaking: async-build solo races, mixed-length skips,
+    /// index drift — retired in v0.4.81 on user direction).
+    pub recording_preview: Option<RecordingPreview>,
+    /// In-flight background decode for a take about to preview:
+    /// `(path, receiver)`. Polled by the Record tab each frame.
+    #[allow(clippy::type_complexity)]
+    pub recording_preview_pending: Option<(
+        PathBuf,
+        std::sync::mpsc::Receiver<Result<(Vec<f32>, u32), String>>,
+    )>,
 
     // Self-update plumbing.
     pub update_state: UpdateState,
@@ -625,6 +645,7 @@ impl TinyBoothApp {
             selected_mode: SourceMode::Mixdown,
             viz: VizState::new(),
             session: None,
+            monitor: None,
             pending_take: None,
             pending_track_name: String::new(),
             profiles,
@@ -664,9 +685,8 @@ impl TinyBoothApp {
             recordings_page: 0,
             recordings_peaks_cache: std::collections::HashMap::new(),
             recordings_selection: std::collections::HashMap::new(),
-            mix_autoplay_pending: false,
-            mix_autoplay_solo_idx: None,
-            mix_take_focus: None,
+            recording_preview: None,
+            recording_preview_pending: None,
             update_state: UpdateState::Checking,
             update_error: None,
             update_rx: Some(rx),
@@ -779,10 +799,12 @@ impl TinyBoothApp {
         // recordings project. cpal refuses up-front rather than
         // landing a broken take on disk.
         let required_sample_rate = rec.tracks.first().map(|t| t.sample_rate);
+        // A live monitor holds the same device — release it first.
+        self.monitor = None;
         let session = audio::start_recording(
             &dev,
             mode,
-            &abs,
+            Some(&abs),
             self.viz.clone(),
             profile.clone(),
             self.audio_err_tx.clone(),
@@ -999,7 +1021,31 @@ impl TinyBoothApp {
     /// the index in the recordings project's `tracks` list (loaded
     /// fresh by the caller — we re-load here to guard against stale
     /// indices if the file changed between frames).
-    pub fn play_recording_in_mixer(&mut self, idx: usize) {
+    /// Silence every audio activity in the app — the Mix player, the
+    /// Crossfade and Album preview sessions, and any in-listing recording
+    /// preview. The recordings list calls this before starting a take so
+    /// exactly one thing is ever audible; the other transports call it
+    /// (via their own play paths) for the same reason.
+    pub fn stop_all_playback(&mut self) {
+        if let Some(p) = self.player.as_ref() {
+            p.state.set_play_state(crate::player::PlayState::Stopped);
+        }
+        self.crossfade_state.preview = None;
+        self.album_state.preview = None;
+        self.recording_preview = None;
+        self.recording_preview_pending = None;
+    }
+
+    /// Copy a recordings-list take into the currently open project as a
+    /// new track, where the full cleaning toolset (corrections, telemetry,
+    /// trim, mixing) applies. Replaces the retired ▶-to-mixer detour as
+    /// the "work on this take" gesture.
+    pub fn integrate_recording_into_project(&mut self, idx: usize) {
+        if matches!(self.project.kind, crate::project::ProjectKind::Recordings) {
+            self.status =
+                Some("open or create a project first — takes integrate into a project.".into());
+            return;
+        }
         let rec = match Project::open_or_create_recordings() {
             Ok(p) => p,
             Err(e) => {
@@ -1007,17 +1053,82 @@ impl TinyBoothApp {
                 return;
             }
         };
-        if idx >= rec.tracks.len() {
+        let Some(take) = rec.tracks.get(idx) else {
             self.status = Some("recording entry no longer exists.".into());
             return;
+        };
+        // The player has no resampler: refuse a rate mismatch up front
+        // with a clear message instead of landing a track the mixer
+        // will skip.
+        if let Some(existing) = self.project.tracks.first() {
+            if existing.sample_rate != take.sample_rate {
+                self.status = Some(format!(
+                    "take is {} Hz but this project is {} Hz — no resampler yet.",
+                    take.sample_rate, existing.sample_rate
+                ));
+                return;
+            }
         }
-        self.project = rec;
-        self.project_dirty = false;
-        self.player = None;
-        self.tab = Tab::Mix;
-        self.mix_autoplay_pending = true;
-        self.mix_autoplay_solo_idx = Some(idx);
-        self.mix_take_focus = Some((self.project.root.clone(), idx));
+        let src_abs = rec.root.join(&take.file);
+        let bytes = match std::fs::read(&src_abs) {
+            Ok(b) => b,
+            Err(e) => {
+                self.status = Some(format!("could not read take WAV: {e:#}"));
+                return;
+            }
+        };
+        let (new_id, _) = self.project.new_track_slot();
+        let mut track = take.clone();
+        track.id = new_id.clone();
+        let result: anyhow::Result<()> = (|| {
+            match &mut self.backing {
+                ProjectBacking::Tib { db } => {
+                    // Row first (stem + track), then the audio as the
+                    // `orig` revision — the migrate_folder_to_tib order.
+                    track.file = String::new();
+                    self.project.tracks.push(track);
+                    crate::tib_project::save_metadata(&self.project, db.conn())?;
+                    let rid = db.insert_revision(
+                        &new_id,
+                        crate::tib::RevKind::Orig,
+                        "integrated from recordings",
+                        take.sample_rate,
+                        take.stereo,
+                        take.duration_secs,
+                        &bytes,
+                    )?;
+                    db.set_current_rev(&new_id, rid)?;
+                }
+                ProjectBacking::Folder => {
+                    let rel = format!("{}/{}.wav", crate::project::TRACKS_DIR, new_id);
+                    let abs = self.project.root.join(&rel);
+                    if let Some(parent) = abs.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    std::fs::write(&abs, &bytes)?;
+                    track.file = rel;
+                    self.project.tracks.push(track);
+                    self.project.save()?;
+                }
+            }
+            Ok(())
+        })();
+        match result {
+            Ok(()) => {
+                self.project_dirty = false; // both arms persisted above
+                self.player = None; // rebuild with the new track
+                self.status = Some(format!(
+                    "'{}' integrated into '{}' — open the Mix tab to clean it.",
+                    take.name, self.project.name
+                ));
+            }
+            Err(e) => {
+                // Roll the in-memory push back so a failed persist doesn't
+                // leave a phantom lane.
+                self.project.tracks.retain(|t| t.id != new_id);
+                self.status = Some(format!("integrate failed: {e:#}"));
+            }
+        }
     }
 
     /// Delete a recording by index in the recordings project's

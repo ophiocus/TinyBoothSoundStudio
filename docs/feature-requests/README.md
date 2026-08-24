@@ -20,6 +20,8 @@ Design proposals for upcoming TinyBooth Sound Studio features. Each RFC follows 
 
 | **TBSS-FR-0014** | [Retro tracker / loop sampler](TBSS-FR-0014-retro-tracker.md) | 📝 Proposed | — | New Tracker tab in the ProTracker lineage: step grid (rows = time, columns = instrument lanes), each lane bound to a user-configured sample (recording take, `.tib` stem, or file), per-step pitch (authentic variable-rate playback) + velocity, swing, loop transport, ⤓ Bake-as-stem (FR-0009 path) + WAV export. E1 model/render → E2 loop transport → E3 tab UI → E4 sinks. |
 
+| **TBSS-FR-0015** | [Record tab: in-listing playback + live monitor](TBSS-FR-0015-record-tab-live-monitor-and-listing-playback.md) | ✅ Implemented | v0.4.81 | Takes audition in place: ▶/■ per row, scrubbable playhead on the thumbnail, app-wide audio exclusivity, ⇪ integrate-into-project (folder + `.tib`), ▶-to-mixer detour retired. 🎙 live input monitor: capture stream + DSP chain + viz with no WAV writer, for base levels before recording. |
+
 ## Convention
 
 - File name: `TBSS-FR-NNNN-kebab-case-title.md`. Numbers monotonic, never reused.

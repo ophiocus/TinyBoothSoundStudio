@@ -8,6 +8,41 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); thi
 
 (Nothing yet — known issues all resolved as of v0.4.23.)
 
+## [0.4.81] — 2026-08-24
+
+### Changed — recordings audition in place; the Mix-tab detour is gone
+
+Reshaped per direct user feedback ("lets stop using mix for this") after
+the ▶-to-mixer flow failed once more — an async player-build race could
+drop the solo request, so pressing ▶ on one take played **all** of them.
+Rather than patch a fourth bug in that flow, the flow is retired:
+
+- **▶/■ on each take, right in the listing.** Plays through its own
+  lightweight session — the Mix tab is not involved. While playing, the
+  waveform thumbnail becomes a transport: an amber playhead tracks the
+  position and clicking or dragging **scrubs**. When stopped, dragging
+  still selects a region for export, as before.
+- **One audible thing at a time.** Starting a take silences the Mix
+  player and the Crossfade/Album previews — and starting any of those
+  silences the take.
+- **⇪ Integrate into project.** The new "work on this take" gesture:
+  copies the take into the currently open project as a real track —
+  where the full cleaning toolset (corrections, telemetry, trim,
+  mixing) applies. Works for both folder and `.tib` projects; refuses
+  a sample-rate mismatch with a clear message instead of landing a
+  track the mixer would skip.
+- The v0.4.80 take-detail view is removed along with the detour it
+  patched.
+
+### Added — 🎙 live input monitor (TBSS-FR-0015)
+
+A **Monitor** toggle next to ⏺ Record opens the input stream with no
+WAV writer: waveform, spectrum, and meters run through the *exact*
+recording-tone chain a take would use, so base levels are visible
+before committing to a recording. Starting a take hands the device
+over automatically. Verified on hardware: frames flow through the
+chain, nothing is written to disk.
+
 ## [0.4.80] — 2026-08-24
 
 ### Changed — ▶ on a recording opens a take-detail view

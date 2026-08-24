@@ -290,6 +290,7 @@ pub fn show(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
         do_save_as(&mut app.album_state);
     }
     if click_play {
+        app.recording_preview = None; // one audible thing at a time
         do_preview(&mut app.album_state);
     }
     if click_stop {

@@ -22,6 +22,7 @@ const THUMB_H: f32 = 28.0;
 const RECORDINGS_PAGE_SIZE: usize = 10;
 
 pub fn show(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
+    poll_recording_preview(app, ui.ctx());
     ui.heading("Record");
     ui.separator();
 
@@ -177,6 +178,53 @@ pub fn show(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
             .clicked()
         {
             app.stop_take();
+        }
+        // Live monitor (TBSS-FR-0015): base levels through the take's
+        // exact signal path, before committing a recording.
+        if !recording {
+            let monitoring = app.monitor.is_some();
+            let label = if monitoring {
+                "🎙 Monitoring…"
+            } else {
+                "🎙 Monitor"
+            };
+            let resp = ui
+                .add_enabled(
+                    app.selected_device.is_some(),
+                    egui::Button::new(label).min_size(egui::vec2(110.0, 32.0)),
+                )
+                .on_hover_text(
+                    "Open the input live — waveform, spectrum and meters run \
+                     through the recording tone chain without writing anything. \
+                     Click again to stop.",
+                );
+            if resp.clicked() {
+                if monitoring {
+                    app.monitor = None;
+                } else if let Some(dev) = app.selected_device.clone() {
+                    match crate::audio::start_recording(
+                        &dev,
+                        app.selected_mode,
+                        None, // monitor: no WAV
+                        app.viz.clone(),
+                        app.active_profile().clone(),
+                        app.audio_err_tx.clone(),
+                        None,
+                    ) {
+                        Ok(m) => {
+                            app.monitor = Some(m);
+                            app.record_last_error = None;
+                        }
+                        Err(e) => {
+                            app.record_last_error = Some(format!("{e:#}"));
+                        }
+                    }
+                }
+            }
+            if monitoring {
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_millis(50));
+            }
         }
         if let Some(sess) = app.session.as_ref() {
             ui.label(format!("REC  {:.1}s", sess.duration_secs()));
@@ -347,11 +395,13 @@ fn show_recordings_list(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
     let end = (start + RECORDINGS_PAGE_SIZE).min(entries.len());
     let slice = &entries[start..end];
 
-    let mut click_play_idx: Option<usize> = None;
+    let mut click_play_path: Option<PathBuf> = None;
+    let mut click_stop_preview = false;
+    let mut click_integrate_idx: Option<usize> = None;
     let mut click_delete_idx: Option<usize> = None;
 
     egui::Grid::new("recordings_list_grid")
-        .num_columns(8)
+        .num_columns(9)
         .striped(true)
         .spacing([10.0, 4.0])
         .show(ui, |ui| {
@@ -362,23 +412,61 @@ fn show_recordings_list(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
             ui.strong("Duration");
             ui.strong("Mode");
             ui.strong("Profile");
+            ui.strong(""); // integrate
             ui.strong(""); // delete
             ui.end_row();
 
             for (idx, t) in slice {
-                if ui
+                let abs_path = rec.root.join(&t.file);
+                // ▶/■ toggle: takes audition in place, right in the
+                // listing — the Mix-tab detour is retired (v0.4.81).
+                let playing_this = app
+                    .recording_preview
+                    .as_ref()
+                    .is_some_and(|p| p.path == abs_path);
+                let pending_this = app
+                    .recording_preview_pending
+                    .as_ref()
+                    .is_some_and(|(p, _)| *p == abs_path);
+                if pending_this {
+                    ui.add_enabled(false, egui::Button::new("…"))
+                        .on_disabled_hover_text("decoding…");
+                } else if playing_this {
+                    if ui.button("⏹").on_hover_text("Stop").clicked() {
+                        click_stop_preview = true;
+                    }
+                } else if ui
                     .button("▶")
-                    .on_hover_text("Play in mixer (switches to Mix tab)")
+                    .on_hover_text("Play this take (silences everything else)")
                     .clicked()
                 {
-                    click_play_idx = Some(*idx);
+                    click_play_path = Some(abs_path.clone());
                 }
                 ui.label(&t.name).on_hover_text(&t.file);
-                let abs_path = rec.root.join(&t.file);
                 let thumb = cached_or_compute_thumb(app, &abs_path);
                 let selection = app.recordings_selection.get(&abs_path).copied();
-                let response = draw_thumbnail(ui, thumb.as_ref(), selection);
-                if let Some(t) = thumb.as_ref() {
+                let playhead = if playing_this {
+                    app.recording_preview
+                        .as_ref()
+                        .map(|p| p.session.position_frac())
+                } else {
+                    None
+                };
+                let response = draw_thumbnail(ui, thumb.as_ref(), selection, playhead);
+                if playing_this {
+                    // While playing, the waveform is a transport: click or
+                    // drag scrubs the playhead. (Region selection applies
+                    // when the take is not playing.)
+                    if response.clicked() || response.dragged() {
+                        if let (Some(pos), Some(p)) =
+                            (response.interact_pointer_pos(), app.recording_preview.as_ref())
+                        {
+                            let frac =
+                                (pos.x - response.rect.left()) / response.rect.width().max(1.0);
+                            p.session.seek_frac(frac);
+                        }
+                    }
+                } else if let Some(t) = thumb.as_ref() {
                     update_selection_from_response(app, &abs_path, &response, t.duration_secs);
                 }
                 export_selection_button(app, &abs_path, ui);
@@ -394,6 +482,19 @@ fn show_recordings_list(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
                 ui.label(mode);
                 let prof = t.profile.as_ref().map(|p| p.name.as_str()).unwrap_or("—");
                 ui.label(prof);
+                let can_integrate =
+                    !matches!(app.project.kind, crate::project::ProjectKind::Recordings);
+                if ui
+                    .add_enabled(can_integrate, egui::Button::new("⇪"))
+                    .on_hover_text(format!(
+                        "Integrate into '{}' as a track — clean it with the full                          correction toolset there",
+                        app.project.name
+                    ))
+                    .on_disabled_hover_text("Open or create a project first")
+                    .clicked()
+                {
+                    click_integrate_idx = Some(*idx);
+                }
                 if ui
                     .button("🗑")
                     .on_hover_text("Delete this take (removes the WAV)")
@@ -406,8 +507,14 @@ fn show_recordings_list(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
         });
 
     // Apply clicks AFTER the closure so we don't double-borrow `app`.
-    if let Some(i) = click_play_idx {
-        app.play_recording_in_mixer(i);
+    if click_stop_preview {
+        app.recording_preview = None;
+    }
+    if let Some(path) = click_play_path {
+        start_recording_preview(app, path);
+    }
+    if let Some(i) = click_integrate_idx {
+        app.integrate_recording_into_project(i);
     }
     if let Some(i) = click_delete_idx {
         app.delete_recording(i);
@@ -505,7 +612,7 @@ fn show_loose_wavs(app: &mut TinyBoothApp, rec: &Project, ui: &mut egui::Ui) {
                 ui.monospace(name);
                 let thumb = cached_or_compute_thumb(app, path);
                 let selection = app.recordings_selection.get(path).copied();
-                let response = draw_thumbnail(ui, thumb.as_ref(), selection);
+                let response = draw_thumbnail(ui, thumb.as_ref(), selection, None);
                 if let Some(t) = thumb.as_ref() {
                     update_selection_from_response(app, path, &response, t.duration_secs);
                 }
@@ -557,6 +664,70 @@ fn file_stamp(path: &Path) -> Option<(u64, std::time::SystemTime)> {
 /// ~1 KB, negligible. **TBSS-FR-0008 item (4)** — sync UI-thread
 /// decode is the MVP trade-off; an async worker would only matter
 /// for very long takes.
+/// Kick off an in-listing preview of one take: silence everything else,
+/// then decode on a background thread (takes can be minutes long — no
+/// UI-thread decode) and start the session when the poll sees the result.
+fn start_recording_preview(app: &mut TinyBoothApp, path: PathBuf) {
+    app.stop_all_playback();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let job_path = path.clone();
+    std::thread::spawn(move || {
+        let result = (|| -> anyhow::Result<(Vec<f32>, u32)> {
+            let reader = hound::WavReader::open(&job_path)?;
+            let (spec, samples, frames) = crate::audiodecode::decode_wav_i16(reader)?;
+            let stereo = crate::audiodecode::wav_i16_to_stereo_f32(
+                &samples,
+                spec.channels.max(1) as usize,
+                frames as usize,
+            );
+            Ok((stereo, spec.sample_rate))
+        })()
+        .map_err(|e| format!("{e:#}"));
+        let _ = tx.send(result);
+    });
+    app.recording_preview_pending = Some((path, rx));
+}
+
+/// Poll the pending decode; when ready, start playback. Called once per
+/// Record-tab frame. Also clears a finished preview so the row's button
+/// flips back to ▶ on its own.
+fn poll_recording_preview(app: &mut TinyBoothApp, ctx: &egui::Context) {
+    if let Some((path, rx)) = app.recording_preview_pending.as_ref() {
+        match rx.try_recv() {
+            Ok(Ok((stereo, rate))) => {
+                let path = path.clone();
+                app.recording_preview_pending = None;
+                match crate::crossfade_player::CrossfadePreviewSession::play(stereo, rate, 2, 0) {
+                    Ok(session) => {
+                        app.recording_preview =
+                            Some(crate::app::RecordingPreview { path, session });
+                    }
+                    Err(e) => app.status = Some(format!("preview failed: {e:#}")),
+                }
+            }
+            Ok(Err(e)) => {
+                app.recording_preview_pending = None;
+                app.status = Some(format!("preview decode failed: {e}"));
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                ctx.request_repaint_after(std::time::Duration::from_millis(80));
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                app.recording_preview_pending = None;
+                app.status = Some("preview decode thread died".into());
+            }
+        }
+    }
+    if let Some(p) = app.recording_preview.as_ref() {
+        if p.session.is_finished() {
+            app.recording_preview = None;
+        } else {
+            // Keep the playhead moving without mouse motion.
+            ctx.request_repaint_after(std::time::Duration::from_millis(50));
+        }
+    }
+}
+
 fn cached_or_compute_thumb(app: &mut TinyBoothApp, path: &Path) -> Option<Arc<CachedThumb>> {
     // Never thumb the file that's being recorded right now: its header is
     // not finalised, so it decodes as empty — and it changes every buffer
@@ -638,6 +809,7 @@ fn draw_thumbnail(
     ui: &mut egui::Ui,
     thumb: Option<&Arc<CachedThumb>>,
     selection: Option<(f32, f32)>,
+    playhead_frac: Option<f32>,
 ) -> egui::Response {
     let (rect, response) =
         ui.allocate_exact_size(egui::vec2(THUMB_W, THUMB_H), egui::Sense::click_and_drag());
@@ -702,6 +874,14 @@ fn draw_thumbnail(
         }
     }
 
+    if let Some(frac) = playhead_frac {
+        // Scrub playhead — drawn last so it rides above peaks/selection.
+        let x = rect.left() + frac.clamp(0.0, 1.0) * rect.width();
+        painter.line_segment(
+            [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
+            egui::Stroke::new(1.5, egui::Color32::from_rgb(255, 200, 80)),
+        );
+    }
     response
 }
 

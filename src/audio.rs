@@ -287,7 +287,7 @@ impl SourceMode {
 pub fn start_recording(
     device_name: &str,
     mode: SourceMode,
-    wav_path: &Path,
+    wav_path: Option<&Path>,
     viz: Arc<VizState>,
     profile: crate::dsp::Profile,
     error_tx: std::sync::mpsc::Sender<String>,
@@ -368,19 +368,28 @@ pub fn start_recording(
         _ => {}
     }
 
-    if let Some(parent) = wav_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let wav_channels: u16 = if mode.is_stereo() { 2 } else { 1 };
-    let spec = WavSpec {
-        channels: wav_channels,
-        sample_rate,
-        bits_per_sample: 16,
-        sample_format: WavSf::Int,
+    // `wav_path = None` is monitor mode (TBSS-FR-0015): the stream, DSP
+    // chain, and viz run exactly as when recording, but nothing is
+    // written — so the user can watch base levels before committing a
+    // take, through the very same signal path the take will use.
+    let writer = match wav_path {
+        Some(path) => {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let wav_channels: u16 = if mode.is_stereo() { 2 } else { 1 };
+            let spec = WavSpec {
+                channels: wav_channels,
+                sample_rate,
+                bits_per_sample: 16,
+                sample_format: WavSf::Int,
+            };
+            Arc::new(Mutex::new(Some(
+                WavWriter::create(path, spec).context("creating WAV writer")?,
+            )))
+        }
+        None => Arc::new(Mutex::new(None)),
     };
-    let writer = Arc::new(Mutex::new(Some(
-        WavWriter::create(wav_path, spec).context("creating WAV writer")?,
-    )));
     let frames = Arc::new(std::sync::atomic::AtomicU64::new(0));
 
     viz.reset(mode.is_stereo(), sample_rate);
@@ -500,13 +509,17 @@ pub fn start_recording(
             if let Some(w) = writer.lock().take() {
                 let _ = w.finalize();
             }
-            let _ = std::fs::remove_file(wav_path);
+            if let Some(path) = wav_path {
+                let _ = std::fs::remove_file(path);
+            }
             return Err(e);
         }
     };
 
     Ok(RecordingSession {
-        wav_path: wav_path.to_path_buf(),
+        // Monitor mode has no file — an empty path, never surfaced (the
+        // monitor UI shows levels, not a filename).
+        wav_path: wav_path.map(Path::to_path_buf).unwrap_or_default(),
         sample_rate,
         writer,
         frames_written: frames,
@@ -535,10 +548,11 @@ where
         config,
         move |data: &[T], _| {
             let frame_count = data.len() / ch.max(1);
+            // `None` writer = monitor mode (TBSS-FR-0015): the DSP chain
+            // and viz run identically, nothing lands on disk. (Also the
+            // teardown window: a callback racing Drop's writer-take just
+            // pushes viz for one buffer — harmless.)
             let mut writer_lock = writer.lock();
-            let Some(w) = writer_lock.as_mut() else {
-                return;
-            };
             for i in 0..frame_count {
                 let frame_start = i * ch;
                 let mono_in = match channel {
@@ -555,8 +569,9 @@ where
                 // sees anything — what you record is what you hear back.
                 let processed = chain.process(mono_in);
                 let clamped = processed.clamp(-1.0, 1.0);
-                let sample_i16 = (clamped * i16::MAX as f32) as i16;
-                let _ = w.write_sample(sample_i16);
+                if let Some(w) = writer_lock.as_mut() {
+                    let _ = w.write_sample((clamped * i16::MAX as f32) as i16);
+                }
                 viz.push_mono(clamped);
             }
             frames.fetch_add(frame_count as u64, Ordering::Relaxed);
@@ -589,10 +604,11 @@ where
         config,
         move |data: &[T], _| {
             let frame_count = data.len() / ch.max(1);
+            // `None` writer = monitor mode (TBSS-FR-0015): the DSP chain
+            // and viz run identically, nothing lands on disk. (Also the
+            // teardown window: a callback racing Drop's writer-take just
+            // pushes viz for one buffer — harmless.)
             let mut writer_lock = writer.lock();
-            let Some(w) = writer_lock.as_mut() else {
-                return;
-            };
             for i in 0..frame_count {
                 let frame_start = i * ch;
                 let l_in = data[frame_start].to_f32();
@@ -600,8 +616,10 @@ where
                 let (l, r) = chain.process(l_in, r_in);
                 let l_c = l.clamp(-1.0, 1.0);
                 let r_c = r.clamp(-1.0, 1.0);
-                let _ = w.write_sample((l_c * i16::MAX as f32) as i16);
-                let _ = w.write_sample((r_c * i16::MAX as f32) as i16);
+                if let Some(w) = writer_lock.as_mut() {
+                    let _ = w.write_sample((l_c * i16::MAX as f32) as i16);
+                    let _ = w.write_sample((r_c * i16::MAX as f32) as i16);
+                }
                 viz.push_stereo(l_c, r_c);
             }
             frames.fetch_add(frame_count as u64, Ordering::Relaxed);
@@ -674,7 +692,7 @@ mod probe {
             let sess = start_recording(
                 &dev,
                 SourceMode::Mixdown,
-                &wav,
+                Some(&wav),
                 VizState::new(),
                 crate::dsp::Profile::raw("probe"),
                 tx.clone(),
@@ -710,6 +728,28 @@ mod probe {
                 eprintln!("take {take}: stream error surfaced: {m}");
             }
         }
+
+        // Monitor mode (TBSS-FR-0015): same stream, no writer — frames
+        // must still count (viz is fed) and nothing may land on disk.
+        let before: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().collect();
+        let mon = start_recording(
+            &dev,
+            SourceMode::Mixdown,
+            None,
+            VizState::new(),
+            crate::dsp::Profile::raw("probe"),
+            tx.clone(),
+            None,
+        )
+        .expect("monitor start");
+        std::thread::sleep(std::time::Duration::from_millis(800));
+        let frames = mon.frames();
+        drop(mon);
+        let after: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().collect();
+        eprintln!("monitor: {frames} frames observed, no file written");
+        assert!(frames > 0, "monitor stream produced no frames");
+        assert_eq!(before.len(), after.len(), "monitor mode wrote a file");
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

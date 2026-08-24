@@ -134,7 +134,26 @@ impl CrossfadePreviewSession {
     /// True when playback has reached the end of the buffer. The UI
     /// polls this each frame to clear its play-state flag.
     pub fn is_finished(&self) -> bool {
-        let frames = (self.samples.len() / self.channels.max(1) as usize) as u64;
-        self.position.load(Ordering::Relaxed) >= frames
+        self.position.load(Ordering::Relaxed) >= self.total_frames()
+    }
+
+    /// Total frames in the buffer.
+    pub fn total_frames(&self) -> u64 {
+        (self.samples.len() / self.channels.max(1) as usize) as u64
+    }
+
+    /// Current position as a fraction of the buffer, `0.0..=1.0`.
+    pub fn position_frac(&self) -> f32 {
+        let total = self.total_frames().max(1);
+        (self.position.load(Ordering::Relaxed).min(total) as f32) / total as f32
+    }
+
+    /// Seek to a fraction of the buffer. The callback re-reads the
+    /// position atomic at the top of every buffer, so this lands at
+    /// buffer granularity (~5–10 ms) — plenty for a scrubbed playhead.
+    pub fn seek_frac(&self, frac: f32) {
+        let total = self.total_frames();
+        let frame = ((frac.clamp(0.0, 1.0) as f64) * total as f64) as u64;
+        self.position.store(frame.min(total), Ordering::Relaxed);
     }
 }

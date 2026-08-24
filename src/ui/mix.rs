@@ -103,7 +103,6 @@ pub fn show(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
 /// pre-render side-effects as a separate call.
 pub fn pre_render(app: &mut TinyBoothApp) {
     rebuild_player_if_needed(app);
-    consume_autoplay_request(app);
     capture_automation(app);
 }
 
@@ -265,38 +264,6 @@ fn render_player_error_banner_if_present(app: &mut TinyBoothApp, ui: &mut egui::
             app.player_error = None;
         }
     });
-}
-
-/// Consume any pending auto-play request from the Record-tab "▶"
-/// buttons. Solo'd the chosen take, positioned to 0, started playback.
-fn consume_autoplay_request(app: &mut TinyBoothApp) {
-    if !app.mix_autoplay_pending {
-        return;
-    }
-    if let Some(player) = app.player.as_ref() {
-        if let Some(idx) = app.mix_autoplay_solo_idx.take() {
-            // `idx` is a PROJECT index. The player may have skipped
-            // tracks, so match on project_idx — positional matching
-            // solo'd (and audibly played) the wrong take whenever a
-            // skip shifted the indices.
-            if player.state.track_by_project_idx(idx).is_none() {
-                app.status =
-                    Some("that take isn't loaded in the mixer (see lane list for why)".into());
-                app.mix_autoplay_pending = false;
-                return;
-            }
-            for t in player.state.tracks.iter() {
-                t.solo
-                    .store(t.project_idx == idx, std::sync::atomic::Ordering::Relaxed);
-            }
-        }
-        player
-            .state
-            .position_frames
-            .store(0, std::sync::atomic::Ordering::Release);
-        player.state.set_play_state(PlayState::Playing);
-    }
-    app.mix_autoplay_pending = false;
 }
 
 // ───────────────────── transport ─────────────────────
@@ -469,6 +436,10 @@ fn transport_bar(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
     });
 
     if click_play {
+        // One audible thing at a time: an in-listing recording preview
+        // yields to the mixer, exactly as the mixer yields to it.
+        app.recording_preview = None;
+        app.recording_preview_pending = None;
         if let Some(p) = app.player.as_ref() {
             p.play();
         }
@@ -500,48 +471,7 @@ fn transport_bar(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
 
 // ───────────────────── multitrack lane view ─────────────────────
 
-/// The Mix tab's active take-detail filter, if any: the project index the
-/// Record tab's ▶ focused, guarded by project root so a stale focus is
-/// inert after switching projects.
-fn take_focus(app: &TinyBoothApp) -> Option<usize> {
-    app.mix_take_focus
-        .as_ref()
-        .filter(|(root, _)| *root == app.project.root)
-        .map(|(_, i)| *i)
-}
-
 fn lanes_view(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
-    // Detail-view banner: ▶ from the Record tab focuses one take; the
-    // rest of the project stays loaded (and mixable) one click away.
-    let focus = take_focus(app);
-    let mut click_show_all = false;
-    if let Some(f) = focus {
-        let name = app
-            .project
-            .tracks
-            .get(f)
-            .map(|t| t.name.clone())
-            .unwrap_or_else(|| format!("take {f}"));
-        ui.horizontal(|ui| {
-            ui.label(egui::RichText::new(format!("Take detail — {name}")).strong());
-            click_show_all = ui
-                .button("⊞ Show all takes")
-                .on_hover_text("Widen back out to every take in the recordings project")
-                .clicked();
-        });
-    }
-    if click_show_all {
-        app.mix_take_focus = None;
-        // Widening out means "mix everything again" — drop the ▶ solo
-        // too, or the other lanes reappear but stay silent.
-        if let Some(p) = app.player.as_ref() {
-            for t in p.state.tracks.iter() {
-                t.solo.store(false, std::sync::atomic::Ordering::Relaxed);
-            }
-        }
-    }
-    let focus = take_focus(app);
-
     let Some(player) = app.player.as_ref() else {
         return;
     };
@@ -567,10 +497,6 @@ fn lanes_view(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
                 // Project index — every `app.project.tracks[...]` access
                 // and every deferred request below is keyed by it.
                 let idx = track.project_idx;
-                // Take-detail view: render only the focused lane.
-                if focus.is_some_and(|f| f != idx) {
-                    continue;
-                }
                 // v0.4.24 — wrap each lane in `Frame::group` so each row
                 // gets a visibly bounded card with its own border. Pre-
                 // v0.4.24 had only a 1-px divider line that wasn't strong
@@ -956,7 +882,6 @@ fn console_deck(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
             // heights. With Align::Min every card's top edge sits on the
             // same y baseline.
             ui.with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
-                let focus = take_focus(app);
                 for pos in 0..n_tracks {
                     // strip() takes the positional player index; commits
                     // are keyed by project index (recorder + manifest).
@@ -965,13 +890,6 @@ fn console_deck(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
                         .as_ref()
                         .and_then(|p| p.state.tracks.get(pos))
                         .map(|t| t.project_idx);
-                    // Take-detail view: only the focused take's strip
-                    // (the master strip stays — it still shapes the take).
-                    if let (Some(f), Some(pi)) = (focus, pidx) {
-                        if pi != f {
-                            continue;
-                        }
-                    }
                     if strip(app, ui, pos, strip_h) {
                         commit_track = pidx;
                     }
