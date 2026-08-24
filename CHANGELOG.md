@@ -8,6 +8,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); thi
 
 (Nothing yet — known issues all resolved as of v0.4.23.)
 
+## [0.4.80] — 2026-08-24
+
+### Changed — ▶ on a recording opens a take-detail view
+
+Clicking ▶ on a take in the Record tab's recordings list now lands in a
+**detail view of that one take** — its lane and its console strip (plus
+the master strip), under a "Take detail" banner — instead of the full
+recordings mixer with every take visible. "⊞ Show all takes" widens
+back out to the whole project and un-solos, so the other lanes come
+back audible. Follows directly from user feedback on v0.4.79, where ▶
+correctly *played* the selected take but still *showed* all of them.
+
 ## [0.4.79] — 2026-08-24
 
 ### Fixed — recordings list: ▶ played the wrong take; fresh takes showed no waveform
