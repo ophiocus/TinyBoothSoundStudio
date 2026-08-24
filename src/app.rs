@@ -100,6 +100,34 @@ impl Default for ChordVideoUiState {
     }
 }
 
+/// A highlighted time range on the Mix lanes (TBSS-FR-0017).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MixSelection {
+    pub scope: MixSelScope,
+    /// Ordered: start <= end, seconds on the project timeline.
+    pub start_secs: f32,
+    pub end_secs: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MixSelScope {
+    /// One track, by PROJECT index (survives player skips).
+    Track(usize),
+    AllTracks,
+}
+
+/// In-flight drag gesture on the lanes — distinguishes scrubbing the
+/// playhead from sweeping a selection. Lives on the app because drags
+/// span frames.
+#[derive(Debug, Clone, Copy)]
+pub enum MixDrag {
+    Scrub,
+    Select {
+        scope: MixSelScope,
+        anchor_secs: f32,
+    },
+}
+
 /// One recording take playing directly from the Record tab's listing —
 /// its own lightweight session (same type as the Crossfade/Album
 /// previews), fully decoupled from the Mix player. v0.4.81.
@@ -491,6 +519,17 @@ pub struct TinyBoothApp {
     /// once acted on. v0.4.0.
     /// Optional track index to solo on autoplay — the entry the user
     /// actually clicked. `None` = autoplay without changing solos.
+    /// Active Mix-lane highlight (TBSS-FR-0017). Cleared by the ✕ in the
+    /// selection toolbar or by starting a new drag.
+    pub mix_selection: Option<MixSelection>,
+    /// Drag gesture in progress on the lanes/ruler.
+    pub mix_drag: Option<MixDrag>,
+    /// In-flight background clip render: receiver for the finished WAV
+    /// bytes (and how to deliver them). Polled by the Mix tab.
+    #[allow(clippy::type_complexity)]
+    pub mix_clip_pending: Option<
+        std::sync::mpsc::Receiver<Result<(crate::export::ClipDelivery, Vec<u8>, u32, u16), String>>,
+    >,
     /// In-listing playback of a recording take (Record tab). The take
     /// plays through its own lightweight session — the Mix tab is no
     /// longer involved in auditioning recordings at all (the ▶-to-mixer
@@ -695,6 +734,9 @@ impl TinyBoothApp {
             recordings_page: 0,
             recordings_peaks_cache: std::collections::HashMap::new(),
             recordings_selection: std::collections::HashMap::new(),
+            mix_selection: None,
+            mix_drag: None,
+            mix_clip_pending: None,
             recording_preview: None,
             recording_preview_pending: None,
             update_state: UpdateState::Checking,
@@ -1104,6 +1146,80 @@ impl TinyBoothApp {
             Action::SaveProject => self.save_project(),
             Action::ToggleManual => self.show_manual = !self.show_manual,
             Action::CloseTopModal => self.close_top_modal(),
+        }
+    }
+
+    /// Land a rendered ✂ clip (TBSS-FR-0017) in the current project as a
+    /// new track. Same storage arms as integrate-from-recordings: folder
+    /// writes `tracks/<id>.wav`; `.tib` inserts stem+track rows and the
+    /// audio as the `orig` revision.
+    pub fn add_clip_track(&mut self, wav_bytes: Vec<u8>, sample_rate: u32, channels: u16) {
+        let (new_id, _) = self.project.new_track_slot();
+        let frames = ((wav_bytes.len().saturating_sub(44)) / 2 / channels.max(1) as usize) as f32;
+        let duration_secs = frames / sample_rate.max(1) as f32;
+        let n_clips = self
+            .project
+            .tracks
+            .iter()
+            .filter(|t| t.name.starts_with("clip-"))
+            .count();
+        let mut track = crate::project::Track {
+            id: new_id.clone(),
+            name: format!("clip-{:03}", n_clips + 1),
+            file: String::new(),
+            mute: false,
+            gain_db: 0.0,
+            sample_rate,
+            channel_source: None,
+            duration_secs,
+            profile: None,
+            stereo: channels >= 2,
+            source: crate::project::TrackSource::Recorded,
+            correction: None,
+            gain_automation: None,
+            polarity_inverted: false,
+            telemetry: None,
+            telemetry_profile: crate::telemetry::TelemetryProfile::default(),
+        };
+        let result: anyhow::Result<()> = (|| {
+            match &mut self.backing {
+                ProjectBacking::Tib { db } => {
+                    self.project.tracks.push(track);
+                    crate::tib_project::save_metadata(&self.project, db.conn())?;
+                    let rid = db.insert_revision(
+                        &new_id,
+                        crate::tib::RevKind::Orig,
+                        "mix clip",
+                        sample_rate,
+                        channels >= 2,
+                        duration_secs,
+                        &wav_bytes,
+                    )?;
+                    db.set_current_rev(&new_id, rid)?;
+                }
+                ProjectBacking::Folder => {
+                    let rel = format!("{}/{}.wav", crate::project::TRACKS_DIR, new_id);
+                    let abs = self.project.root.join(&rel);
+                    if let Some(parent) = abs.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    std::fs::write(&abs, &wav_bytes)?;
+                    track.file = rel;
+                    self.project.tracks.push(track);
+                    self.project.save()?;
+                }
+            }
+            Ok(())
+        })();
+        match result {
+            Ok(()) => {
+                self.player = None; // rebuild with the new lane
+                self.status = Some("clip added as a new track.".into());
+            }
+            Err(e) => {
+                self.project.tracks.retain(|t| t.id != new_id);
+                self.status = Some(format!("clip-to-track failed: {e:#}"));
+            }
         }
     }
 

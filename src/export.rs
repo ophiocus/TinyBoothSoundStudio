@@ -99,6 +99,13 @@ pub fn render_master_mix_to_wav_bytes(
 ) -> Result<(Vec<u8>, u32, u16, u64)> {
     let (samples, sample_rate, channels) = render_master_mix(project, db)?;
     let frames = (samples.len() as u64) / (channels as u64).max(1);
+    let bytes = encode_wav_16_bytes(&samples, sample_rate, channels)?;
+    Ok((bytes, sample_rate, channels, frames))
+}
+
+/// Encode interleaved f32 samples as a complete in-memory 16-bit WAV.
+/// Shared by the mix-run bounce and the ✂ clip path (TBSS-FR-0017).
+pub fn encode_wav_16_bytes(samples: &[f32], sample_rate: u32, channels: u16) -> Result<Vec<u8>> {
     let mut buf = std::io::Cursor::new(Vec::<u8>::with_capacity(samples.len() * 2 + 44));
     {
         let spec = WavSpec {
@@ -108,13 +115,13 @@ pub fn render_master_mix_to_wav_bytes(
             sample_format: SampleFormat::Int,
         };
         let mut w = WavWriter::new(&mut buf, spec).context("creating in-memory WAV writer")?;
-        for s in &samples {
+        for s in samples {
             let clamped = s.clamp(-1.0, 1.0);
             w.write_sample((clamped * i16::MAX as f32) as i16)?;
         }
         w.finalize().context("finalising in-memory WAV")?;
     }
-    Ok((buf.into_inner(), sample_rate, channels, frames))
+    Ok(buf.into_inner())
 }
 
 /// Compute a stable hash over the project state that influences the
@@ -209,6 +216,61 @@ fn mixdown(
     tracks: &[&Track],
     db: Option<&TibDb>,
 ) -> Result<(Vec<f32>, u32, u16)> {
+    mixdown_range(project, tracks, db, None)
+}
+
+/// How a finished clip render should be delivered (TBSS-FR-0017).
+#[derive(Debug, Clone)]
+pub enum ClipDelivery {
+    /// Write the WAV to this path (already chosen via save dialog).
+    File(std::path::PathBuf),
+    /// Hand the audio back to be integrated as a new project track.
+    NewTrack,
+}
+
+/// Render a highlighted range through the full chain (TBSS-FR-0017 ✂):
+/// per-track corrections, gains, automation, polarity, and master —
+/// exactly the `mixdown` pipeline — but emitting only `[start, end)`
+/// seconds. Processing still starts from 0 so filter/automation state at
+/// the range boundary matches a full render sample-for-sample (an IIR
+/// chain warmed from silence at `start` would not).
+///
+/// `only_track` (a PROJECT index) clips that track's contribution alone —
+/// still through its correction and the master stage, per the request's
+/// "rendered with all enabled filters and master values". Mute is
+/// ignored for an explicitly clipped track.
+pub fn render_clip(
+    project: &Project,
+    db: Option<&TibDb>,
+    range_secs: (f32, f32),
+    only_track: Option<usize>,
+) -> Result<(Vec<f32>, u32, u16)> {
+    let (a, b) = range_secs;
+    if !a.is_finite() || !b.is_finite() || b <= a || a < 0.0 {
+        return Err(anyhow!("empty or inverted clip range"));
+    }
+    let tracks: Vec<&Track> = match only_track {
+        Some(i) => vec![project
+            .tracks
+            .get(i)
+            .ok_or_else(|| anyhow!("no track at index {i}"))?],
+        None => project.tracks.iter().filter(|t| !t.mute).collect(),
+    };
+    if tracks.is_empty() {
+        return Err(anyhow!("nothing to clip — no unmuted tracks"));
+    }
+    mixdown_range(project, &tracks, db, Some((a, b)))
+}
+
+/// The real mix engine. `emit_secs = None` renders everything (the
+/// export path); `Some((a, b))` emits only that window while still
+/// processing from t=0 (see [`render_clip`]).
+fn mixdown_range(
+    project: &Project,
+    tracks: &[&Track],
+    db: Option<&TibDb>,
+    emit_secs: Option<(f32, f32)>,
+) -> Result<(Vec<f32>, u32, u16)> {
     let mut sample_rate = 0u32;
     let is_stereo_mix = tracks.iter().any(|t| t.stereo);
     let out_channels: u16 = if is_stereo_mix { 2 } else { 1 };
@@ -242,7 +304,19 @@ fn mixdown(
             t.gain_automation.as_ref().map(SplineSampler::build);
         let static_gain_db = t.gain_db;
         let static_gain_lin = db_to_lin(static_gain_db);
+        // Polarity flip — the player folds this into its gain stage;
+        // the exporter historically DROPPED it, so exported mixes
+        // differed from playback for flipped tracks. Fixed here
+        // (v0.4.83) for export and clip alike.
+        let polarity = if t.polarity_inverted { -1.0f32 } else { 1.0 };
         let sr_f = spec.sample_rate as f32;
+        let (emit_start, emit_end) = match emit_secs {
+            Some((a, b)) => (
+                (a as f64 * sr_f as f64) as usize,
+                (b as f64 * sr_f as f64) as usize,
+            ),
+            None => (0, usize::MAX),
+        };
 
         for f in 0..frame_count {
             let base = f * in_channels;
@@ -258,13 +332,17 @@ fn mixdown(
             }
             // Effective gain: spline sample if automation present at
             // this time, else the cached static linear gain.
-            let g = match auto_sampler
-                .as_ref()
-                .and_then(|s| s.sample(f as f32 / sr_f))
-            {
-                Some(db) => db_to_lin(db),
-                None => static_gain_lin,
-            };
+            let g = polarity
+                * match auto_sampler
+                    .as_ref()
+                    .and_then(|s| s.sample(f as f32 / sr_f))
+                {
+                    Some(db) => db_to_lin(db),
+                    None => static_gain_lin,
+                };
+            if f < emit_start || f >= emit_end {
+                continue; // processed for state, outside the emit window
+            }
             let l_g = l * g;
             let r_g = r * g;
             if is_stereo_mix {
@@ -296,8 +374,11 @@ fn mixdown(
         let stride = out_channels as usize;
         let frames = mix.len() / stride.max(1);
         let sr_f = sample_rate as f32;
+        // Emitted buffers start at the window, but master automation is
+        // positional on the project timeline — offset to absolute time.
+        let abs_offset = emit_secs.map(|(a, _)| a).unwrap_or(0.0);
         for f in 0..frames {
-            let t_secs = f as f32 / sr_f;
+            let t_secs = abs_offset + f as f32 / sr_f;
             let gain_db = master_auto
                 .as_ref()
                 .and_then(|s| s.sample(t_secs))
@@ -542,7 +623,7 @@ mod tib_export_tests {
         w.finalize().unwrap();
     }
 
-    fn folder_track(id: &str, file: &str, name: &str, rate: u32) -> Track {
+    pub(crate) fn folder_track(id: &str, file: &str, name: &str, rate: u32) -> Track {
         Track {
             id: id.into(),
             name: name.into(),
@@ -612,5 +693,94 @@ mod tib_export_tests {
         assert_eq!(fb, tb, "tib export must match folder export byte-for-byte");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod clip_tests {
+    //! TBSS-FR-0017 ✂: the range render must equal the full render's
+    //! slice sample-for-sample (fixtures stay under the soft-limit
+    //! threshold so the whole-mix normaliser is identity in both), and a
+    //! single-track clip must carry only that track's signal.
+    use super::*;
+    use crate::project::Project;
+
+    /// Distinct low-amplitude ramps per track so contributions are
+    /// separable and the limiter never engages. `tag` isolates each
+    /// test's scratch dir — tests run in parallel, and a shared dir
+    /// flakes when one test's cleanup deletes another's fixtures.
+    fn build_project(tag: &str) -> Project {
+        let root = std::env::temp_dir().join(format!("tbss-clip-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("tracks")).unwrap();
+        let write = |file: &str, base: i16| {
+            let spec = WavSpec {
+                channels: 2,
+                sample_rate: 48_000,
+                bits_per_sample: 16,
+                sample_format: SampleFormat::Int,
+            };
+            let mut w = WavWriter::create(root.join(file), spec).unwrap();
+            for i in 0..48_000u32 {
+                for c in 0..2i32 {
+                    w.write_sample(base + ((i as i32 * (2 + c)) % 500) as i16)
+                        .unwrap();
+                }
+            }
+            w.finalize().unwrap();
+        };
+        write("tracks/a.wav", 100);
+        write("tracks/b.wav", -3000);
+        let mut p = Project::new("Clip", root);
+        let mut ta = super::tib_export_tests::folder_track("a", "tracks/a.wav", "A", 48_000);
+        ta.gain_db = -3.0;
+        let mut tb = super::tib_export_tests::folder_track("b", "tracks/b.wav", "B", 48_000);
+        tb.polarity_inverted = true; // exercises the polarity fix
+        p.tracks.push(ta);
+        p.tracks.push(tb);
+        p.master_gain_db = -2.0;
+        p
+    }
+
+    #[test]
+    fn range_render_equals_full_render_slice() {
+        let p = build_project("slice");
+        let active: Vec<&crate::project::Track> = p.tracks.iter().collect();
+        let (full, sr, ch) = mixdown_range(&p, &active, None, None).unwrap();
+        let (a, b) = (0.25f32, 0.75f32);
+        let (clip, sr2, ch2) = render_clip(&p, None, (a, b), None).unwrap();
+        assert_eq!((sr, ch), (sr2, ch2));
+        let stride = ch as usize;
+        let s = (a as f64 * sr as f64) as usize * stride;
+        let e = (b as f64 * sr as f64) as usize * stride;
+        assert_eq!(clip.len(), e - s, "clip length = emitted window");
+        assert_eq!(
+            clip,
+            full[s..e].to_vec(),
+            "range render must equal the full render's slice"
+        );
+        let _ = std::fs::remove_dir_all(p.root);
+    }
+
+    #[test]
+    fn single_track_clip_contains_only_that_track() {
+        let p = build_project("solo");
+        // Clip track A alone over a window; compare against a project
+        // where B is absent entirely — they must match exactly.
+        let (solo_a, sr, ch) = render_clip(&p, None, (0.1, 0.2), Some(0)).unwrap();
+        let mut only_a = build_project("solo-ref");
+        only_a.tracks.remove(1);
+        let (ref_a, sr2, ch2) = render_clip(&only_a, None, (0.1, 0.2), Some(0)).unwrap();
+        assert_eq!((sr, ch), (sr2, ch2));
+        assert_eq!(solo_a, ref_a, "other tracks must not leak into a solo clip");
+        let _ = std::fs::remove_dir_all(p.root);
+        let _ = std::fs::remove_dir_all(only_a.root);
+    }
+
+    #[test]
+    fn inverted_or_empty_range_is_refused() {
+        let p = build_project("refuse");
+        assert!(render_clip(&p, None, (0.5, 0.5), None).is_err());
+        assert!(render_clip(&p, None, (0.6, 0.4), None).is_err());
+        let _ = std::fs::remove_dir_all(p.root);
     }
 }

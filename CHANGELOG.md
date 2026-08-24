@@ -8,6 +8,34 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); thi
 
 (Nothing yet — known issues all resolved as of v0.4.23.)
 
+## [0.4.83] — 2026-08-24
+
+### Added — Mix window: scrubbing, region highlight, ✂ clip (TBSS-FR-0017)
+
+- **Scrubbing.** The Mix playhead is no longer display-only: click any
+  lane or the new timeline ruler to seek, or drag the playhead itself
+  to scrub. (Wires up the seek machinery that had sat dormant as
+  "Phase 3" since the player was written.)
+- **Region highlight.** Click-drag on a lane selects a time range on
+  that track; drag on the ruler selects across all tracks. The band
+  draws on every lane it covers.
+- **✂ Clip.** With a highlight active, a toolbar offers **Clip to
+  WAV…** and **Clip to new track**: the range renders through the full
+  playback chain — enabled corrections, faders, automation, polarity,
+  and master values — on a background thread. Renders process from
+  t = 0 so filter state at the range boundary matches a full render
+  **sample-for-sample** (verified by test). A single-track clip carries
+  only that track's signal (verified by test), still through master.
+
+### Fixed — exports now honor polarity flips
+
+The export/bounce mixdown historically **dropped `polarity flip (Ø)`**
+— an exported mix could differ audibly from playback for any project
+using polarity correction (anti-phase stems failing to cancel, or
+cancelling when playback didn't). Polarity is now applied in the same
+place playback applies it, for exports, bounces, and clips alike. If a
+project uses Ø, re-Bounce to refresh its cached mix.
+
 ## [0.4.82] — 2026-08-24
 
 ### Added — standardized keyboard interface (TBSS-FR-0016)

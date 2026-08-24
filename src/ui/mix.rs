@@ -472,11 +472,122 @@ fn transport_bar(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
 // ───────────────────── multitrack lane view ─────────────────────
 
 fn lanes_view(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
+    poll_clip_job(app);
+    // Selection toolbar (TBSS-FR-0017) — shown while a highlight exists.
+    let mut click_clip_wav = false;
+    let mut click_clip_track = false;
+    let mut click_clear_sel = false;
+    if let Some(sel) = app.mix_selection {
+        let scope_label = match sel.scope {
+            crate::app::MixSelScope::AllTracks => "all tracks".to_string(),
+            crate::app::MixSelScope::Track(i) => app
+                .project
+                .tracks
+                .get(i)
+                .map(|t| format!("'{}'", t.name))
+                .unwrap_or_else(|| "?".into()),
+        };
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new(format!(
+                    "Selection {:.2}s – {:.2}s · {scope_label}",
+                    sel.start_secs, sel.end_secs
+                ))
+                .strong(),
+            );
+            let busy = app.mix_clip_pending.is_some();
+            ui.add_enabled_ui(!busy, |ui| {
+                click_clip_wav = ui
+                    .button("✂ Clip to WAV…")
+                    .on_hover_text(
+                        "Render the highlighted range through the full chain                          (enabled corrections, faders, automation, polarity,                          master) and save it as a WAV.",
+                    )
+                    .clicked();
+                click_clip_track = ui
+                    .button("✂ Clip to new track")
+                    .on_hover_text("Same render, added to this project as a new track.")
+                    .clicked();
+            });
+            if busy {
+                ui.spinner();
+                ui.label("rendering clip…");
+            }
+            click_clear_sel = ui.button("✕").on_hover_text("Clear selection").clicked();
+        });
+    }
+    if click_clear_sel {
+        app.mix_selection = None;
+    }
+    if click_clip_wav {
+        start_clip_job(app, true);
+    }
+    if click_clip_track {
+        start_clip_job(app, false);
+    }
+
     let Some(player) = app.player.as_ref() else {
         return;
     };
     let dur = player.state.duration_secs().max(0.001);
     let pos = player.state.position_secs();
+
+    // ── Timeline ruler: seek / scrub / all-tracks selection ─────────
+    // Gesture writes land in locals (committed after the player borrow
+    // drops) — the house deferred-action idiom.
+    let mut new_drag = app.mix_drag;
+    let mut new_selection = app.mix_selection;
+    {
+        let avail = ui.available_size().x.max(200.0);
+        let (rrect, rresp) =
+            ui.allocate_exact_size(egui::vec2(avail, 16.0), egui::Sense::click_and_drag());
+        let rp = ui.painter_at(rrect);
+        rp.rect_filled(rrect, 2.0, egui::Color32::from_rgb(16, 16, 20));
+        // Second ticks (sparser as the project grows).
+        let step = if dur > 240.0 {
+            30.0
+        } else if dur > 60.0 {
+            10.0
+        } else {
+            5.0
+        };
+        let mut t = 0.0f32;
+        while t < dur {
+            let x = rrect.min.x + rrect.width() * (t / dur);
+            rp.line_segment(
+                [Pos2::new(x, rrect.max.y - 5.0), Pos2::new(x, rrect.max.y)],
+                Stroke::new(1.0, Color32::from_gray(90)),
+            );
+            rp.text(
+                Pos2::new(x + 2.0, rrect.min.y),
+                egui::Align2::LEFT_TOP,
+                fmt_time(t),
+                egui::FontId::proportional(9.0),
+                Color32::from_gray(120),
+            );
+            t += step;
+        }
+        if let Some(sel) = selection_range_for(new_selection, None) {
+            draw_selection_band(&rp, rrect, sel, dur);
+        }
+        let head_x = rrect.min.x + rrect.width() * (pos / dur).clamp(0.0, 1.0);
+        rp.line_segment(
+            [
+                Pos2::new(head_x, rrect.min.y),
+                Pos2::new(head_x, rrect.max.y),
+            ],
+            Stroke::new(1.5, Color32::from_rgb(230, 200, 80)),
+        );
+        timeline_gesture(
+            &rresp,
+            rrect,
+            dur,
+            pos,
+            crate::app::MixSelScope::AllTracks,
+            player,
+            &mut new_drag,
+            &mut new_selection,
+        );
+    }
 
     let mut requested_correction: Option<usize> = None;
     let mut requested_apply_coherence: Option<usize> = None;
@@ -698,15 +809,26 @@ fn lanes_view(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
 
                             // ── Lane (waveform) ───────────────────────────────
                             let avail = ui.available_size().x.max(200.0);
-                            let (rect, _) = ui.allocate_exact_size(
+                            let (rect, lane_resp) = ui.allocate_exact_size(
                                 egui::vec2(avail, LANE_H),
-                                egui::Sense::hover(),
+                                egui::Sense::click_and_drag(),
+                            );
+                            timeline_gesture(
+                                &lane_resp,
+                                rect,
+                                dur,
+                                pos,
+                                crate::app::MixSelScope::Track(idx),
+                                player,
+                                &mut new_drag,
+                                &mut new_selection,
                             );
                             // v0.4.7 perf: was `track.automation().as_ref()` — that
                             // cloned the Vec<AutomationPoint> only to take a reference
                             // to the clone for the draw call. Borrow via callback so
                             // the lock is held briefly during draw_lane (microseconds)
                             // with no allocation.
+                            let lane_sel = selection_range_for(new_selection, Some(idx));
                             track.with_automation(|auto| {
                                 draw_lane(
                                     ui,
@@ -717,6 +839,7 @@ fn lanes_view(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
                                     track.frame_count,
                                     track.sample_rate,
                                     auto,
+                                    lane_sel,
                                 );
                             });
                         });
@@ -732,6 +855,12 @@ fn lanes_view(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
     // (deferred out of the lane loop so the `player` borrow drops).
     if let Some(i) = requested_apply_coherence {
         apply_coherence_restoration(app, i);
+    }
+
+    // Commit the frame's gesture state (the player borrow is done).
+    app.mix_drag = new_drag;
+    if new_selection != app.mix_selection {
+        app.mix_selection = new_selection;
     }
 
     if let Some(i) = requested_correction {
@@ -775,6 +904,7 @@ fn draw_lane(
     track_frames: u64,
     sample_rate: u32,
     automation: Option<&crate::automation::AutomationLane>,
+    selection: Option<(f32, f32)>,
 ) {
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 4.0, Color32::from_rgb(10, 10, 14));
@@ -832,12 +962,195 @@ fn draw_lane(
         }
     }
 
+    // Selection highlight (TBSS-FR-0017), under the playhead.
+    if let Some(sel) = selection {
+        draw_selection_band(&painter, rect, sel, total_secs);
+    }
+
     // Synchronized playhead.
     let head_x = rect.min.x + rect.width() * (pos_secs / total_secs).clamp(0.0, 1.0);
     painter.line_segment(
         [Pos2::new(head_x, rect.min.y), Pos2::new(head_x, rect.max.y)],
         Stroke::new(1.5, Color32::from_rgb(230, 200, 80)),
     );
+}
+
+/// The selection band a given lane should draw: all-track selections
+/// paint every lane; track selections only their own. `lane` = None is
+/// the ruler (paints only AllTracks).
+fn selection_range_for(
+    sel: Option<crate::app::MixSelection>,
+    lane: Option<usize>,
+) -> Option<(f32, f32)> {
+    let s = sel?;
+    match (s.scope, lane) {
+        (crate::app::MixSelScope::AllTracks, _) => Some((s.start_secs, s.end_secs)),
+        (crate::app::MixSelScope::Track(t), Some(l)) if t == l => Some((s.start_secs, s.end_secs)),
+        _ => None,
+    }
+}
+
+fn draw_selection_band(painter: &egui::Painter, rect: Rect, sel: (f32, f32), total_secs: f32) {
+    let x0 = rect.min.x + rect.width() * (sel.0 / total_secs).clamp(0.0, 1.0);
+    let x1 = rect.min.x + rect.width() * (sel.1 / total_secs).clamp(0.0, 1.0);
+    let band = Rect::from_min_max(Pos2::new(x0, rect.min.y), Pos2::new(x1, rect.max.y));
+    painter.rect_filled(band, 0.0, Color32::from_rgba_unmultiplied(230, 200, 80, 36));
+    for x in [x0, x1] {
+        painter.line_segment(
+            [Pos2::new(x, rect.min.y), Pos2::new(x, rect.max.y)],
+            Stroke::new(1.0, Color32::from_rgba_unmultiplied(230, 200, 80, 140)),
+        );
+    }
+}
+
+/// Shared pointer-gesture logic for the ruler and every lane
+/// (TBSS-FR-0017): click = seek; drag near the playhead = scrub; drag
+/// elsewhere = sweep a selection in `scope`. Writes go to the caller's
+/// locals — committed after the `player` borrow ends.
+#[allow(clippy::too_many_arguments)]
+fn timeline_gesture(
+    resp: &egui::Response,
+    rect: Rect,
+    dur: f32,
+    pos_secs: f32,
+    scope: crate::app::MixSelScope,
+    player: &crate::player::Player,
+    drag: &mut Option<crate::app::MixDrag>,
+    selection: &mut Option<crate::app::MixSelection>,
+) {
+    let to_secs = |x: f32| ((x - rect.min.x) / rect.width().max(1.0)).clamp(0.0, 1.0) * dur;
+    let seek = |secs: f32| {
+        let frames = (secs as f64 * player.state.sample_rate as f64) as u64;
+        player.state.seek_frames(frames);
+    };
+    if resp.drag_started() {
+        if let Some(p) = resp.interact_pointer_pos() {
+            let head_x = rect.min.x + rect.width() * (pos_secs / dur).clamp(0.0, 1.0);
+            *drag = Some(if (p.x - head_x).abs() <= 8.0 {
+                crate::app::MixDrag::Scrub
+            } else {
+                crate::app::MixDrag::Select {
+                    scope,
+                    anchor_secs: to_secs(p.x),
+                }
+            });
+        }
+    }
+    if resp.dragged() || resp.drag_stopped() {
+        if let (Some(d), Some(p)) = (*drag, resp.interact_pointer_pos()) {
+            match d {
+                crate::app::MixDrag::Scrub => seek(to_secs(p.x)),
+                crate::app::MixDrag::Select { scope, anchor_secs } => {
+                    let cur = to_secs(p.x);
+                    let (a, b) = if cur >= anchor_secs {
+                        (anchor_secs, cur)
+                    } else {
+                        (cur, anchor_secs)
+                    };
+                    // Ignore sub-20ms sweeps: that is a sloppy click.
+                    if b - a > 0.02 {
+                        *selection = Some(crate::app::MixSelection {
+                            scope,
+                            start_secs: a,
+                            end_secs: b,
+                        });
+                    }
+                }
+            }
+        }
+        if resp.drag_stopped() {
+            *drag = None;
+        }
+    }
+    if resp.clicked() {
+        if let Some(p) = resp.interact_pointer_pos() {
+            seek(to_secs(p.x));
+        }
+    }
+}
+
+/// Kick a background clip render (TBSS-FR-0017). `to_wav` = save
+/// dialog + file; else the result lands as a new project track.
+fn start_clip_job(app: &mut TinyBoothApp, to_wav: bool) {
+    let Some(sel) = app.mix_selection else {
+        return;
+    };
+    let delivery = if to_wav {
+        let default_name = format!("clip-{:.0}s-{:.0}s.wav", sel.start_secs, sel.end_secs);
+        let Some(p) = rfd::FileDialog::new()
+            .add_filter("WAV", &["wav"])
+            .set_file_name(&default_name)
+            .save_file()
+        else {
+            return;
+        };
+        let p = if p.extension().is_none() {
+            p.with_extension("wav")
+        } else {
+            p
+        };
+        crate::export::ClipDelivery::File(p)
+    } else {
+        crate::export::ClipDelivery::NewTrack
+    };
+    let only_track = match sel.scope {
+        crate::app::MixSelScope::Track(i) => Some(i),
+        crate::app::MixSelScope::AllTracks => None,
+    };
+    let range = (sel.start_secs, sel.end_secs);
+    let project = app.project.clone();
+    let is_tib = matches!(app.backing, crate::app::ProjectBacking::Tib { .. });
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let result = (|| -> anyhow::Result<_> {
+            // The job owns its own read connection (WAL allows this
+            // alongside the UI's writer) — the player-build precedent.
+            let db = if is_tib {
+                Some(crate::tib::TibDb::open(&project.root)?)
+            } else {
+                None
+            };
+            let (samples, sr, ch) =
+                crate::export::render_clip(&project, db.as_ref(), range, only_track)?;
+            let bytes = crate::export::encode_wav_16_bytes(&samples, sr, ch)?;
+            if let crate::export::ClipDelivery::File(path) = &delivery {
+                std::fs::write(path, &bytes)?;
+            }
+            Ok((delivery, bytes, sr, ch))
+        })()
+        .map_err(|e| format!("{e:#}"));
+        let _ = tx.send(result);
+    });
+    app.mix_clip_pending = Some(rx);
+}
+
+/// Poll the in-flight clip render; deliver on completion.
+fn poll_clip_job(app: &mut TinyBoothApp) {
+    let Some(rx) = app.mix_clip_pending.as_ref() else {
+        return;
+    };
+    match rx.try_recv() {
+        Ok(Ok((delivery, bytes, sr, ch))) => {
+            app.mix_clip_pending = None;
+            match delivery {
+                crate::export::ClipDelivery::File(p) => {
+                    app.status = Some(format!("clip written: {}", p.display()));
+                }
+                crate::export::ClipDelivery::NewTrack => {
+                    app.add_clip_track(bytes, sr, ch);
+                }
+            }
+        }
+        Ok(Err(e)) => {
+            app.mix_clip_pending = None;
+            app.status = Some(format!("clip failed: {e}"));
+        }
+        Err(std::sync::mpsc::TryRecvError::Empty) => {}
+        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+            app.mix_clip_pending = None;
+            app.status = Some("clip render thread died".into());
+        }
+    }
 }
 
 // ───────────────────── console deck ─────────────────────
