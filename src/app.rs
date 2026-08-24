@@ -327,6 +327,13 @@ pub struct TinyBoothApp {
     // Recording state (Record tab).
     pub devices: Vec<DeviceInfo>,
     pub selected_device: Option<String>,
+    /// Why the last Record press failed, shown in red directly under the
+    /// transport. The global bottom status bar also gets the message, but
+    /// it sits below the fold of a maximised window's attention — a failed
+    /// Record with the reason only down there reads as "nothing happened"
+    /// (which is exactly how the U8-config bug was reported). Cleared on
+    /// the next successful start.
+    pub record_last_error: Option<String>,
     pub selected_mode: SourceMode,
     pub viz: Arc<VizState>,
     pub session: Option<RecordingSession>,
@@ -607,6 +614,7 @@ impl TinyBoothApp {
             backing: ProjectBacking::Folder,
             devices,
             selected_device,
+            record_last_error: None,
             selected_mode: SourceMode::Mixdown,
             viz: VizState::new(),
             session: None,

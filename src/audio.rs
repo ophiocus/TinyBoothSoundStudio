@@ -306,23 +306,45 @@ pub fn start_recording(
     // default. Refusing to start here is much friendlier than
     // recording at the wrong rate and breaking the Mix tab later.
     let supported = match required_sample_rate {
-        Some(req) => dev
-            .supported_input_configs()
-            .context("listing supported input configs")?
-            .find_map(|c| {
-                if c.min_sample_rate().0 <= req && c.max_sample_rate().0 >= req {
-                    Some(c.with_sample_rate(cpal::SampleRate(req)))
-                } else {
-                    None
+        Some(req) => {
+            // Rank every range covering the required rate and take the
+            // best BUILDABLE one. Taking the *first* covering range —
+            // whatever cpal happens to list first — regressed on WASAPI:
+            // the Yeti lists a U8 range before its real formats, the
+            // stream builder below only dispatches F32/I16/U16, and every
+            // take after the recordings project pinned its rate failed
+            // with "unsupported sample format U8". (That silent failure
+            // was FR-0008's suspected "repeat-take race" — no race, just
+            // format-blind config selection: take 1 on a fresh project
+            // goes through `default_input_config` and picks sanely.)
+            let fmt_rank = |f: SampleFormat| -> Option<u32> {
+                match f {
+                    SampleFormat::F32 => Some(0), // WASAPI shared-mode native
+                    SampleFormat::I16 => Some(1),
+                    SampleFormat::U16 => Some(2),
+                    _ => None, // U8 etc. — the builder can't stream these
                 }
-            })
-            .ok_or_else(|| {
-                anyhow!(
-                    "input device '{device_name}' does not support {req} Hz, \
-                     which this project's existing tracks were captured / imported at. \
-                     Pick a different device or start a fresh project."
-                )
-            })?,
+            };
+            dev.supported_input_configs()
+                .context("listing supported input configs")?
+                .filter(|c| c.min_sample_rate().0 <= req && c.max_sample_rate().0 >= req)
+                .filter_map(|c| {
+                    let rank = fmt_rank(c.sample_format())?;
+                    Some((rank, c))
+                })
+                // Best format first; more channels wins within a format
+                // so Stereo mode keeps working (mixdown handles any).
+                .min_by_key(|(rank, c)| (*rank, std::cmp::Reverse(c.channels())))
+                .map(|(_, c)| c.with_sample_rate(cpal::SampleRate(req)))
+                .ok_or_else(|| {
+                    anyhow!(
+                        "input device '{device_name}' does not support {req} Hz \
+                         in a recordable format, and this project's existing \
+                         tracks were captured / imported at {req} Hz. \
+                         Pick a different device or start a fresh project."
+                    )
+                })?
+        }
         None => dev
             .default_input_config()
             .context("reading default input config")?,
@@ -607,5 +629,87 @@ impl ToF32 for i16 {
 impl ToF32 for u16 {
     fn to_f32(self) -> f32 {
         (self as f32 - i16::MAX as f32) / i16::MAX as f32
+    }
+}
+
+#[cfg(test)]
+mod probe {
+    use super::*;
+
+    /// Headless reproduction of the Record-button path against the real
+    /// default input device, including the immediate-repeat-take sequence
+    /// (FR-0008's suspected device-release race). Env-gated: needs real
+    /// hardware. Run:
+    ///   TBSS_RECORD_PROBE=1 cargo test --bin tinybooth-sound-studio record_probe -- --ignored --nocapture
+    #[test]
+    #[ignore = "needs a real input device; set TBSS_RECORD_PROBE=1"]
+    fn record_probe() {
+        if std::env::var("TBSS_RECORD_PROBE").is_err() {
+            eprintln!("TBSS_RECORD_PROBE not set — skipping");
+            return;
+        }
+        let devices = list_input_devices();
+        for d in &devices {
+            eprintln!(
+                "input device: {} ({} ch @ {} Hz)",
+                d.name, d.channels, d.sample_rate
+            );
+        }
+        let chosen = devices
+            .iter()
+            .find(|d| d.name.contains("Yeti"))
+            .or(devices.first())
+            .expect("no input devices at all")
+            .clone();
+        let dev = chosen.name.clone();
+        eprintln!("using: {dev}");
+
+        let dir = std::env::temp_dir().join(format!("tbss-recprobe-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        for take in 1..=3 {
+            let wav = dir.join(format!("take{take}.wav"));
+            let t0 = std::time::Instant::now();
+            let sess = start_recording(
+                &dev,
+                SourceMode::Mixdown,
+                &wav,
+                VizState::new(),
+                crate::dsp::Profile::raw("probe"),
+                tx.clone(),
+                // Takes 2+ mirror the app exactly: the recordings project
+                // pins the rate of its first-ever track — which is the
+                // device's own default rate, same as here.
+                if take == 1 {
+                    None
+                } else {
+                    Some(chosen.sample_rate)
+                },
+            );
+            match sess {
+                Ok(s) => {
+                    eprintln!(
+                        "take {take}: stream up in {:?} at {} Hz — recording 1.5s…",
+                        t0.elapsed(),
+                        s.sample_rate
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(1500));
+                    let frames = s.frames();
+                    drop(s);
+                    let size = std::fs::metadata(&wav).map(|m| m.len()).unwrap_or(0);
+                    eprintln!("take {take}: {frames} frames, {size} bytes on disk");
+                    assert!(frames > 0, "take {take}: stream ran but wrote 0 frames");
+                }
+                Err(e) => {
+                    eprintln!("take {take}: START FAILED after {:?}: {e:#}", t0.elapsed());
+                    panic!("take {take} failed to start: {e:#}");
+                }
+            }
+            while let Ok(m) = rx.try_recv() {
+                eprintln!("take {take}: stream error surfaced: {m}");
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -160,8 +160,16 @@ pub fn show(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
                 )
                 .clicked()
             {
-                if let Err(e) = app.start_new_take() {
-                    app.status = Some(format!("record error: {e}"));
+                match app.start_new_take() {
+                    Ok(()) => app.record_last_error = None,
+                    Err(e) => {
+                        // Both surfaces: the global bar for consistency,
+                        // and the in-tab line below because a failure
+                        // reported only below the fold reads as
+                        // "nothing happened".
+                        app.status = Some(format!("record error: {e:#}"));
+                        app.record_last_error = Some(format!("{e:#}"));
+                    }
                 }
             }
         } else if ui
@@ -181,6 +189,12 @@ pub fn show(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
             ));
         }
     });
+    if let Some(err) = app.record_last_error.clone() {
+        ui.colored_label(
+            egui::Color32::from_rgb(0xE0, 0x60, 0x60),
+            format!("⚠ couldn't start recording: {err}"),
+        );
+    }
 
     ui.add_space(8.0);
 
