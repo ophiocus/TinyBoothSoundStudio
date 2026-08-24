@@ -492,6 +492,8 @@ pub struct TinyBoothApp {
     /// Tracker tab state. TBSS-FR-0014 (state lives in ui/tracker.rs
     /// per the TrimState convention the audit endorsed).
     pub tracker_state: crate::ui::tracker::TrackerUiState,
+    /// Sample Library window (TBSS-FR-0018).
+    pub samplelib_state: crate::ui::samplelib::SampleLibUiState,
 
     /// Mixer/automation recorder. Captures fader gestures while a strip's
     /// arm toggle is on and the player is in Playing state. Flushed into
@@ -735,6 +737,7 @@ impl TinyBoothApp {
             album_state: AlbumUiState::default(),
             chordvideo_state: ChordVideoUiState::default(),
             tracker_state: crate::ui::tracker::TrackerUiState::default(),
+            samplelib_state: crate::ui::samplelib::SampleLibUiState::default(),
             recorder: crate::automation::Recorder::default(),
             mix_console_fraction: 0.42,
             recordings_page: 0,
@@ -1084,7 +1087,8 @@ impl TinyBoothApp {
     /// reference window (reading it while working is the point), and
     /// counting it would kill its own F1 toggle.
     fn any_modal_open(&self) -> bool {
-        self.show_admin
+        self.samplelib_state.open
+            || self.show_admin
             || self.show_trim
             || self.show_health
             || self.show_telemetry_settings
@@ -1100,6 +1104,10 @@ impl TinyBoothApp {
     /// migration prompt is deliberately NOT Esc-closable: its choices
     /// differ materially, so it requires an explicit click.
     fn close_top_modal(&mut self) {
+        if self.samplelib_state.open {
+            self.samplelib_state.open = false;
+            return;
+        }
         if self.import_dialog.take().is_some() {
             return;
         }
@@ -3387,6 +3395,10 @@ impl eframe::App for TinyBoothApp {
             crate::git_update::UpdateState::Downloading(_)
         ) {
             crate::ui::update_dialog::show(ctx);
+        }
+        // Sample Library window (TBSS-FR-0018) — floats over any tab.
+        {
+            crate::ui::samplelib::show(self, ctx);
         }
         if should_close_for_update {
             // Stop any in-flight recording first so the WAV writer

@@ -56,6 +56,10 @@ pub struct TrackerUiState {
     pub decode_queue: Vec<(usize, PathBuf)>,
     /// Which instrument the in-flight decode belongs to.
     pub pending_decode_idx: usize,
+    /// Piano-selected key (FR-0018): drives the zone wave-editor lane.
+    pub piano_key_sel: Option<crate::tracker::Note>,
+    /// Drag anchor for the zone lane's trim selection, in frames.
+    pub zone_drag_anchor: Option<u64>,
 }
 
 impl Default for TrackerUiState {
@@ -77,6 +81,8 @@ impl Default for TrackerUiState {
             sources: Vec::new(),
             decode_queue: Vec::new(),
             pending_decode_idx: 0,
+            piano_key_sel: None,
+            zone_drag_anchor: None,
         }
     }
 }
@@ -136,6 +142,9 @@ pub fn show(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
         instrument_rail(app, &mut cols[0]);
         pattern_editor(app, &mut cols[1]);
     });
+    ui.separator();
+    piano_widget(app, ui);
+    zone_lane(app, ui);
 
     if let Some(msg) = app.tracker_state.status.clone() {
         ui.add_space(4.0);
@@ -192,6 +201,8 @@ fn transport_bar(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
     let mut click_stop = false;
     let mut click_bake = false;
     let mut click_export = false;
+    let mut click_library = false;
+    let mut click_demo: Option<usize> = None;
     ui.horizontal(|ui| {
         let st = &mut app.tracker_state;
         let playing = st.playing.is_some();
@@ -232,6 +243,20 @@ fn transport_bar(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
                 egui::Button::new("Export WAV…"),
             )
             .clicked();
+        click_library = ui
+            .button("🌐 Library…")
+            .on_hover_text("Download free instrument packs (TBSS-FR-0018)")
+            .clicked();
+        egui::ComboBox::from_id_source("tracker_demos")
+            .selected_text("Demos ▾")
+            .width(90.0)
+            .show_ui(ui, |ui| {
+                for (i, (name, _)) in crate::tracker_demos::demo_songs().iter().enumerate() {
+                    if ui.selectable_label(false, *name).clicked() {
+                        click_demo = Some(i);
+                    }
+                }
+            });
         if st.song_dirty {
             ui.label(egui::RichText::new("●").color(egui::Color32::YELLOW))
                 .on_hover_text("Unsaved tracker edits");
@@ -239,6 +264,12 @@ fn transport_bar(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
     });
     if app.tracker_state.song_dirty {
         persist_song(app);
+    }
+    if click_library {
+        app.samplelib_state.open = true;
+    }
+    if let Some(i) = click_demo {
+        load_demo(app, i);
     }
     if click_stop {
         app.tracker_state.playing = None;
@@ -698,4 +729,289 @@ fn handle_grid_key(st: &mut TrackerUiState, key: egui::Key) {
             }
         }
     }
+}
+
+// ───────────────── five-octave piano + zone lane (FR-0018) ─────────────────
+
+/// C-2..B-6 — five octaves, 60 keys. Keys whose pitch is an exact zone
+/// root render accented (a real recording lives there); other keys play
+/// pitch-stretched from the nearest zone. Click = audition through the
+/// real engine; the selected key drives the wave-editor lane below.
+fn piano_widget(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
+    let st = &app.tracker_state;
+    let Some(inst) = st.song.instruments.get(st.selected_instrument) else {
+        return;
+    };
+    let zone_roots: std::collections::HashSet<u8> = if inst.zones.is_empty() {
+        [inst.base_note].into_iter().collect()
+    } else {
+        inst.zones.iter().map(|z| z.root).collect()
+    };
+    let first: u8 = 24; // C-2
+    let n_keys = 60usize;
+    let white_w = (ui.available_width() / 35.0).clamp(10.0, 22.0);
+    let h = 46.0;
+
+    // Layout: x position per key (white index scan).
+    let mut white_i = 0usize;
+    let mut keys: Vec<(u8, bool, f32)> = Vec::with_capacity(n_keys); // (note, is_black, x)
+    for k in 0..n_keys {
+        let note = first + k as u8;
+        let pc = note % 12;
+        let black = matches!(pc, 1 | 3 | 6 | 8 | 10);
+        let x = if black {
+            white_i as f32 * white_w - white_w * 0.3
+        } else {
+            let x = white_i as f32 * white_w;
+            white_i += 1;
+            x
+        };
+        keys.push((note, black, x));
+    }
+    let total_w = white_i as f32 * white_w;
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(total_w, h), egui::Sense::click());
+    let painter = ui.painter_at(rect);
+
+    // Whites first, blacks on top.
+    for pass in 0..2 {
+        for (note, black, x) in &keys {
+            if (*black as usize) != pass {
+                continue;
+            }
+            let (w, kh) = if *black {
+                (white_w * 0.6, h * 0.6)
+            } else {
+                (white_w - 1.0, h)
+            };
+            let r = egui::Rect::from_min_size(
+                egui::pos2(rect.min.x + x, rect.min.y),
+                egui::vec2(w, kh),
+            );
+            let covered = zone_roots.contains(note);
+            let selected = st.piano_key_sel == Some(*note);
+            let fill = match (black, covered) {
+                (false, true) => egui::Color32::from_rgb(120, 190, 140),
+                (false, false) => egui::Color32::from_gray(210),
+                (true, true) => egui::Color32::from_rgb(40, 120, 70),
+                (true, false) => egui::Color32::from_gray(25),
+            };
+            painter.rect_filled(r, 1.0, fill);
+            if selected {
+                painter.rect_stroke(
+                    r,
+                    1.0,
+                    egui::Stroke::new(2.0, egui::Color32::from_rgb(230, 200, 80)),
+                );
+            }
+        }
+    }
+    painter.text(
+        rect.left_bottom() + egui::vec2(2.0, 2.0),
+        egui::Align2::LEFT_TOP,
+        format!(
+            "{} — green keys have a real recording; others pitch-stretch the nearest zone",
+            inst.name
+        ),
+        egui::FontId::proportional(10.0),
+        egui::Color32::from_gray(120),
+    );
+
+    if resp.clicked() {
+        if let Some(pos) = resp.interact_pointer_pos() {
+            // Hit-test blacks first (they overlay).
+            let mut hit: Option<u8> = None;
+            for (note, black, x) in keys.iter().rev() {
+                let (w, kh) = if *black {
+                    (white_w * 0.6, h * 0.6)
+                } else {
+                    (white_w - 1.0, h)
+                };
+                let r = egui::Rect::from_min_size(
+                    egui::pos2(rect.min.x + x, rect.min.y),
+                    egui::vec2(w, kh),
+                );
+                if *black && r.contains(pos) {
+                    hit = Some(*note);
+                    break;
+                }
+                if !*black && r.contains(pos) && hit.is_none() {
+                    hit = Some(*note);
+                }
+            }
+            if let Some(note) = hit {
+                app.tracker_state.piano_key_sel = Some(note);
+                audition_note(app, note);
+            }
+        }
+    }
+}
+
+/// Play one note of the selected instrument through the real engine.
+fn audition_note(app: &mut TinyBoothApp, note: crate::tracker::Note) {
+    app.stop_all_playback();
+    let st = &app.tracker_state;
+    let out = crate::tracker::render_one_note(
+        &st.song,
+        &st.samples,
+        st.selected_instrument,
+        note,
+        48_000,
+        2.0,
+    );
+    if out.iter().all(|s| *s == 0.0) {
+        app.tracker_state.status =
+            Some("that key renders silence — sample still decoding, or no zones?".into());
+        return;
+    }
+    match crate::crossfade_player::CrossfadePreviewSession::play(out, 48_000, 2, 0) {
+        Ok(s) => app.tracker_state.playing = Some(s),
+        Err(e) => app.tracker_state.status = Some(format!("audition failed: {e:#}")),
+    }
+}
+
+/// The wave-editor lane for the piano-selected key's zone: peaks +
+/// scrub-style playhead + drag-selection that WRITES the zone trim,
+/// mirroring the Record/Mix wave language (FR-0015/0017).
+fn zone_lane(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
+    let st = &mut app.tracker_state;
+    let Some(key) = st.piano_key_sel else {
+        return;
+    };
+    let Some(inst) = st.song.instruments.get(st.selected_instrument) else {
+        return;
+    };
+    if inst.zones.is_empty() {
+        ui.weak("single-sample instrument — add zones via 🌐 Library packs to edit per-key");
+        return;
+    }
+    // Nearest zone for the selected key (same rule as the engine).
+    let (zone_idx, zone) = inst
+        .zones
+        .iter()
+        .enumerate()
+        .min_by_key(|(_, z)| ((z.root as i32 - key as i32).abs(), z.root))
+        .map(|(i, z)| (i, *z))
+        .expect("non-empty zones");
+    let Some(sample) = st.samples.get(zone.sample) else {
+        return;
+    };
+    if sample.data.is_empty() {
+        ui.weak("zone sample still decoding…");
+        return;
+    }
+    let n = sample.data.len() as u64;
+    let z_end = if zone.end == 0 { n } else { zone.end.min(n) };
+
+    ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new(format!(
+                "zone {} · root {} · {} frames",
+                zone_idx,
+                note_name(zone.root),
+                n
+            ))
+            .strong(),
+        );
+        ui.weak("drag = trim · both handles drawn · selection persists to the song");
+    });
+    let (rect, resp) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width().min(760.0), 44.0),
+        egui::Sense::click_and_drag(),
+    );
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 2.0, egui::Color32::from_rgb(14, 14, 18));
+    // Peaks straight from the decoded data (pure, no file IO).
+    let cols = rect.width() as usize;
+    let mid = rect.center().y;
+    let stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(100, 200, 130));
+    if cols > 0 {
+        let per = (sample.data.len() / cols.max(1)).max(1);
+        for x in 0..cols {
+            let s0 = x * per;
+            let s1 = ((x + 1) * per).min(sample.data.len());
+            let mut peak = 0.0f32;
+            for v in &sample.data[s0..s1] {
+                peak = peak.max(v.abs());
+            }
+            let hh = peak * 18.0;
+            let xp = rect.min.x + x as f32;
+            painter.line_segment([egui::pos2(xp, mid - hh), egui::pos2(xp, mid + hh)], stroke);
+        }
+    }
+    // Trim window band.
+    let fx = |frame: u64| rect.min.x + rect.width() * (frame as f32 / n.max(1) as f32);
+    let band = egui::Rect::from_min_max(
+        egui::pos2(fx(zone.start), rect.min.y),
+        egui::pos2(fx(z_end), rect.max.y),
+    );
+    painter.rect_filled(
+        band,
+        0.0,
+        egui::Color32::from_rgba_unmultiplied(230, 200, 80, 30),
+    );
+    for edge in [zone.start, z_end] {
+        painter.line_segment(
+            [
+                egui::pos2(fx(edge), rect.min.y),
+                egui::pos2(fx(edge), rect.max.y),
+            ],
+            egui::Stroke::new(1.5, egui::Color32::from_rgb(230, 200, 80)),
+        );
+    }
+
+    // Drag = set trim (write-through to the song, FR-0018 E5).
+    let to_frame = |x: f32| -> u64 {
+        (((x - rect.min.x) / rect.width().max(1.0)).clamp(0.0, 1.0) * n as f32) as u64
+    };
+    if resp.drag_started() {
+        if let Some(p) = resp.interact_pointer_pos() {
+            st.zone_drag_anchor = Some(to_frame(p.x));
+        }
+    }
+    if resp.dragged() || resp.drag_stopped() {
+        if let (Some(anchor), Some(p)) = (st.zone_drag_anchor, resp.interact_pointer_pos()) {
+            let cur = to_frame(p.x);
+            let (a, b) = if cur >= anchor {
+                (anchor, cur)
+            } else {
+                (cur, anchor)
+            };
+            if b - a > 32 {
+                let inst = &mut st.song.instruments[st.selected_instrument];
+                inst.zones[zone_idx].start = a;
+                inst.zones[zone_idx].end = b;
+                st.song_dirty = true;
+                st.dirty_audio = true;
+            }
+        }
+        if resp.drag_stopped() {
+            st.zone_drag_anchor = None;
+        }
+    }
+}
+
+/// Load a bundled public-domain demo song (traditional tunes — see
+/// `tracker_demos`). Persists the current song first, then replaces it.
+fn load_demo(app: &mut TinyBoothApp, idx: usize) {
+    persist_song(app);
+    let demos = crate::tracker_demos::demo_songs();
+    let Some((name, song)) = demos.into_iter().nth(idx) else {
+        return;
+    };
+    let st = &mut app.tracker_state;
+    st.playing = None;
+    // Keep the user's instruments + samples; the demo brings patterns.
+    let instruments = std::mem::take(&mut st.song.instruments);
+    st.song = song;
+    st.song.instruments = instruments;
+    if st.song.instruments.is_empty() {
+        st.status = Some(format!(
+            "loaded '{name}' — add an instrument (🌐 Library) to hear it; notes use instrument 00"
+        ));
+    } else {
+        st.status = Some(format!("loaded '{name}' — playing through instrument 00"));
+    }
+    st.song_dirty = true;
+    st.dirty_audio = true;
+    st.cursor_row = 0;
 }

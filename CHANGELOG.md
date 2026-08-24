@@ -8,6 +8,34 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); thi
 
 (Nothing yet — known issues all resolved as of v0.4.23.)
 
+## [0.4.86] — 2026-08-24
+
+### Added — Tracker sample library, multisample instruments, piano editor (TBSS-FR-0018)
+
+- **🌐 Sample Library.** Download free instrument packs from inside the
+  Tracker — Philharmonia Orchestra (strings / brass / woodwind /
+  percussion) and the CC0 Versilian Community Sample Library. Licenses
+  are shown before download; packs come from their sources on demand
+  and nothing is bundled with TinyBooth. Verified against the real
+  packs: the Brass zip alone yields **2,940 per-note recordings, every
+  one auto-mapped to its pitch** from the filename; unpitched
+  percussion is honestly reported rather than misfiled.
+- **Multisample instruments.** One pack click builds an instrument with
+  a zone per note — playing C-3 uses the C-3 recording, not a
+  five-octave stretch of one sample. Existing single-sample instruments
+  and songs load and render exactly as before (pinned by test).
+- **Five-octave piano editor.** Each instrument shows a C-2…B-6 piano:
+  green keys hold a real recording, others pitch-stretch the nearest
+  zone; clicking a key auditions it through the real engine (filter,
+  gain, loop and all).
+- **Per-key wave editor.** The selected key opens its zone's waveform
+  with the familiar wave-lane language — and dragging a selection
+  **sets that zone's trim** directly.
+- **Demo songs.** A Demos menu loads bundled public-domain classics —
+  *Ode to Joy* (Beethoven, 1824), *Frère Jacques* (trad.), and
+  *Korobeiniki* (trad., 1861 — yes, that one) — as ready-made patterns
+  that play through whatever instrument you've built.
+
 ## [0.4.85] — 2026-08-24
 
 ### Fixed — audit tranche 2: data-safety and integrity

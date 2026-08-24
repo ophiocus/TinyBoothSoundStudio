@@ -93,14 +93,43 @@ pub struct FilterCfg {
     pub q: f32,
 }
 
-/// An instrument: a mono sample plus playback configuration. The sample
-/// *data* is not stored here (sources decode through `audiodecode` at
-/// load time); the engine receives decoded samples side-by-side.
+/// One multisample zone (TBSS-FR-0018): a sample assigned to a root
+/// note. The engine picks the zone whose root is NEAREST to the played
+/// note and pitches relative to it — so a C-4 recording never has to
+/// stretch five octaves when a C-6 recording exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SampleZone {
+    pub root: Note,
+    /// Index into the flat decoded-sample pool the engine receives.
+    pub sample: usize,
+    /// Trim window in source frames (`end == 0` = to the end).
+    #[serde(default)]
+    pub start: u64,
+    #[serde(default)]
+    pub end: u64,
+    /// Loop window (used when the instrument's loop_mode != Off;
+    /// `loop_end == 0` = trim end).
+    #[serde(default)]
+    pub loop_start: u64,
+    #[serde(default)]
+    pub loop_end: u64,
+}
+
+/// An instrument: playback configuration over one or more sample zones.
+/// The sample *data* is not stored here (sources decode through
+/// `audiodecode` at load time); the engine receives decoded samples
+/// side-by-side in a flat pool that `SampleZone::sample` indexes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrackerInstrument {
     pub name: String,
     /// Which note plays the sample at its native rate.
     pub base_note: Note,
+    /// Multisample zones (FR-0018). EMPTY = legacy single-sample mode:
+    /// one implicit zone at `base_note` whose sample index equals the
+    /// instrument's own index — exactly the pre-zone behavior, so every
+    /// existing song deserializes and renders unchanged.
+    #[serde(default)]
+    pub zones: Vec<SampleZone>,
     pub gain_db: f32,
     pub loop_mode: LoopMode,
     /// Loop window in sample frames (used when `loop_mode != Off`).
@@ -116,6 +145,7 @@ impl TrackerInstrument {
         Self {
             name: name.into(),
             base_note: NOTE_C4,
+            zones: Vec::new(),
             gain_db: 0.0,
             loop_mode: LoopMode::Off,
             loop_start: 0,
@@ -176,6 +206,13 @@ const MAX_VOL: f32 = 64.0;
 #[derive(Clone)]
 struct Voice {
     instr: usize,
+    /// Which entry of the decoded-sample pool this voice reads.
+    sample_idx: usize,
+    /// Zone bounds in source frames (end = exclusive; loop in frames).
+    zone_start: f64,
+    zone_end: f64,
+    zloop_start: f64,
+    zloop_end: f64,
     /// Position in source frames (fractional — variable-rate).
     pos: f64,
     /// Frames advanced per output frame (rate ratio × note factor).
@@ -199,6 +236,11 @@ impl Voice {
     fn silent() -> Self {
         Self {
             instr: 0,
+            sample_idx: 0,
+            zone_start: 0.0,
+            zone_end: 0.0,
+            zloop_start: 0.0,
+            zloop_end: 0.0,
             pos: 0.0,
             step: 0.0,
             base_step: 0.0,
@@ -359,7 +401,7 @@ pub fn render_song(song: &TrackerSong, samples: &[DecodedSample], out_rate: u32)
                             continue;
                         }
                         let (instr, sample) =
-                            match (song.instruments.get(v.instr), samples.get(v.instr)) {
+                            match (song.instruments.get(v.instr), samples.get(v.sample_idx)) {
                                 (Some(i), Some(s)) if !s.data.is_empty() => (i, s),
                                 _ => {
                                     v.active = false;
@@ -367,7 +409,12 @@ pub fn render_song(song: &TrackerSong, samples: &[DecodedSample], out_rate: u32)
                                 }
                             };
                         let gain = (10.0f32).powf(instr.gain_db / 20.0) * (v.vol / MAX_VOL);
-                        let n = sample.data.len() as f64;
+                        // Zone bounds resolved at trigger (FR-0018).
+                        let n = if v.zone_end > 0.0 {
+                            v.zone_end
+                        } else {
+                            sample.data.len() as f64
+                        };
                         let (l_gain, r_gain) = ((1.0 - v.pan) * gain, v.pan * gain);
                         for f in 0..tf {
                             if !v.active {
@@ -386,13 +433,13 @@ pub fn render_song(song: &TrackerSong, samples: &[DecodedSample], out_rate: u32)
                             out[o] += s * l_gain;
                             out[o + 1] += s * r_gain;
 
-                            // Advance with loop handling.
+                            // Advance with loop handling (zone-scoped).
                             let (ls, le) = (
-                                instr.loop_start.min(sample.data.len() as u64) as f64,
-                                if instr.loop_end == 0 {
+                                v.zloop_start.min(n),
+                                if v.zloop_end == 0.0 {
                                     n
                                 } else {
-                                    (instr.loop_end.min(sample.data.len() as u64)) as f64
+                                    v.zloop_end.min(n)
                                 },
                             );
                             match instr.loop_mode {
@@ -467,27 +514,53 @@ fn trigger_cell(
     let Some(instr) = song.instruments.get(instr_idx) else {
         return;
     };
-    let Some(sample) = samples.get(instr_idx) else {
+    // Zone resolution (FR-0018): nearest root wins; legacy instruments
+    // (no zones) behave as one implicit zone at base_note whose sample
+    // index is the instrument index — the pre-zone contract.
+    let zone = resolve_zone(instr, instr_idx, note);
+    let Some(sample) = samples.get(zone.sample) else {
         return;
     };
+    if sample.data.is_empty() {
+        return;
+    }
 
     // NNA: Continue moves the ringing voice to slot 1; Cut just replaces.
     if slots[0].active && instr.nna == Nna::Continue {
         slots[1] = slots[0].clone();
     }
 
+    let n_frames = sample.data.len() as u64;
+    let z_start = zone.start.min(n_frames);
+    let z_end = if zone.end == 0 {
+        n_frames
+    } else {
+        zone.end.min(n_frames)
+    };
+    let zl_start = zone.loop_start.clamp(z_start, z_end);
+    let zl_end = if zone.loop_end == 0 {
+        z_end
+    } else {
+        zone.loop_end.clamp(zl_start, z_end)
+    };
+
     let rate_ratio = sample.sample_rate as f64 / out_rate.max(1) as f64;
-    let note_factor = semis_to_factor(note as f64 - instr.base_note as f64);
+    let note_factor = semis_to_factor(note as f64 - zone.root as f64);
     let base_step = rate_ratio * note_factor;
 
-    // 9xx sample offset applies at trigger.
+    // 9xx sample offset applies at trigger (relative to the zone start).
     let offset = match cell.fx {
-        Some((b'9', p)) => ((p & 0xFF) as u64 * 256).min(sample.data.len() as u64) as f64,
-        _ => 0.0,
+        Some((b'9', p)) => (z_start + ((p & 0xFF) as u64) * 256).min(z_end) as f64,
+        _ => z_start as f64,
     };
 
     slots[0] = Voice {
         instr: instr_idx,
+        sample_idx: zone.sample,
+        zone_start: z_start as f64,
+        zone_end: z_end as f64,
+        zloop_start: zl_start as f64,
+        zloop_end: zl_end as f64,
         pos: offset,
         step: base_step,
         base_step,
@@ -503,6 +576,57 @@ fn trigger_cell(
         filter: instr.filter.as_ref().and_then(|c| make_filter(c, out_rate)),
         vib_phase: 0.0,
     };
+}
+
+/// Render a single note of one instrument through the real engine —
+/// the piano widget's audition path (FR-0018 E4). Same zones, filter,
+/// gain, and loop behavior playback will use.
+pub fn render_one_note(
+    song: &TrackerSong,
+    samples: &[DecodedSample],
+    instr_idx: usize,
+    note: Note,
+    out_rate: u32,
+    secs: f32,
+) -> Vec<f32> {
+    let mut one = TrackerSong::new(1, 1);
+    one.instruments = song.instruments.clone();
+    // One row stretched to ~secs: rows are speed·tick long; pick speed
+    // so a single row covers the audition window (cap at the engine's
+    // 31-tick ceiling and pad rows if needed).
+    one.bpm = 125.0;
+    let tick_secs = 2.5 / one.bpm as f64;
+    let ticks = ((secs as f64 / tick_secs).ceil() as u64).max(1);
+    let speed = ticks.min(31) as u8;
+    let rows = ticks.div_ceil(31).max(1) as u16;
+    one.speed = speed;
+    one.patterns[0] = TrackerPattern::empty(1, rows);
+    one.patterns[0].tracks[0][0] = TrackerCell {
+        note: Some(note),
+        instr: Some(instr_idx as u8),
+        ..Default::default()
+    };
+    render_song(&one, samples, out_rate)
+}
+
+/// Pick the zone whose root is nearest the played note (ties → lower
+/// root). Legacy no-zone instruments synthesize the implicit zone.
+fn resolve_zone(instr: &TrackerInstrument, instr_idx: usize, note: Note) -> SampleZone {
+    if instr.zones.is_empty() {
+        return SampleZone {
+            root: instr.base_note,
+            sample: instr_idx,
+            start: 0,
+            end: 0,
+            loop_start: instr.loop_start,
+            loop_end: instr.loop_end,
+        };
+    }
+    *instr
+        .zones
+        .iter()
+        .min_by_key(|z| ((z.root as i32 - note as i32).abs(), z.root))
+        .expect("non-empty zones")
 }
 
 /// Total frames one pattern occupies at the song's (initial) tempo —
@@ -714,6 +838,109 @@ mod tests {
         // And playback neither panics nor changes length.
         let out = render_song(&back, &samples, RATE);
         assert_eq!(out.len(), 960 * 6 * 2);
+    }
+
+    #[test]
+    fn zones_pick_the_nearest_root() {
+        // Two zones: C-3 (sample 0 = DC 0.1) and C-5 (sample 1 = DC 0.3).
+        // Playing C-4 (equidistant) ties → lower root (sample 0).
+        // Playing D-5 → C-5 zone (sample 1).
+        let mut song = TrackerSong::new(1, 2);
+        let mut inst = TrackerInstrument::simple("multi");
+        inst.zones = vec![
+            SampleZone {
+                root: 36,
+                sample: 0,
+                start: 0,
+                end: 0,
+                loop_start: 0,
+                loop_end: 0,
+            },
+            SampleZone {
+                root: 60,
+                sample: 1,
+                start: 0,
+                end: 0,
+                loop_start: 0,
+                loop_end: 0,
+            },
+        ];
+        song.instruments.push(inst);
+        song.patterns[0].tracks[0][0] = TrackerCell {
+            note: Some(48),
+            instr: Some(0),
+            ..Default::default()
+        };
+        song.patterns[0].tracks[0][1] = TrackerCell {
+            note: Some(62),
+            instr: Some(0),
+            ..Default::default()
+        };
+        let samples = vec![
+            dc_sample(RATE as usize * 4, 0.1),
+            dc_sample(RATE as usize * 4, 0.3),
+        ];
+        let out = render_song(&song, &samples, RATE);
+        // Row 0: C-4 from the C-3 zone → +12 semis, DC value 0.1·pan.
+        assert!((out[100 * 2] - 0.1 * 0.5).abs() < 1e-4, "row 0 uses zone 0");
+        // Row 1: D-5 from the C-5 zone → DC value 0.3·pan.
+        let row1 = 960 * 6 * 2 + 200;
+        assert!((out[row1] - 0.3 * 0.5).abs() < 1e-4, "row 1 uses zone 1");
+    }
+
+    #[test]
+    fn zone_trim_bounds_playback() {
+        // Zone trimmed to frames 0..1000 at base pitch: the voice must
+        // go silent once it crosses the trim end, long before the
+        // sample's real end.
+        let mut song = TrackerSong::new(1, 2);
+        let mut inst = TrackerInstrument::simple("trim");
+        inst.zones = vec![SampleZone {
+            root: NOTE_C4,
+            sample: 0,
+            start: 0,
+            end: 1000,
+            loop_start: 0,
+            loop_end: 0,
+        }];
+        song.instruments.push(inst);
+        song.patterns[0].tracks[0][0] = TrackerCell {
+            note: Some(NOTE_C4),
+            instr: Some(0),
+            ..Default::default()
+        };
+        let samples = vec![dc_sample(RATE as usize * 4, 0.25)];
+        let out = render_song(&song, &samples, RATE);
+        assert!(out[500 * 2].abs() > 0.0, "audible inside the trim");
+        assert_eq!(out[2000 * 2], 0.0, "silent past the trim end");
+    }
+
+    #[test]
+    fn legacy_instrument_equals_single_zone() {
+        // A no-zones instrument and an explicit one-zone instrument at
+        // the same root must render identically.
+        let build = |zoned: bool| {
+            let mut song = TrackerSong::new(1, 2);
+            let mut inst = TrackerInstrument::simple("s");
+            if zoned {
+                inst.zones = vec![SampleZone {
+                    root: NOTE_C4,
+                    sample: 0,
+                    start: 0,
+                    end: 0,
+                    loop_start: 0,
+                    loop_end: 0,
+                }];
+            }
+            song.instruments.push(inst);
+            song.patterns[0].tracks[0][0] = TrackerCell {
+                note: Some(NOTE_C4 + 5),
+                instr: Some(0),
+                ..Default::default()
+            };
+            render_song(&song, &[ramp_sample(RATE as usize)], RATE)
+        };
+        assert_eq!(build(false), build(true));
     }
 
     #[test]
