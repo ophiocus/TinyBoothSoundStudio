@@ -535,6 +535,19 @@ fn show_loose_wavs(app: &mut TinyBoothApp, rec: &Project, ui: &mut egui::Ui) {
 pub struct CachedThumb {
     pub peaks: Vec<f32>,
     pub duration_secs: f32,
+    /// (file size, mtime) at compute time. The cache is path-keyed with no
+    /// eviction, and this list renders every frame — including *during* a
+    /// recording — so a thumb computed from the not-yet-finalised WAV
+    /// (hound reads its data-chunk length as 0 until the writer closes)
+    /// used to cache a permanently blank waveform for every fresh take.
+    /// Stamp mismatch on lookup forces a recompute once the file settles.
+    pub stamp: Option<(u64, std::time::SystemTime)>,
+}
+
+/// Cheap identity stamp for cache invalidation.
+fn file_stamp(path: &Path) -> Option<(u64, std::time::SystemTime)> {
+    let m = std::fs::metadata(path).ok()?;
+    Some((m.len(), m.modified().ok()?))
 }
 
 /// Get the cached thumbnail for `path`, decoding the WAV on the UI
@@ -545,10 +558,25 @@ pub struct CachedThumb {
 /// decode is the MVP trade-off; an async worker would only matter
 /// for very long takes.
 fn cached_or_compute_thumb(app: &mut TinyBoothApp, path: &Path) -> Option<Arc<CachedThumb>> {
-    if let Some(cached) = app.recordings_peaks_cache.get(path) {
-        return Some(cached.clone());
+    // Never thumb the file that's being recorded right now: its header is
+    // not finalised, so it decodes as empty — and it changes every buffer
+    // anyway. The row renders as a blank placeholder until Stop.
+    if let Some(sess) = app.session.as_ref() {
+        if sess.wav_path == path {
+            return None;
+        }
     }
-    let thumb = compute_wav_thumb(path)?;
+    let stamp = file_stamp(path);
+    if let Some(cached) = app.recordings_peaks_cache.get(path) {
+        // A stamp match means the file hasn't changed since we thumbed it.
+        // Mismatch (the take finished being written, an external tool
+        // replaced it) or a stat failure falls through to recompute.
+        if cached.stamp.is_some() && cached.stamp == stamp {
+            return Some(cached.clone());
+        }
+    }
+    let mut thumb = compute_wav_thumb(path)?;
+    thumb.stamp = stamp;
     let arc = Arc::new(thumb);
     app.recordings_peaks_cache
         .insert(path.to_path_buf(), arc.clone());
@@ -569,6 +597,7 @@ fn compute_wav_thumb(path: &Path) -> Option<CachedThumb> {
         return Some(CachedThumb {
             peaks: vec![0.0; THUMB_BINS],
             duration_secs,
+            stamp: None,
         });
     }
 
@@ -596,6 +625,7 @@ fn compute_wav_thumb(path: &Path) -> Option<CachedThumb> {
     Some(CachedThumb {
         peaks,
         duration_secs,
+        stamp: None,
     })
 }
 

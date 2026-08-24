@@ -1351,7 +1351,7 @@ impl TinyBoothApp {
             track.correction = Some(seed.clone());
             changed += 1;
             if let Some(player) = self.player.as_ref() {
-                if let Some(t) = player.state.tracks.get(i) {
+                if let Some(t) = player.state.track_by_project_idx(i) {
                     t.set_correction(Some(seed.clone()));
                 }
             }
@@ -1430,7 +1430,7 @@ impl TinyBoothApp {
             track.correction = None;
             changed += 1;
             if let Some(player) = self.player.as_ref() {
-                if let Some(t) = player.state.tracks.get(i) {
+                if let Some(t) = player.state.track_by_project_idx(i) {
                     t.set_correction(None);
                 }
             }

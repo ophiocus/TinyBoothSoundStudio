@@ -275,8 +275,19 @@ fn consume_autoplay_request(app: &mut TinyBoothApp) {
     }
     if let Some(player) = app.player.as_ref() {
         if let Some(idx) = app.mix_autoplay_solo_idx.take() {
-            for (i, t) in player.state.tracks.iter().enumerate() {
-                t.solo.store(i == idx, std::sync::atomic::Ordering::Relaxed);
+            // `idx` is a PROJECT index. The player may have skipped
+            // tracks, so match on project_idx — positional matching
+            // solo'd (and audibly played) the wrong take whenever a
+            // skip shifted the indices.
+            if player.state.track_by_project_idx(idx).is_none() {
+                app.status =
+                    Some("that take isn't loaded in the mixer (see lane list for why)".into());
+                app.mix_autoplay_pending = false;
+                return;
+            }
+            for t in player.state.tracks.iter() {
+                t.solo
+                    .store(t.project_idx == idx, std::sync::atomic::Ordering::Relaxed);
             }
         }
         player
@@ -511,7 +522,10 @@ fn lanes_view(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
             // v0.4.24 — small top padding so the first row's name label
             // doesn't kiss the bottom edge of the transport bar above.
             ui.add_space(4.0);
-            for (idx, track) in player.state.tracks.iter().enumerate() {
+            for track in player.state.tracks.iter() {
+                // Project index — every `app.project.tracks[...]` access
+                // and every deferred request below is keyed by it.
+                let idx = track.project_idx;
                 // v0.4.24 — wrap each lane in `Frame::group` so each row
                 // gets a visibly bounded card with its own border. Pre-
                 // v0.4.24 had only a 1-px divider line that wasn't strong
@@ -760,7 +774,7 @@ fn lanes_view(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
             app.project.tracks[i].correction = seed.clone();
             app.project_dirty = true;
             if let Some(player) = app.player.as_ref() {
-                if let Some(track) = player.state.tracks.get(i) {
+                if let Some(track) = player.state.track_by_project_idx(i) {
                     track.set_correction(seed);
                 }
             }
@@ -897,9 +911,16 @@ fn console_deck(app: &mut TinyBoothApp, ui: &mut egui::Ui) {
             // heights. With Align::Min every card's top edge sits on the
             // same y baseline.
             ui.with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
-                for idx in 0..n_tracks {
-                    if strip(app, ui, idx, strip_h) {
-                        commit_track = Some(idx);
+                for pos in 0..n_tracks {
+                    // strip() takes the positional player index; commits
+                    // are keyed by project index (recorder + manifest).
+                    let pidx = app
+                        .player
+                        .as_ref()
+                        .and_then(|p| p.state.tracks.get(pos))
+                        .map(|t| t.project_idx);
+                    if strip(app, ui, pos, strip_h) {
+                        commit_track = pidx;
                     }
                     ui.add_space(STRIP_GAP);
                 }
@@ -1022,7 +1043,7 @@ fn strip(app: &mut TinyBoothApp, ui: &mut egui::Ui, idx: usize, available_h: f32
                             track
                                 .polarity_inverted
                                 .store(new_polarity, Ordering::Relaxed);
-                            if let Some(t) = app.project.tracks.get_mut(idx) {
+                            if let Some(t) = app.project.tracks.get_mut(track.project_idx) {
                                 t.polarity_inverted = new_polarity;
                             }
                             app.project_dirty = true;
@@ -1046,7 +1067,7 @@ fn strip(app: &mut TinyBoothApp, ui: &mut egui::Ui, idx: usize, available_h: f32
                             // read `project.tracks[..].gain_db`, so
                             // without this the user's balance work was
                             // silently lost unless automation was armed.
-                            if let Some(t) = app.project.tracks.get_mut(idx) {
+                            if let Some(t) = app.project.tracks.get_mut(track.project_idx) {
                                 t.gain_db = gain;
                             }
                             app.project_dirty = true;
@@ -1241,9 +1262,10 @@ fn capture_automation(app: &mut TinyBoothApp) {
         return;
     }
     let t = player.state.position_secs();
-    for (i, track) in player.state.tracks.iter().enumerate() {
+    for track in player.state.tracks.iter() {
         if track.recording_armed.load(Ordering::Relaxed) {
-            app.recorder.record_track(i, t, track.gain_db());
+            app.recorder
+                .record_track(track.project_idx, t, track.gain_db());
         }
     }
     if player.state.master_recording_armed.load(Ordering::Relaxed) {
@@ -1260,9 +1282,8 @@ fn stop_and_commit_automation(app: &mut TinyBoothApp) {
         p.state
             .tracks
             .iter()
-            .enumerate()
-            .filter(|(_, t)| t.recording_armed.load(Ordering::Relaxed))
-            .map(|(i, _)| i)
+            .filter(|t| t.recording_armed.load(Ordering::Relaxed))
+            .map(|t| t.project_idx)
             .collect()
     } else {
         Vec::new()
@@ -1286,7 +1307,7 @@ fn commit_track_automation(app: &mut TinyBoothApp, idx: usize) {
         if !lane.is_empty() {
             app.project.tracks[idx].gain_automation = Some(lane.clone());
             if let Some(p) = app.player.as_ref() {
-                if let Some(t) = p.state.tracks.get(idx) {
+                if let Some(t) = p.state.track_by_project_idx(idx) {
                     t.set_automation(Some(lane));
                 }
             }
@@ -1642,7 +1663,7 @@ fn apply_coherence_restoration(app: &mut TinyBoothApp, i: usize) {
     app.project_dirty = true;
     let snapshot = app.project.tracks[i].correction.clone();
     if let Some(player) = app.player.as_ref() {
-        if let Some(t) = player.state.tracks.get(i) {
+        if let Some(t) = player.state.track_by_project_idx(i) {
             t.set_correction(snapshot);
         }
     }

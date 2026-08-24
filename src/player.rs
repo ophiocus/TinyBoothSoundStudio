@@ -59,6 +59,14 @@ pub enum AudioSource {
 /// cpal device enumeration actually happen. See [`snapshot_project`].
 pub struct TrackAudioSnapshot {
     pub source: AudioSource,
+    /// Index of this track in `project.tracks` at snapshot time. Carried
+    /// through to [`TrackPlay::project_idx`] so the UI can map a player
+    /// lane back to the project row it came from. The player may SKIP
+    /// tracks it can't load, so positional player indices and project
+    /// indices are NOT interchangeable — using one as the other made the
+    /// Record tab's ▶ solo (and fader/polarity/automation write-backs)
+    /// target the wrong track whenever a skip occurred.
+    pub project_idx: usize,
     pub name: String,
     /// Free-form display label for diagnostics — the legacy folder
     /// project stores the relative filename here; `.tib` projects store
@@ -76,6 +84,14 @@ pub struct TrackAudioSnapshot {
 /// needs, in `Send` form, so the build runs off the UI thread.
 pub struct ProjectAudioSnapshot {
     pub tracks: Vec<TrackAudioSnapshot>,
+    /// Recording-centric projects (Recordings filespace, TinyDAW) hold
+    /// independent takes whose lengths naturally differ — the strict
+    /// same-length rule below is only meant for stem projects, where a
+    /// length mismatch signals a broken import. When this is set the
+    /// build skips the length check (rates must still match); the mix
+    /// callback already bounds-reads each track, so shorter takes simply
+    /// end early.
+    pub mixed_lengths_ok: bool,
     pub master_gain_db: f32,
     pub master_gain_automation: Option<AutomationLane>,
     pub corrections_disabled: bool,
@@ -100,10 +116,15 @@ pub fn snapshot_project(
     tib_rev_ids: Option<&HashMap<String, i64>>,
 ) -> ProjectAudioSnapshot {
     ProjectAudioSnapshot {
+        mixed_lengths_ok: matches!(
+            project.kind,
+            crate::project::ProjectKind::Recordings | crate::project::ProjectKind::TinyDAW
+        ),
         tracks: project
             .tracks
             .iter()
-            .map(|t| {
+            .enumerate()
+            .map(|(project_idx, t)| {
                 let source = match tib_rev_ids.and_then(|m| m.get(&t.id)) {
                     Some(&rev_id) => AudioSource::TibRev {
                         db_path: project.root.clone(),
@@ -113,6 +134,7 @@ pub fn snapshot_project(
                 };
                 TrackAudioSnapshot {
                     source,
+                    project_idx,
                     name: t.name.clone(),
                     file: t.file.clone(),
                     gain_db: t.gain_db,
@@ -153,6 +175,8 @@ impl PlayState {
 /// thread does (cheap) atomic loads on every callback and only takes the
 /// `correction_profile` lock when the generation counter increments.
 pub struct TrackPlay {
+    /// See [`TrackAudioSnapshot::project_idx`].
+    pub project_idx: usize,
     pub name: String,
     /// Interleaved samples — length = frame_count for mono, 2×frame_count for stereo.
     samples: Vec<i16>,
@@ -330,6 +354,15 @@ pub struct PlayerState {
 pub const OUTPUT_VIZ_LEN: usize = 4096;
 
 impl PlayerState {
+    /// Find the player track built from `project.tracks[project_idx]`.
+    ///
+    /// The build may skip tracks it can't load, so `self.tracks` is not
+    /// positionally aligned with the project — any UI code holding a
+    /// project index must resolve through here, never `tracks.get(i)`.
+    pub fn track_by_project_idx(&self, project_idx: usize) -> Option<&Arc<TrackPlay>> {
+        self.tracks.iter().find(|t| t.project_idx == project_idx)
+    }
+
     pub fn play_state(&self) -> PlayState {
         PlayState::from_u8(self.play_state.load(Ordering::Acquire))
     }
@@ -451,7 +484,8 @@ fn build_state(snap: &ProjectAudioSnapshot, error_tx: &Sender<String>) -> Result
             let rate_ok = tp.sample_rate == sample_rate;
             let stem_secs = tp.frame_count as f32 / tp.sample_rate.max(1) as f32;
             let proj_secs = reference_frames as f32 / sample_rate.max(1) as f32;
-            let length_ok = (stem_secs - proj_secs).abs() <= MAX_LENGTH_JITTER_SECS;
+            let length_ok =
+                snap.mixed_lengths_ok || (stem_secs - proj_secs).abs() <= MAX_LENGTH_JITTER_SECS;
             if !rate_ok || !length_ok {
                 let mut whys: Vec<String> = Vec::new();
                 if !rate_ok {
@@ -655,6 +689,7 @@ fn load_track_play(t: &TrackAudioSnapshot) -> Result<TrackPlay> {
     let peaks = compute_peaks(&samples, channels as usize, PEAKS_BIN_SIZE);
 
     Ok(TrackPlay {
+        project_idx: t.project_idx,
         name: t.name.clone(),
         solo: AtomicBool::new(false),
         recording_armed: AtomicBool::new(false),
@@ -1087,6 +1122,90 @@ mod tib_source_tests {
     use std::io::Cursor;
     use std::path::PathBuf;
 
+    /// Regression for the Record-tab "▶ plays the wrong take" bug.
+    ///
+    /// Two invariants: (1) with `mixed_lengths_ok` (recording-centric
+    /// projects) different-length takes ALL load — the strict same-length
+    /// rule is for stem projects only; (2) `project_idx` survives skips,
+    /// so a lane always maps back to the project row it came from. The
+    /// old positional mapping solo'd a neighbouring take whenever the
+    /// build skipped a track.
+    #[test]
+    fn mixed_lengths_load_and_project_idx_survives_skips() {
+        let dir = std::env::temp_dir().join(format!("tbss-mixedlen-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let write = |name: &str, frames: usize| -> PathBuf {
+            let p = dir.join(name);
+            let samples: Vec<i16> = (0..frames).map(|i| (i % 100) as i16).collect();
+            std::fs::write(&p, make_wav_bytes(&samples, 48_000, 1)).unwrap();
+            p
+        };
+        // Three takes of wildly different lengths + one missing file.
+        let a = write("a.wav", 48_000); // 1.0 s
+        let b = write("b.wav", 4_800); //  0.1 s
+        let missing = dir.join("gone.wav");
+        let c = write("c.wav", 96_000); // 2.0 s
+
+        let snap_track = |idx: usize, path: &PathBuf| TrackAudioSnapshot {
+            source: AudioSource::File(path.clone()),
+            project_idx: idx,
+            name: format!("t{idx}"),
+            file: format!("t{idx}.wav"),
+            gain_db: 0.0,
+            mute: false,
+            polarity_inverted: false,
+            correction: None,
+            gain_automation: None,
+        };
+        let mk_snap = |mixed: bool| ProjectAudioSnapshot {
+            mixed_lengths_ok: mixed,
+            tracks: vec![
+                snap_track(0, &a),
+                snap_track(1, &b),
+                snap_track(2, &missing),
+                snap_track(3, &c),
+            ],
+            master_gain_db: 0.0,
+            master_gain_automation: None,
+            corrections_disabled: false,
+            project_track_count: 4,
+        };
+        let (tx, _rx) = std::sync::mpsc::channel();
+
+        // Recording-centric: every readable take loads despite lengths.
+        let state = build_state(&mk_snap(true), &tx).expect("build");
+        let idxs: Vec<usize> = state.tracks.iter().map(|t| t.project_idx).collect();
+        assert_eq!(
+            idxs,
+            vec![0, 1, 3],
+            "missing file skipped, indices preserved"
+        );
+        let t3 = state
+            .track_by_project_idx(3)
+            .expect("project row 3 resolvable");
+        assert_eq!(t3.name, "t3");
+        assert_eq!(t3.frame_count, 96_000);
+        assert!(
+            state.track_by_project_idx(2).is_none(),
+            "skipped rows resolve to None, not a neighbour"
+        );
+        assert_eq!(
+            state.longest_frames, 96_000,
+            "transport spans the longest take"
+        );
+
+        // Stem project: the strict length rule still skips mismatches.
+        let strict = build_state(&mk_snap(false), &tx).expect("build");
+        let strict_idxs: Vec<usize> = strict.tracks.iter().map(|t| t.project_idx).collect();
+        assert_eq!(
+            strict_idxs,
+            vec![0],
+            "stem rule keeps only the reference length"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     fn make_wav_bytes(samples: &[i16], rate: u32, channels: u16) -> Vec<u8> {
         let spec = WavSpec {
             channels,
@@ -1149,6 +1268,7 @@ mod tib_source_tests {
         }
 
         let snap = TrackAudioSnapshot {
+            project_idx: 0,
             source: AudioSource::TibRev {
                 db_path: path.clone(),
                 rev_id: rid,
@@ -1203,6 +1323,7 @@ mod tib_source_tests {
         }
 
         let snap = TrackAudioSnapshot {
+            project_idx: 0,
             source: AudioSource::TibRev {
                 db_path: path.clone(),
                 rev_id: rid,
@@ -1301,6 +1422,7 @@ mod tib_source_tests {
             let _db = TibDb::create(&path).unwrap();
         }
         let snap = TrackAudioSnapshot {
+            project_idx: 0,
             source: AudioSource::TibRev {
                 db_path: path.clone(),
                 rev_id: 99_999,

@@ -87,7 +87,7 @@ fn body(app: &mut TinyBoothApp, idx: usize, ui: &mut egui::Ui) {
 /// thread rebuilds its FilterChainStereo on the next callback.
 fn push_to_player(app: &mut TinyBoothApp, idx: usize, profile: Option<Profile>) {
     if let Some(player) = app.player.as_ref() {
-        if let Some(track) = player.state.tracks.get(idx) {
+        if let Some(track) = player.state.track_by_project_idx(idx) {
             track.set_correction(profile);
         }
     }
