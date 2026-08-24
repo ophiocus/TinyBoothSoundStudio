@@ -2746,7 +2746,14 @@ impl eframe::App for TinyBoothApp {
                     }
                     ui.separator();
                     if ui.button("Quit").clicked() {
-                        std::process::exit(0);
+                        // Close via the viewport so teardown matches the
+                        // window ✕ button: the runtime runs `on_exit`
+                        // (stopping any live take so the WAV header is
+                        // finalised, saving config) and Drop impls fire.
+                        // `process::exit(0)` skipped all of that — a
+                        // recording in progress lost its header and any
+                        // unsaved state was silently discarded.
+                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                     }
                 });
                 ui.menu_button("View", |ui| {

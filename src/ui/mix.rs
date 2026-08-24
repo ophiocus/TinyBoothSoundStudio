@@ -1039,6 +1039,17 @@ fn strip(app: &mut TinyBoothApp, ui: &mut egui::Ui, idx: usize, available_h: f32
                         );
                         if resp.changed() {
                             track.set_gain_db(gain);
+                            // Write through to the project (same as the
+                            // polarity button above): the player atomic
+                            // alone dies with the next rebuild — device
+                            // change, track add, reopen — and Save/Export
+                            // read `project.tracks[..].gain_db`, so
+                            // without this the user's balance work was
+                            // silently lost unless automation was armed.
+                            if let Some(t) = app.project.tracks.get_mut(idx) {
+                                t.gain_db = gain;
+                            }
+                            app.project_dirty = true;
                         }
                         draw_meter(ui, track.peak(), fader_h);
                     });
@@ -1051,7 +1062,6 @@ fn strip(app: &mut TinyBoothApp, ui: &mut egui::Ui, idx: usize, available_h: f32
                 });
             });
         });
-    let _ = app; // keep argument used for future expansion
     just_disarmed
 }
 

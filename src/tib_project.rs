@@ -165,9 +165,18 @@ pub fn save_metadata(project: &Project, conn: &Connection) -> Result<()> {
 
 /// Delete tracks/stems no longer present in the in-memory project. Their
 /// revisions + config_revs cascade away (ON DELETE CASCADE).
-fn prune_removed(conn: &Connection, keep_tracks: &[String], keep_stems: &[String]) -> Result<()> {
+///
+/// Only rows with `loaded_in_mix = 1` are candidates: those are the mix
+/// lanes the in-memory `Project` owns, so "absent from `project.tracks`"
+/// means the user removed them. Rows with `loaded_in_mix = 0` — the
+/// reserved `__mixdown__` track above all — are container-managed and are
+/// *never* in `project.tracks`, so treating their absence as a deletion
+/// destroyed the mixdown audio on the first routine save of a migrated
+/// `.tib` (the cascade took the BLOB with the row). Stems are pruned only
+/// once no surviving track references them, for the same reason.
+fn prune_removed(conn: &Connection, keep_tracks: &[String], _keep_stems: &[String]) -> Result<()> {
     let existing_tracks: Vec<String> = {
-        let mut s = conn.prepare("SELECT id FROM tracks")?;
+        let mut s = conn.prepare("SELECT id FROM tracks WHERE loaded_in_mix = 1")?;
         let rows = s.query_map([], |r| r.get::<_, String>(0))?;
         rows.collect::<rusqlite::Result<_>>()?
     };
@@ -176,16 +185,13 @@ fn prune_removed(conn: &Connection, keep_tracks: &[String], keep_stems: &[String
             conn.execute("DELETE FROM tracks WHERE id = ?1", params![id])?;
         }
     }
-    let existing_stems: Vec<String> = {
-        let mut s = conn.prepare("SELECT id FROM stems")?;
-        let rows = s.query_map([], |r| r.get::<_, String>(0))?;
-        rows.collect::<rusqlite::Result<_>>()?
-    };
-    for id in existing_stems {
-        if !keep_stems.contains(&id) {
-            conn.execute("DELETE FROM stems WHERE id = ?1", params![id])?;
-        }
-    }
+    // Orphaned stems only: a stem still referenced by any track (including
+    // container-managed ones) must survive, or the FK cascade would delete
+    // the referencing track right back.
+    conn.execute(
+        "DELETE FROM stems WHERE id NOT IN (SELECT DISTINCT stem_id FROM tracks)",
+        [],
+    )?;
     Ok(())
 }
 
@@ -708,6 +714,46 @@ mod tests {
         assert_eq!(loaded.suno_mixdown_path.as_deref(), Some(MIXDOWN_TRACK_ID));
         let mix = db.read_current_audio(MIXDOWN_TRACK_ID).unwrap();
         assert_eq!(mix, std::fs::read(dir.join("tracks/mixdown.wav")).unwrap());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Regression: the first routine save after loading a migrated `.tib`
+    /// must NOT delete the mixdown. The mixdown lives under the reserved
+    /// `__mixdown__` track with `loaded_in_mix = 0`, so it is never in
+    /// `project.tracks` — and `prune_removed` used to treat "not in the
+    /// in-memory project" as "user deleted it", cascading away the audio
+    /// BLOB on every save.
+    #[test]
+    fn save_after_load_preserves_the_mixdown() {
+        let dir = std::env::temp_dir().join(format!("tbss-savemix-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("tracks")).unwrap();
+        write_wav(&dir.join("tracks/track-001.wav"), 48_000, true);
+        write_wav(&dir.join("tracks/mixdown.wav"), 48_000, true);
+
+        let mut proj = Project::new("SaveMix", dir.clone());
+        proj.tracks
+            .push(folder_track("track-001", "tracks/track-001.wav", "Vocals"));
+        proj.suno_mixdown_path = Some("tracks/mixdown.wav".into());
+
+        let tib = dir.join("savemix.tib");
+        migrate_folder_to_tib(&proj, &tib).unwrap();
+
+        // Load → ordinary save, exactly what the app does on any edit.
+        let db = TibDb::open(&tib).unwrap();
+        let loaded = load_project(&db, tib.clone()).unwrap();
+        save_metadata(&loaded, db.conn()).unwrap();
+
+        // The mixdown row and its audio must survive the save.
+        let mix = db
+            .read_current_audio(MIXDOWN_TRACK_ID)
+            .expect("mixdown audio must survive a routine save");
+        assert_eq!(mix, std::fs::read(dir.join("tracks/mixdown.wav")).unwrap());
+
+        // And a second save (idempotence) must not touch it either.
+        save_metadata(&loaded, db.conn()).unwrap();
+        assert!(db.read_current_audio(MIXDOWN_TRACK_ID).is_ok());
 
         let _ = std::fs::remove_dir_all(&dir);
     }
