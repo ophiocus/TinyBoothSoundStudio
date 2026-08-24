@@ -112,6 +112,76 @@ fn decode_via_ffmpeg(path: &Path) -> Result<(Vec<f32>, u32)> {
     Ok((samples, ANALYSIS_SR))
 }
 
+/// Decode any hound-readable WAV to interleaved i16 — the playback/waveform
+/// currency of the app. Returns `(spec, samples, frame_count)`.
+///
+/// Generic over `Read` because half the callers feed an in-memory
+/// `Cursor<Vec<u8>>` (`.tib` BLOBs), not a file.
+///
+/// This replaces four copy-pasted decode ladders (player, record-tab
+/// thumbnails, crossfade loader, album clips) that all **clamped** raw
+/// 24/32-bit integer samples into i16 range instead of scaling them — a
+/// 24-bit sample at −40 dBFS is ±84k, so everything above ~−48 dBFS
+/// clamped to full scale and played back as a square wave. Here the value
+/// is shifted by the actual bit depth (arithmetic shift, sign-correct),
+/// and sub-16-bit files are shifted up symmetrically.
+pub fn decode_wav_i16<R: std::io::Read>(
+    mut reader: hound::WavReader<R>,
+) -> Result<(hound::WavSpec, Vec<i16>, u64)> {
+    let spec = reader.spec();
+    let frames = reader.duration() as u64;
+    let bits = spec.bits_per_sample;
+    let samples: Vec<i16> = match spec.sample_format {
+        hound::SampleFormat::Int if bits <= 16 => {
+            let up = 16 - bits;
+            reader
+                .samples::<i16>()
+                .filter_map(Result::ok)
+                .map(|s| s << up)
+                .collect()
+        }
+        hound::SampleFormat::Int => {
+            let down = (bits - 16) as u32;
+            reader
+                .samples::<i32>()
+                .filter_map(Result::ok)
+                .map(|s| (s >> down) as i16)
+                .collect()
+        }
+        hound::SampleFormat::Float => reader
+            .samples::<f32>()
+            .filter_map(Result::ok)
+            .map(|s| (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16)
+            .collect(),
+    };
+    Ok((spec, samples, frames))
+}
+
+/// Expand interleaved i16 (any channel count) to interleaved stereo f32 in
+/// `[-1, 1]`: channel 0 → L, channel 1 (or a mono duplicate) → R, extra
+/// channels dropped. Shared by the crossfade and album loaders, which both
+/// hand-rolled this loop.
+pub fn wav_i16_to_stereo_f32(samples: &[i16], channels: usize, frames: usize) -> Vec<f32> {
+    let ch = channels.max(1);
+    let denom = i16::MAX as f32;
+    let mut stereo = Vec::with_capacity(frames * 2);
+    for f in 0..frames {
+        let base = f * ch;
+        if base + ch > samples.len() {
+            break;
+        }
+        let l = samples[base] as f32 / denom;
+        let r = if ch >= 2 {
+            samples[base + 1] as f32 / denom
+        } else {
+            l
+        };
+        stereo.push(l);
+        stereo.push(r);
+    }
+    stereo
+}
+
 /// Reinterpret a little-endian `f32` byte stream as samples. A trailing partial
 /// frame (a truncated pipe) is dropped rather than producing a garbage sample.
 fn f32le_to_samples(bytes: &[u8]) -> Vec<f32> {
@@ -200,6 +270,54 @@ mod tests {
         assert_eq!(downmix(&inter, 2), vec![0.0, 0.0]);
         // Mono passes through untouched.
         assert_eq!(downmix(&[0.25, -0.5], 1), vec![0.25, -0.5]);
+    }
+
+    /// 24-bit samples must be *scaled* to i16, not clamped. Under the old
+    /// per-site copies a −20 dBFS 24-bit sine (peak ±838,860) clamped to
+    /// ±32,767 — full scale, i.e. a square wave. Correct scaling lands it
+    /// at ~±3,277.
+    #[test]
+    fn decode_scales_24bit_instead_of_clamping() {
+        let p = scratch("s24.wav");
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 44_100,
+            bits_per_sample: 24,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut w = hound::WavWriter::create(&p, spec).unwrap();
+        let peak_24 = (0.1 * (1i32 << 23) as f32) as i32; // −20 dBFS
+        for i in 0..4410 {
+            let t = i as f32 / 44_100.0;
+            let v = ((std::f32::consts::TAU * 440.0 * t).sin() * peak_24 as f32) as i32;
+            w.write_sample(v).unwrap();
+        }
+        w.finalize().unwrap();
+
+        let reader = hound::WavReader::open(&p).unwrap();
+        let (spec, samples, frames) = decode_wav_i16(reader).unwrap();
+        assert_eq!(spec.bits_per_sample, 24);
+        assert_eq!(frames, 4410);
+        let peak = samples.iter().map(|s| s.unsigned_abs()).max().unwrap();
+        let expected = (peak_24 >> 8) as u16;
+        assert!(
+            (peak as i32 - expected as i32).abs() < 64,
+            "peak {peak} should be ≈{expected} (scaled), not 32767 (clamped)"
+        );
+    }
+
+    #[test]
+    fn stereo_expansion_duplicates_mono_and_drops_extras() {
+        // Mono duplicates into both channels.
+        let mono = [16384i16, -16384];
+        let st = wav_i16_to_stereo_f32(&mono, 1, 2);
+        assert_eq!(st.len(), 4);
+        assert!((st[0] - st[1]).abs() < 1e-6);
+        // 3-channel keeps ch0/ch1, drops ch2.
+        let tri = [100i16, 200, 300, 400, 500, 600];
+        let st = wav_i16_to_stereo_f32(&tri, 3, 2);
+        assert_eq!(st.len(), 4);
+        assert!((st[2] * i16::MAX as f32 - 400.0).abs() < 1.0);
     }
 
     #[test]

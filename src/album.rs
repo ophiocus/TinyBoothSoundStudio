@@ -122,43 +122,8 @@ fn decode_clip_source(path: &Path) -> Result<(Vec<f32>, u32)> {
     let spec = reader.spec();
     let channels = spec.channels.max(1) as usize;
     let frames = reader.duration() as usize;
-    let samples_i16: Vec<i16> = match spec.sample_format {
-        hound::SampleFormat::Int => {
-            if spec.bits_per_sample == 16 {
-                reader
-                    .into_samples::<i16>()
-                    .filter_map(|r| r.ok())
-                    .collect()
-            } else {
-                reader
-                    .into_samples::<i32>()
-                    .filter_map(|r| r.ok())
-                    .map(|s| s.clamp(i16::MIN as i32, i16::MAX as i32) as i16)
-                    .collect()
-            }
-        }
-        hound::SampleFormat::Float => reader
-            .into_samples::<f32>()
-            .filter_map(|r| r.ok())
-            .map(|s| (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16)
-            .collect(),
-    };
-    let denom = i16::MAX as f32;
-    let mut stereo = Vec::with_capacity(frames * 2);
-    for f in 0..frames {
-        let base = f * channels;
-        if base + channels > samples_i16.len() {
-            break;
-        }
-        let l = samples_i16[base] as f32 / denom;
-        let r = if channels >= 2 {
-            samples_i16[base + 1] as f32 / denom
-        } else {
-            l
-        };
-        stereo.push(l);
-        stereo.push(r);
-    }
+    let (_, samples_i16, _) = crate::audiodecode::decode_wav_i16(reader)?;
+    let stereo = crate::audiodecode::wav_i16_to_stereo_f32(&samples_i16, channels, frames);
     Ok((stereo, spec.sample_rate))
 }
 

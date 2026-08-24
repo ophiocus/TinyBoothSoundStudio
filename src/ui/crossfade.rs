@@ -1234,45 +1234,8 @@ fn decode_wav_reader_as_stereo<R: std::io::Read>(
     let channels = spec.channels.max(1);
     let sample_rate = spec.sample_rate;
     let frames = reader.duration() as usize;
-    // Decode to i16 then scale, mirroring the player's tolerance for
-    // 16/24-bit int and float.
-    let samples_i16: Vec<i16> = match spec.sample_format {
-        hound::SampleFormat::Int => {
-            if spec.bits_per_sample == 16 {
-                reader
-                    .into_samples::<i16>()
-                    .filter_map(|r| r.ok())
-                    .collect()
-            } else {
-                reader
-                    .into_samples::<i32>()
-                    .filter_map(|r| r.ok())
-                    .map(|s| s.clamp(i16::MIN as i32, i16::MAX as i32) as i16)
-                    .collect()
-            }
-        }
-        hound::SampleFormat::Float => reader
-            .into_samples::<f32>()
-            .filter_map(|r| r.ok())
-            .map(|s| (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16)
-            .collect(),
-    };
-    let denom = i16::MAX as f32;
-    let mut stereo = Vec::with_capacity(frames * 2);
-    for f in 0..frames {
-        let base = f * channels as usize;
-        if base + (channels as usize) > samples_i16.len() {
-            break;
-        }
-        let l = samples_i16[base] as f32 / denom;
-        let r = if channels >= 2 {
-            samples_i16[base + 1] as f32 / denom
-        } else {
-            l
-        };
-        stereo.push(l);
-        stereo.push(r);
-    }
+    let (_, samples_i16, _) = crate::audiodecode::decode_wav_i16(reader)?;
+    let stereo = crate::audiodecode::wav_i16_to_stereo_f32(&samples_i16, channels as usize, frames);
     let duration_secs = frames as f32 / sample_rate.max(1) as f32;
     let peaks = compute_peaks(&stereo, 2);
     Ok(LoadedCrossfadeTrack {

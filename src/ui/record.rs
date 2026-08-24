@@ -558,30 +558,7 @@ fn compute_wav_thumb(path: &Path) -> Option<CachedThumb> {
         });
     }
 
-    // Read into i16-equivalent. Mirrors player::load_track_play / Trim's
-    // crop_wav_bytes int/float branching — same decisions, narrower
-    // output (we only need amplitude per sample for the peak compute).
-    let samples: Vec<i16> = match spec.sample_format {
-        hound::SampleFormat::Int => {
-            if spec.bits_per_sample == 16 {
-                reader
-                    .into_samples::<i16>()
-                    .filter_map(|r| r.ok())
-                    .collect()
-            } else {
-                reader
-                    .into_samples::<i32>()
-                    .filter_map(|r| r.ok())
-                    .map(|s| s.clamp(i16::MIN as i32, i16::MAX as i32) as i16)
-                    .collect()
-            }
-        }
-        hound::SampleFormat::Float => reader
-            .into_samples::<f32>()
-            .filter_map(|r| r.ok())
-            .map(|s| (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16)
-            .collect(),
-    };
+    let (_, samples, _) = crate::audiodecode::decode_wav_i16(reader).ok()?;
 
     let frames = samples.len() / channels;
     let frames_per_bin = frames.div_ceil(THUMB_BINS).max(1);

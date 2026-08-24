@@ -681,32 +681,9 @@ fn load_track_play(t: &TrackAudioSnapshot) -> Result<TrackPlay> {
 /// reads. Shared by the file-on-disk path (folder projects) and the
 /// in-memory `Cursor<Vec<u8>>` path (.tib BLOBs). Returns the spec,
 /// the decoded samples, and the frame count.
-fn decode_wav<R: Read>(mut reader: hound::WavReader<R>) -> Result<(hound::WavSpec, Vec<i16>, u64)> {
-    let spec = reader.spec();
-    let frame_count = (reader.duration() as u64).max(1);
-
-    // Read everything as i16. hound's into_samples::<i16>() works for
-    // 16-bit Int files; Suno occasionally exports 24-bit which we
-    // currently downsize via i32::clamp(i16). This is fine for playback.
-    let samples: Vec<i16> = match spec.sample_format {
-        hound::SampleFormat::Int => {
-            if spec.bits_per_sample == 16 {
-                reader.samples::<i16>().filter_map(|r| r.ok()).collect()
-            } else {
-                reader
-                    .samples::<i32>()
-                    .filter_map(|r| r.ok())
-                    .map(|s| s.clamp(i16::MIN as i32, i16::MAX as i32) as i16)
-                    .collect()
-            }
-        }
-        hound::SampleFormat::Float => reader
-            .samples::<f32>()
-            .filter_map(|r| r.ok())
-            .map(|s| (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16)
-            .collect(),
-    };
-    Ok((spec, samples, frame_count))
+fn decode_wav<R: Read>(reader: hound::WavReader<R>) -> Result<(hound::WavSpec, Vec<i16>, u64)> {
+    let (spec, samples, frames) = crate::audiodecode::decode_wav_i16(reader)?;
+    Ok((spec, samples, frames.max(1)))
 }
 
 /// Abs-max per bin across however many channels the file has.
