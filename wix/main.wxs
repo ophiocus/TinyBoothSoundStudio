@@ -93,6 +93,29 @@
                         </Component>
                     </Directory>
 
+                    <!--
+                      The Start menu shortcut is what puts the app into Start > All apps,
+                      where it can be pinned and where people look for installed software.
+                      A Desktop shortcut and a PATH entry place nothing there.
+                      (Retrofitted from rust-skeleton; identity values cloned from this
+                      file's own DesktopShortcut, GUID minted fresh for this app.)
+                    -->
+                    <Component Id='StartMenuShortcut' Guid='FC2DADB1-3C61-41D0-911E-2D8D8B2F8E8C'>
+                        <Shortcut Id='StartMenuShortcut'
+                            Name='TinyBooth Sound Studio'
+                            Description='Channel recorder, visualizer, and TinyBooth project exporter'
+                            Directory='ProgramMenuFolder'
+                            Target='[Bin]tinybooth-sound-studio.exe'
+                            WorkingDirectory='Bin'
+                            Icon='ProductICO' />
+                        <!-- ICE43: a non-advertised shortcut needs an HKCU keypath. -->
+                        <RegistryValue Root='HKCU'
+                            Key='Software\ophiocus\TinyBooth Sound Studio'
+                            Name='StartMenuShortcut'
+                            Type='integer'
+                            Value='1'
+                            KeyPath='yes' />
+                    </Component>
                     <Component Id='DesktopShortcut' Guid='374063C9-D0B6-4E16-A3EB-BA80A6D47E8B'>
                         <Shortcut Id='DesktopShortcut'
                             Name='TinyBooth Sound Studio'
@@ -110,6 +133,7 @@
                     </Component>
                 </Directory>
             </Directory>
+            <Directory Id='ProgramMenuFolder' Name='Programs' />
             <Directory Id='DesktopFolder' Name='Desktop' />
         </Directory>
 
@@ -124,6 +148,7 @@
             Absent='disallow'>
             <ComponentRef Id='binary0'/>
             <ComponentRef Id='binary_ffmpeg'/>
+            <ComponentRef Id='StartMenuShortcut'/>
             <ComponentRef Id='DesktopShortcut'/>
 
             <Feature
